@@ -60,18 +60,24 @@ def find_game_dir(profile: dict) -> str:
 
 def apply_depth_settings(game_dir: str, profile: dict, dry_run: bool) -> None:
     ini_path = os.path.join(game_dir, "ReShade.ini")
-    settings = profile.get("reshade", {})
+    depth_settings = profile.get("reshade", {})
+    shader_defaults = profile.get("shader_defaults", {})
 
     lines: list[str] = []
     if os.path.exists(ini_path):
         with open(ini_path) as f:
             lines = f.readlines()
 
-    # Strip any existing PREPROCESSOR keys, then append fresh block
+    # Strip any existing PREPROCESSOR / Glassless3D.fx keys, then append fresh blocks
+    all_keys = set(depth_settings) | set(shader_defaults)
     kept = [l for l in lines
-            if not any(l.startswith(k) for k in settings)
-            and not l.strip() == "[PREPROCESSOR]"]
-    block = ["[PREPROCESSOR]\n"] + [f"{k}={v}\n" for k, v in settings.items()]
+            if not any(l.startswith(k) for k in all_keys)
+            and l.strip() not in ("[PREPROCESSOR]", "[Glassless3D.fx]")]
+    block: list[str] = []
+    if depth_settings:
+        block += ["[PREPROCESSOR]\n"] + [f"{k}={v}\n" for k, v in depth_settings.items()]
+    if shader_defaults:
+        block += ["[Glassless3D.fx]\n"] + [f"{k}={v}\n" for k, v in shader_defaults.items()]
 
     if dry_run:
         print(f"  [dry-run] Would write to {ini_path}:")
@@ -80,7 +86,7 @@ def apply_depth_settings(game_dir: str, profile: dict, dry_run: bool) -> None:
     else:
         with open(ini_path, "w") as f:
             f.writelines(kept + block)
-        print(f"  ✓ Updated {ini_path}")
+        print(f"  [OK] Updated {ini_path}")
 
 
 def install(game_dir: str, profile: dict, dry_run: bool) -> None:
@@ -95,7 +101,7 @@ def install(game_dir: str, profile: dict, dry_run: bool) -> None:
         print(f"  [dry-run] Would copy {ADDON_PATH} → {dst_addon}")
     else:
         shutil.copy2(ADDON_PATH, dst_addon)
-        print(f"  ✓ Copied addon → {dst_addon}")
+        print(f"  [OK] Copied addon → {dst_addon}")
 
     # Shaders
     shader_dst = os.path.join(game_dir, "reshade-shaders", "Shaders")
@@ -108,7 +114,7 @@ def install(game_dir: str, profile: dict, dry_run: bool) -> None:
             print(f"  [dry-run] Would copy {src} → {dst}")
         else:
             shutil.copy2(src, dst)
-            print(f"  ✓ Copied {fname}")
+            print(f"  [OK] Copied {fname}")
 
     apply_depth_settings(game_dir, profile, dry_run)
 

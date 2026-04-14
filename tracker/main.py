@@ -67,8 +67,13 @@ class TrackingLoop:
 
 
 def _load_config(path: str = "config.yaml") -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        raise SystemExit(f"ERROR: Config file not found: {path}")
+    except yaml.YAMLError as e:
+        raise SystemExit(f"ERROR: Invalid YAML in {path}: {e}")
 
 
 def main() -> None:
@@ -81,11 +86,6 @@ def main() -> None:
     scr = cfg["screen"]
     trk = cfg["tracking"]
 
-    tracker = FaceTracker(
-        real_ipd_cm=trk["ipd_cm"],
-        screen_width_cm=scr["width_cm"],
-        screen_height_cm=scr["height_cm"],
-    )
     smoother = HeadSmoother(
         process_noise=trk["smoothing_q"],
         measurement_noise=trk["smoothing_r"],
@@ -95,7 +95,11 @@ def main() -> None:
     print("[G3D] Writing to FT_SharedMem (FreeTrack protocol)")
     print("[G3D] Press Ctrl+C to stop.")
 
-    with FreetracWriter() as writer:
+    with FaceTracker(
+        real_ipd_cm=trk["ipd_cm"],
+        screen_width_cm=scr["width_cm"],
+        screen_height_cm=scr["height_cm"],
+    ) as tracker, FreetracWriter() as writer:
         loop = TrackingLoop(
             tracker=tracker,
             writer=writer,
@@ -106,8 +110,6 @@ def main() -> None:
             loop.run(camera_index=cam["index"])
         except KeyboardInterrupt:
             print("\n[G3D] Stopped.")
-        finally:
-            tracker.close()
 
 
 if __name__ == "__main__":
