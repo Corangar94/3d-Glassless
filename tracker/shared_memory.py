@@ -1,6 +1,5 @@
 # tracker/shared_memory.py
 import ctypes
-import ctypes.wintypes
 import struct
 import time
 
@@ -50,9 +49,12 @@ class SharedMemoryWriter:
 
     def write(self, x: float, y: float, z: float) -> None:
         """Write head position to shared memory with a millisecond timestamp."""
+        view = self._view
+        if view is None:
+            raise RuntimeError("write() called after close()")
         ts = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
         data = struct.pack(STRUCT_FORMAT, x, y, z, ts)
-        ctypes.memmove(self._view, data, STRUCT_SIZE)
+        ctypes.memmove(view, data, STRUCT_SIZE)
 
     def close(self) -> None:
         """Release the shared memory mapping and handle."""

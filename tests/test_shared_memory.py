@@ -2,7 +2,6 @@
 import ctypes
 import struct
 
-import pytest
 from tracker.shared_memory import SharedMemoryWriter, STRUCT_FORMAT, STRUCT_SIZE
 
 

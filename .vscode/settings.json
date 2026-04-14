@@ -4,5 +4,8 @@
     "${workspaceFolder}",
     "${workspaceFolder}/.venv/Lib/site-packages"
   ],
-  "python.analysis.typeCheckingMode": "basic"
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none"
+  }
 }
