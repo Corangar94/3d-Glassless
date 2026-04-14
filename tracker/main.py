@@ -1,7 +1,7 @@
 # tracker/main.py
 import argparse
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import yaml
@@ -75,7 +75,7 @@ class TrackingLoop:
         """Return True to exit the loop. Base class never stops early."""
         return False
 
-    def _on_frame(self, frame: object) -> None:  # noqa: ARG002
+    def _on_frame(self, frame: Any) -> None:  # noqa: ARG002
         """Called with each captured frame before face detection."""
 
     def _on_position(self, x: float, y: float, z: float, status: str) -> None:  # noqa: ARG002

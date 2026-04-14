@@ -132,12 +132,12 @@ def test_tracking_loop_raises_on_camera_open_failure():
 
 
 def test_tracking_loop_calls_on_position_hook():
-    """_on_position is called once per frame with correct status strings."""
+    """_on_position is called once per frame with correct coordinates and status."""
     positions = []
 
     class RecordingLoop(TrackingLoop):
         def _on_position(self, x, y, z, status):
-            positions.append(status)
+            positions.append((x, y, z, status))
 
     mock_tracker = MagicMock()
     mock_tracker.process_frame.side_effect = [
@@ -158,5 +158,8 @@ def test_tracking_loop_calls_on_position_hook():
     with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap):
         loop.run(camera_index=0, max_frames=2)
 
-    assert positions[0] == "tracking"
-    assert positions[1] in ("hold", "paused")
+    assert positions[0][0] == pytest.approx(1.0)
+    assert positions[0][1] == pytest.approx(0.0)
+    assert positions[0][2] == pytest.approx(60.0)
+    assert positions[0][3] == "tracking"
+    assert positions[1][3] == "hold"
