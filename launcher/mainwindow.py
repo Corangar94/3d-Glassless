@@ -153,7 +153,6 @@ class MainWindow(QMainWindow):
 
     def _save_compact_pref(self) -> None:
         try:
-            import os
             with open(self._config_path) as f:
                 cfg = yaml.safe_load(f)
             cfg.setdefault("gui", {})["compact_mode"] = self._compact
@@ -172,11 +171,12 @@ class MainWindow(QMainWindow):
 
     def _start_tracking(self) -> None:
         cam_idx = self._config["camera"]["index"]
-        self._thread = TrackerThread(camera_index=cam_idx, config=self._config)
-        self._thread.position_updated.connect(self._on_position)
-        self._thread.frame_ready.connect(self._on_frame)
-        self._thread.status_changed.connect(self._on_status)
-        self._thread.start()
+        thread = TrackerThread(camera_index=cam_idx, config=self._config)
+        thread.position_updated.connect(self._on_position)
+        thread.frame_ready.connect(self._on_frame)
+        thread.status_changed.connect(self._on_status)
+        thread.start()
+        self._thread = thread
         self._action_btn.setText("■ STOP TRACKING")
         self._action_btn.setStyleSheet(
             "background:#e84040;color:#fff;font-weight:bold;"

@@ -1,5 +1,5 @@
 # tests/test_mainwindow.py
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from PySide6.QtCore import Qt
