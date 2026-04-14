@@ -5,6 +5,11 @@ class KalmanFilter1D:
     """Single-axis Kalman filter for smoothing noisy measurements."""
 
     def __init__(self, process_noise: float = 0.01, measurement_noise: float = 0.1):
+        if process_noise < 0 or measurement_noise <= 0:
+            raise ValueError(
+                f"Noise parameters must be non-negative (q) and positive (r); "
+                f"got q={process_noise}, r={measurement_noise}"
+            )
         self._q = process_noise      # process noise covariance
         self._r = measurement_noise  # measurement noise covariance
         self._x = 0.0                # state estimate
@@ -44,6 +49,7 @@ class HeadSmoother:
         self._kf_x = KalmanFilter1D(process_noise, measurement_noise)
         self._kf_y = KalmanFilter1D(process_noise, measurement_noise)
         self._kf_z = KalmanFilter1D(process_noise, measurement_noise)
+        self._kf_z.reset(60.0)  # seed Z at nominal head distance
 
     def update(self, x: float, y: float, z: float) -> tuple[float, float, float]:
         """Update all three axes with new measurements.

@@ -21,9 +21,10 @@ def test_head_smoother_three_axes():
     """HeadSmoother wraps three independent Kalman filters."""
     smoother = HeadSmoother(process_noise=0.01, measurement_noise=0.1)
     x, y, z = smoother.update(5.0, -3.0, 60.0)
-    assert isinstance(x, float)
-    assert isinstance(y, float)
-    assert isinstance(z, float)
+    # Values should be between 0 and the measurement (filter moves toward it)
+    assert 0.0 < x < 5.0
+    assert -3.0 < y < 0.0
+    assert z == 60.0  # Z seeded at 60.0, measurement is 60.0 → stays at 60.0
 
 def test_head_smoother_axes_independent():
     """Updating one axis should not affect others."""
@@ -32,3 +33,13 @@ def test_head_smoother_axes_independent():
         x, y, z = smoother.update(10.0, 0.0, 60.0)
     assert abs(x - 10.0) < 0.1
     assert abs(y - 0.0) < 0.1
+    assert abs(z - 60.0) < 0.1
+
+
+def test_kalman_rejects_invalid_noise():
+    """Zero or negative noise parameters should raise ValueError."""
+    import pytest
+    with pytest.raises(ValueError):
+        KalmanFilter1D(process_noise=0.01, measurement_noise=0.0)
+    with pytest.raises(ValueError):
+        KalmanFilter1D(process_noise=-0.01, measurement_noise=0.1)
