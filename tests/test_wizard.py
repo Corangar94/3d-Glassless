@@ -79,7 +79,6 @@ def test_install_page_shows_error_on_install_failure(qapp, tmp_path):
 
     def failing_install_steps(gd, profile_name="wow"):
         raise InstallError("Copying ReShade", "file not found")
-        yield  # make it a generator
 
     with patch("launcher.wizard.install_steps", side_effect=failing_install_steps):
         page = InstallPage()
