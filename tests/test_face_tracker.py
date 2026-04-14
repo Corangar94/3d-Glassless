@@ -43,13 +43,16 @@ def test_estimate_xy_right_of_centre():
 
 def test_face_tracker_init():
     """FaceTracker constructs without error and is a context manager."""
+    import os
+    model_path = os.path.join(os.path.dirname(__file__), '..', 'models', 'face_landmarker.task')
     with FaceTracker(
         real_ipd_cm=6.3,
         screen_width_cm=59.8,
         screen_height_cm=33.6,
         camera_fov_deg=60.0,
+        model_path=model_path,
     ) as tracker:
-        assert tracker._face_mesh is not None
+        assert tracker._landmarker is not None
 
 
 def test_estimate_xy_above_centre_gives_positive_y():

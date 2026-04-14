@@ -1,15 +1,21 @@
 # tracker/face_tracker.py
 import math
+import os
 from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
 import numpy as np
+from mediapipe import tasks
 
-# MediaPipe landmark indices (with refine_landmarks=True, 478 total)
+# MediaPipe landmark indices (478 total with face landmarker v2)
 _NOSE_TIP = 1
-_LEFT_IRIS_CENTER = 468   # available only with refine_landmarks=True
-_RIGHT_IRIS_CENTER = 473  # available only with refine_landmarks=True
+_LEFT_IRIS_CENTER = 468   # iris landmarks
+_RIGHT_IRIS_CENTER = 473
+
+_DEFAULT_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "models", "face_landmarker.task"
+)
 
 
 @dataclass(frozen=True)
@@ -43,7 +49,7 @@ def estimate_xy_cm(
 
 
 class FaceTracker:
-    """Wraps MediaPipe FaceMesh and converts landmarks to head pose in cm."""
+    """Wraps MediaPipe FaceLandmarker and converts landmarks to head pose in cm."""
 
     def __init__(
         self,
@@ -51,6 +57,7 @@ class FaceTracker:
         screen_width_cm: float,
         screen_height_cm: float,
         camera_fov_deg: float = 60.0,
+        model_path: str = _DEFAULT_MODEL_PATH,
     ):
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
@@ -58,23 +65,26 @@ class FaceTracker:
         self._screen_width_cm = screen_width_cm
         self._screen_height_cm = screen_height_cm
         self._camera_fov_deg = camera_fov_deg
-        self._face_mesh = mp.solutions.face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,   # enables iris detection (landmarks 468-477)
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+        options = tasks.vision.FaceLandmarkerOptions(
+            base_options=tasks.BaseOptions(model_asset_path=model_path),
+            running_mode=tasks.vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
         )
+        self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
 
     def process_frame(self, frame_bgr: np.ndarray) -> HeadPosition | None:
         """Process one BGR camera frame. Returns None if no face detected."""
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        result = self._face_mesh.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        result = self._landmarker.detect(mp_image)
 
-        if not result.multi_face_landmarks:
+        if not result.face_landmarks:
             return None
 
-        lm = result.multi_face_landmarks[0].landmark
+        lm = result.face_landmarks[0]  # list of NormalizedLandmark
 
         # Iris centres in pixel space
         left_iris = np.array([lm[_LEFT_IRIS_CENTER].x * w,
@@ -91,7 +101,7 @@ class FaceTracker:
         return HeadPosition(x_cm=x_cm, y_cm=y_cm, z_cm=z_cm)
 
     def close(self) -> None:
-        self._face_mesh.close()
+        self._landmarker.close()
 
     def __enter__(self) -> "FaceTracker":
         return self

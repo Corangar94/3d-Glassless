@@ -13,3 +13,4 @@ vendor/
 .venv/
 *.zip
 *.exe
+models/
