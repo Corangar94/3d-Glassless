@@ -1,7 +1,6 @@
 # tracker/face_tracker.py
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import cv2
 import mediapipe as mp
@@ -13,7 +12,7 @@ _LEFT_IRIS_CENTER = 468   # available only with refine_landmarks=True
 _RIGHT_IRIS_CENTER = 473  # available only with refine_landmarks=True
 
 
-@dataclass
+@dataclass(frozen=True)
 class HeadPosition:
     x_cm: float   # right = positive, left = negative
     y_cm: float   # up = positive, down = negative (flipped from image coords)
@@ -53,6 +52,8 @@ class FaceTracker:
         screen_height_cm: float,
         camera_fov_deg: float = 60.0,
     ):
+        if not (0.0 < camera_fov_deg < 180.0):
+            raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
         self._real_ipd_cm = real_ipd_cm
         self._screen_width_cm = screen_width_cm
         self._screen_height_cm = screen_height_cm
@@ -64,7 +65,7 @@ class FaceTracker:
             min_tracking_confidence=0.5,
         )
 
-    def process_frame(self, frame_bgr: np.ndarray) -> Optional[HeadPosition]:
+    def process_frame(self, frame_bgr: np.ndarray) -> HeadPosition | None:
         """Process one BGR camera frame. Returns None if no face detected."""
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -91,3 +92,9 @@ class FaceTracker:
 
     def close(self) -> None:
         self._face_mesh.close()
+
+    def __enter__(self) -> "FaceTracker":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
