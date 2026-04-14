@@ -116,7 +116,7 @@ class InstallPage(QWizardPage):
 
         self._status_label = QLabel("Preparing…")
         self._progress = QProgressBar()
-        self._progress.setRange(0, 4)
+        self._progress.setRange(0, 0)
         self._progress.setValue(0)
         self._error_label = QLabel("")
         self._error_label.setStyleSheet("color: red;")
@@ -131,6 +131,8 @@ class InstallPage(QWizardPage):
         self._game_dir: str = ""
 
     def initializePage(self) -> None:
+        if self._worker and self._worker.isRunning():
+            return  # already running, do not restart
         self._game_dir = self.field("game_dir")
         self._complete = False
         self._error_label.setText("")
@@ -143,9 +145,12 @@ class InstallPage(QWizardPage):
 
     def _run_install(self) -> None:
         """Synchronous install used in tests (bypasses QThread)."""
-        for step_name in install_steps(self._game_dir):
-            self._on_step(step_name)
-        self._on_done()
+        try:
+            for step_name in install_steps(self._game_dir):
+                self._on_step(step_name)
+            self._on_done()
+        except InstallError as e:
+            self._on_failed(e.step, e.reason)
 
     def _on_step(self, name: str) -> None:
         self._status_label.setText(name)
@@ -155,7 +160,12 @@ class InstallPage(QWizardPage):
         self._complete = True
         self.completeChanged.emit()
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(500, lambda: self.wizard().next() if self.wizard() else None)
+        QTimer.singleShot(
+            500,
+            lambda: self.wizard().next()
+            if self.wizard() and self.wizard().currentPage() is self
+            else None,
+        )
 
     def _on_failed(self, step: str, reason: str) -> None:
         self._error_label.setText(f"Failed at '{step}': {reason}")

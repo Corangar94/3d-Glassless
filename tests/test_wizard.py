@@ -70,3 +70,21 @@ def test_install_page_calls_install_steps(qapp, tmp_path):
         page._run_install()
 
     assert steps_yielded == [game_dir]
+    assert page.isComplete()
+
+
+def test_install_page_shows_error_on_install_failure(qapp, tmp_path):
+    """InstallPage._run_install populates the error label on InstallError."""
+    from launcher.reshade_install import InstallError
+
+    def failing_install_steps(gd, profile_name="wow"):
+        raise InstallError("Copying ReShade", "file not found")
+        yield  # make it a generator
+
+    with patch("launcher.wizard.install_steps", side_effect=failing_install_steps):
+        page = InstallPage()
+        page._game_dir = str(tmp_path)
+        page._run_install()
+
+    assert not page.isComplete()
+    assert "Copying ReShade" in page._error_label.text()
