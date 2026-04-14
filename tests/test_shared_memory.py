@@ -26,10 +26,12 @@ def test_writer_write_and_read_back():
     try:
         writer.write(x=1.5, y=-2.0, z=55.0)
         kernel32 = ctypes.windll.kernel32
+        kernel32.OpenFileMappingW.restype = ctypes.c_void_p
+        kernel32.MapViewOfFile.restype = ctypes.c_void_p
         h = kernel32.OpenFileMappingW(0x0004, False, "G3D_TEST")
         assert h, "Could not open shared memory for reading"
         view = kernel32.MapViewOfFile(h, 0x0004, 0, 0, STRUCT_SIZE)
-        assert view
+        assert view, "Could not map view of shared memory"
         raw = (ctypes.c_char * STRUCT_SIZE).from_address(view)
         x, y, z, _ = struct.unpack(STRUCT_FORMAT, bytes(raw))
         kernel32.UnmapViewOfFile(view)
@@ -46,8 +48,12 @@ def test_writer_default_on_init():
     writer = SharedMemoryWriter(name="G3D_DEFAULT_TEST")
     try:
         kernel32 = ctypes.windll.kernel32
+        kernel32.OpenFileMappingW.restype = ctypes.c_void_p
+        kernel32.MapViewOfFile.restype = ctypes.c_void_p
         h = kernel32.OpenFileMappingW(0x0004, False, "G3D_DEFAULT_TEST")
+        assert h, "Could not open shared memory for reading"
         view = kernel32.MapViewOfFile(h, 0x0004, 0, 0, STRUCT_SIZE)
+        assert view, "Could not map view of shared memory"
         raw = (ctypes.c_char * STRUCT_SIZE).from_address(view)
         x, y, z, _ = struct.unpack(STRUCT_FORMAT, bytes(raw))
         kernel32.UnmapViewOfFile(view)
