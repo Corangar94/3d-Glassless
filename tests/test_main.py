@@ -1,5 +1,4 @@
 # tests/test_main.py
-import threading
 from unittest.mock import MagicMock, patch
 
 from tracker.main import TrackingLoop
