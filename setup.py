@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+# setup.py
+# Copies Glassless3D.addon + shaders into a game directory,
+# and updates ReShade.ini with the correct depth buffer settings.
+#
+# Usage:
+#   python setup.py --game wow
+#   python setup.py --game-dir "C:\Games\MyGame" --profile default
+#   python setup.py --game wow --dry-run
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import winreg
+
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
+SHADERS_DIR  = os.path.join(BASE_DIR, "shaders")
+ADDON_PATH   = os.path.join(BASE_DIR, "Glassless3D.addon")
+
+RESHADE_URL = "https://reshade.me/downloads/ReShade_Setup_5.9.2.exe"
+
+
+def load_profile(name: str) -> dict:
+    path = os.path.join(PROFILES_DIR, f"{name}.json")
+    if not os.path.exists(path):
+        sys.exit(f"ERROR: Profile '{name}' not found at {path}")
+    with open(path) as f:
+        return json.load(f)
+
+
+def find_game_dir(profile: dict) -> str:
+    setup = profile.get("setup", {})
+
+    reg_key = setup.get("registry_key", "")
+    reg_val = setup.get("registry_value", "")
+    if reg_key and reg_val:
+        try:
+            root_str, subkey = reg_key.split("\\", 1)
+            root = {"HKLM": winreg.HKEY_LOCAL_MACHINE,
+                    "HKCU": winreg.HKEY_CURRENT_USER}[root_str]
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, reg_val)
+                if os.path.isdir(value):
+                    return value
+        except (FileNotFoundError, OSError, KeyError):
+            pass
+
+    for path in setup.get("common_paths", []):
+        if os.path.isdir(path):
+            return path
+
+    sys.exit(
+        "ERROR: Could not find game directory automatically.\n"
+        "Use --game-dir to specify it manually."
+    )
+
+
+def apply_depth_settings(game_dir: str, profile: dict, dry_run: bool) -> None:
+    ini_path = os.path.join(game_dir, "ReShade.ini")
+    settings = profile.get("reshade", {})
+
+    lines: list[str] = []
+    if os.path.exists(ini_path):
+        with open(ini_path) as f:
+            lines = f.readlines()
+
+    # Strip any existing PREPROCESSOR keys, then append fresh block
+    kept = [l for l in lines
+            if not any(l.startswith(k) for k in settings)
+            and not l.strip() == "[PREPROCESSOR]"]
+    block = ["[PREPROCESSOR]\n"] + [f"{k}={v}\n" for k, v in settings.items()]
+
+    if dry_run:
+        print(f"  [dry-run] Would write to {ini_path}:")
+        for line in block:
+            print(f"    {line}", end="")
+    else:
+        with open(ini_path, "w") as f:
+            f.writelines(kept + block)
+        print(f"  ✓ Updated {ini_path}")
+
+
+def install(game_dir: str, profile: dict, dry_run: bool) -> None:
+    print(f"\nInstalling to: {game_dir}")
+    print(f"Profile:       {profile['name']}")
+    if dry_run:
+        print("(DRY RUN — no files written)\n")
+
+    # Addon
+    dst_addon = os.path.join(game_dir, "Glassless3D.addon")
+    if dry_run:
+        print(f"  [dry-run] Would copy {ADDON_PATH} → {dst_addon}")
+    else:
+        shutil.copy2(ADDON_PATH, dst_addon)
+        print(f"  ✓ Copied addon → {dst_addon}")
+
+    # Shaders
+    shader_dst = os.path.join(game_dir, "reshade-shaders", "Shaders")
+    if not dry_run:
+        os.makedirs(shader_dst, exist_ok=True)
+    for fname in ["Glassless3D.fx", "Glassless3D.fxh"]:
+        src = os.path.join(SHADERS_DIR, fname)
+        dst = os.path.join(shader_dst, fname)
+        if dry_run:
+            print(f"  [dry-run] Would copy {src} → {dst}")
+        else:
+            shutil.copy2(src, dst)
+            print(f"  ✓ Copied {fname}")
+
+    apply_depth_settings(game_dir, profile, dry_run)
+
+    print("\n── Next steps ────────────────────────────────────────────────")
+    print(f"  1. Install ReShade into {game_dir} if not already done:")
+    print(f"     Download: {RESHADE_URL}")
+    print("     Run installer → select Wow.exe → choose DirectX 11")
+    print("  2. Start the tracker:   python tracker/main.py")
+    print("     (or use OpenTrack with NeuralNet tracker + FreeTrack output)")
+    print("  3. Launch the game.")
+    print("  4. Press Home → ReShade overlay → enable 'Glassless3D'.")
+    print("  5. Enjoy!\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Glassless3D installer")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--game",     help="Profile name (wow, default)")
+    group.add_argument("--game-dir", help="Path to game directory")
+    parser.add_argument("--profile", default="default",
+                        help="Profile to use with --game-dir")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    if not os.path.exists(ADDON_PATH):
+        sys.exit("ERROR: Glassless3D.addon not found.\nBuild it: cd addon && build.bat")
+
+    if args.game:
+        profile  = load_profile(args.game)
+        game_dir = find_game_dir(profile)
+    else:
+        profile  = load_profile(args.profile)
+        game_dir = os.path.abspath(args.game_dir)
+        if not os.path.isdir(game_dir):
+            sys.exit(f"ERROR: Directory not found: {game_dir}")
+
+    install(game_dir, profile, dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
