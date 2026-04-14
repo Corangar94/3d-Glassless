@@ -1,4 +1,5 @@
 # tests/test_main.py
+import pytest
 from unittest.mock import MagicMock, patch
 
 from tracker.main import TrackingLoop
@@ -8,6 +9,7 @@ from tracker.face_tracker import HeadPosition
 def _make_mock_cap():
     """Return a mock VideoCapture that always reads successfully."""
     mock_cap = MagicMock()
+    mock_cap.isOpened.return_value = True
     mock_cap.read.return_value = (True, MagicMock())
     return mock_cap
 
@@ -113,3 +115,17 @@ def test_tracking_loop_holds_last_position_during_hold_window():
     # All three frames write the same held position
     for call in mock_writer.write.call_args_list:
         assert call.kwargs == {"x": 4.9, "y": -1.9, "z": 55.1}
+
+
+def test_tracking_loop_raises_on_camera_open_failure():
+    """RuntimeError is raised immediately when the camera cannot be opened."""
+    mock_cap = MagicMock()
+    mock_cap.isOpened.return_value = False
+    loop = TrackingLoop(
+        tracker=MagicMock(),
+        writer=MagicMock(),
+        smoother=MagicMock(),
+    )
+    with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap):
+        with pytest.raises(RuntimeError, match="Could not open camera 0"):
+            loop.run(camera_index=0)
