@@ -1,10 +1,9 @@
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tracker'))
 from smoother import KalmanFilter1D, HeadSmoother
 
 def test_kalman_converges_to_constant():
     """Repeated measurement of the same value should converge to it."""
     kf = KalmanFilter1D(process_noise=0.01, measurement_noise=0.1)
+    result = 0.0
     for _ in range(50):
         result = kf.update(10.0)
     assert abs(result - 10.0) < 0.01
@@ -29,6 +28,7 @@ def test_head_smoother_three_axes():
 def test_head_smoother_axes_independent():
     """Updating one axis should not affect others."""
     smoother = HeadSmoother(process_noise=0.01, measurement_noise=0.1)
+    x, y, z = 0.0, 0.0, 60.0
     for _ in range(30):
         x, y, z = smoother.update(10.0, 0.0, 60.0)
     assert abs(x - 10.0) < 0.1
