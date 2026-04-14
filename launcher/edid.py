@@ -1,8 +1,6 @@
 """WMI-based screen size detection for Windows."""
 from __future__ import annotations
 
-wmi = None  # Lazy import placeholder
-
 
 def detect_screen_size_cm() -> tuple[float, float] | None:
     """Return (width_cm, height_cm) from WMI, or None on failure.
@@ -10,11 +8,9 @@ def detect_screen_size_cm() -> tuple[float, float] | None:
     Uses Win32_DesktopMonitor.ScreenWidth / ScreenHeight (in mm).
     Returns None if WMI is unavailable or dimensions are zero.
     """
-    global wmi
     try:
-        if wmi is None:
-            import wmi as wmi_module
-            wmi = wmi_module
+        import wmi
+
         c = wmi.WMI()
         monitors = c.Win32_DesktopMonitor()
         if not monitors:
