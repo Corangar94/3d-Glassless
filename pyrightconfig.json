@@ -8,5 +8,6 @@
     ".venv/Lib/site-packages"
   ],
   "typeCheckingMode": "basic",
-  "reportMissingModuleSource": "none"
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none"
 }

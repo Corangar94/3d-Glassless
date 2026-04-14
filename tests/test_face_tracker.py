@@ -1,3 +1,4 @@
+import pytest
 from tracker.face_tracker import estimate_z_cm, estimate_xy_cm, FaceTracker
 
 
@@ -80,7 +81,6 @@ def test_estimate_xy_left_of_centre_gives_negative_x():
 
 def test_face_tracker_rejects_zero_fov():
     """Zero camera FOV must raise ValueError."""
-    import pytest
     with pytest.raises(ValueError):
         FaceTracker(
             real_ipd_cm=6.3,
