@@ -26,10 +26,13 @@ class TrackingLoop:
         self._smoother = smoother
         self._hold_ms = hold_ms
         self._last_face_ms: Optional[float] = None
+        self._last_smoothed: tuple[float, float, float] = (0.0, 0.0, 60.0)
 
     def run(self, camera_index: int = 0, max_frames: Optional[int] = None) -> None:
         """Run the tracking loop. Blocks until max_frames reached or Ctrl+C."""
         cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open camera {camera_index}")
         frame_count = 0
         try:
             while True:
@@ -41,7 +44,9 @@ class TrackingLoop:
 
                 if pos is not None:
                     self._last_face_ms = time.monotonic() * 1000.0
-                    x, y, z = self._smoother.update(pos.x_cm, pos.y_cm, pos.z_cm)
+                    smoothed = self._smoother.update(pos.x_cm, pos.y_cm, pos.z_cm)
+                    self._last_smoothed = smoothed
+                    x, y, z = smoothed
                 else:
                     now_ms = time.monotonic() * 1000.0
                     hold_expired = (
@@ -51,7 +56,7 @@ class TrackingLoop:
                     if hold_expired:
                         x, y, z = 0.0, 0.0, 60.0
                     else:
-                        x, y, z = self._smoother.update(0.0, 0.0, 60.0)
+                        x, y, z = self._last_smoothed  # replay last output, do not update filter
 
                 self._writer.write(x=x, y=y, z=z)
                 frame_count += 1

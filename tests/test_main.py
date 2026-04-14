@@ -83,3 +83,33 @@ def test_tracking_loop_smooths_face_position():
 
     mock_smoother.update.assert_called_once_with(5.0, -2.0, 55.0)
     mock_writer.write.assert_called_once_with(x=4.9, y=-1.9, z=55.1)
+
+
+def test_tracking_loop_holds_last_position_during_hold_window():
+    """During hold period, loop replays last smoothed output without updating smoother."""
+    mock_tracker = MagicMock()
+    # Frame 1: face detected; frames 2-3: face lost but hold not expired
+    mock_tracker.process_frame.side_effect = [
+        HeadPosition(x_cm=5.0, y_cm=-2.0, z_cm=55.0),
+        None,
+        None,
+    ]
+    mock_writer = MagicMock()
+    mock_smoother = MagicMock()
+    mock_smoother.update.return_value = (4.9, -1.9, 55.1)
+
+    loop = TrackingLoop(
+        tracker=mock_tracker,
+        writer=mock_writer,
+        smoother=mock_smoother,
+        hold_ms=500,
+    )
+    mock_cap = _make_mock_cap()
+    with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap):
+        loop.run(camera_index=0, max_frames=3)
+
+    # smoother.update called exactly once (frame 1 only); not called during hold
+    assert mock_smoother.update.call_count == 1
+    # All three frames write the same held position
+    for call in mock_writer.write.call_args_list:
+        assert call.kwargs == {"x": 4.9, "y": -1.9, "z": 55.1}
