@@ -75,3 +75,19 @@ def test_mainwindow_status_badge_error(window):
 def test_mainwindow_is_always_on_top(window):
     flags = window.windowFlags()
     assert flags & Qt.WindowType.WindowStaysOnTopHint
+
+
+def test_mainwindow_toggle_saves_compact_pref_when_config_absent(qapp, tmp_path):
+    """Toggling mode writes compact_mode even when config file doesn't yet exist."""
+    import yaml
+    cfg_path = str(tmp_path / "nonexistent_subdir" / "config.yaml")
+    # Note: the file AND directory don't exist — _save_compact_pref must handle this
+    # Actually _save_compact_pref only guards FileNotFoundError on READ, not on WRITE.
+    # Use a path where the PARENT exists but the FILE doesn't:
+    cfg_path = str(tmp_path / "config.yaml")
+    with patch("launcher.mainwindow.TrackerThread"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+    win._toggle_mode()  # triggers _save_compact_pref
+    with open(cfg_path) as f:
+        saved = yaml.safe_load(f)
+    assert saved["gui"]["compact_mode"] is True

@@ -153,8 +153,11 @@ class MainWindow(QMainWindow):
 
     def _save_compact_pref(self) -> None:
         try:
-            with open(self._config_path) as f:
-                cfg = yaml.safe_load(f)
+            try:
+                with open(self._config_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                cfg = {}
             cfg.setdefault("gui", {})["compact_mode"] = self._compact
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
@@ -238,6 +241,10 @@ class MainWindow(QMainWindow):
                 event.globalPosition().toPoint()  # type: ignore[attr-defined]
                 - self._drag_pos
             )
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:  # type: ignore[attr-defined]
+            self._drag_pos = None
 
     def closeEvent(self, event: object) -> None:
         if self._thread and self._thread.isRunning():
