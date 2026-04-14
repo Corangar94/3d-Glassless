@@ -3,6 +3,10 @@
   "pythonPlatform": "Windows",
   "venvPath": ".",
   "venv": ".venv",
+  "extraPaths": [
+    ".",
+    ".venv/Lib/site-packages"
+  ],
   "typeCheckingMode": "basic",
   "reportMissingModuleSource": "none"
 }

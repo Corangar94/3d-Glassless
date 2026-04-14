@@ -1,5 +1,3 @@
-import math
-import pytest
 from tracker.face_tracker import estimate_z_cm, estimate_xy_cm, FaceTracker
 
 
