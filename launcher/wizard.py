@@ -218,12 +218,10 @@ class CameraScreenPage(QWizardPage):
         self._camera_combo.clear()
         for idx in range(5):
             cap = cv2.VideoCapture(idx)
-            if cap.isOpened():
+            opened = cap.isOpened()
+            cap.release()
+            if opened:
                 self._camera_combo.addItem(f"Camera {idx}", idx)
-                cap.release()
-            else:
-                cap.release()
-                break
 
 
 # ── Page 5: Done ───────────────────────────────────────────────────────────────

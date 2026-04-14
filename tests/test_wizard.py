@@ -94,11 +94,15 @@ from launcher.wizard import CameraScreenPage, DonePage
 
 def test_camera_screen_page_populates_combo(qapp):
     """CameraScreenPage lists cameras found by probing VideoCapture."""
-    mock_cap = MagicMock()
-    # index 0 opens; indices 1-4 fail
-    mock_cap.isOpened.side_effect = [True, False, False, False, False]
+    def make_cap(opened: bool) -> MagicMock:
+        cap = MagicMock()
+        cap.isOpened.return_value = opened
+        return cap
 
-    with patch("launcher.wizard.cv2.VideoCapture", return_value=mock_cap):
+    # index 0 opens; indices 1-4 fail
+    caps = [make_cap(True), make_cap(False), make_cap(False), make_cap(False), make_cap(False)]
+
+    with patch("launcher.wizard.cv2.VideoCapture", side_effect=caps):
         page = CameraScreenPage()
         page.initializePage()
 
@@ -140,3 +144,12 @@ def test_done_page_writes_config(qapp, tmp_path):
     assert cfg["screen"]["width_cm"] == pytest.approx(59.8)
     assert cfg["tracking"]["ipd_cm"] == 6.3
     assert "gui" in cfg
+
+
+from launcher.wizard import SetupWizard
+
+
+def test_setup_wizard_has_five_pages(qapp, tmp_path):
+    config_path = str(tmp_path / "config.yaml")
+    wizard = SetupWizard(config_path=config_path)
+    assert len(wizard.pageIds()) == 5
