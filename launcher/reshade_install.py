@@ -62,7 +62,7 @@ def install_steps(
     # Step 3: ReShade.ini
     try:
         _write_reshade_ini(game_dir, profile_name, base)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         raise InstallError("Writing ReShade.ini", str(e))
     yield "Writing ReShade.ini"
 
@@ -101,7 +101,7 @@ def _write_reshade_ini(game_dir: str, profile_name: str, base: str) -> None:
 
     kept = [
         ln for ln in lines
-        if not any(ln.startswith(k) for k in all_keys)
+        if ln.split("=", 1)[0].strip() not in all_keys
         and ln.strip() not in ("[PREPROCESSOR]", "[Glassless3D.fx]")
     ]
     block: list[str] = []

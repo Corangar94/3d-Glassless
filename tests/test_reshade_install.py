@@ -57,6 +57,8 @@ def test_install_steps_writes_reshade_ini(tmp_path):
     content = open(ini_path).read()
     assert "[PREPROCESSOR]" in content
     assert "RESHADE_DEPTH_INPUT_IS_REVERSED" in content
+    assert "[Glassless3D.fx]" in content
+    assert "ConvergenceDist" in content
 
 
 def test_install_steps_copies_addon(tmp_path):
@@ -91,6 +93,20 @@ def test_install_steps_raises_install_error_on_missing_dll(tmp_path):
         with pytest.raises(InstallError) as exc_info:
             list(install_steps(game_dir))
     assert exc_info.value.step == "Copying ReShade"
+
+
+def test_install_steps_preserves_existing_reshade_ini_content(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    game_dir = str(tmp_path / "game")
+    os.makedirs(game_dir)
+    ini_path = os.path.join(game_dir, "ReShade.ini")
+    with open(ini_path, "w") as f:
+        f.write("[ExistingSection]\nSomeKey=value\n")
+    with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
+        list(install_steps(game_dir))
+    content = open(ini_path).read()
+    assert "SomeKey=value" in content
+    assert "[PREPROCESSOR]" in content
 
 
 def test_install_convenience_wrapper(tmp_path):
