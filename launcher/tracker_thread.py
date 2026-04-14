@@ -14,7 +14,14 @@ from tracker.smoother import HeadSmoother
 
 
 class _SignallingLoop:
-    """Tracking loop that checks a stop event and calls signal callbacks."""
+    """Tracking loop that checks a stop event and calls signal callbacks.
+
+    Note: This class intentionally reimplements the hold/status state machine
+    from tracker.main.TrackingLoop rather than subclassing it, so that
+    cv2.VideoCapture is opened inside this module and can be patched in tests
+    via launcher.tracker_thread.cv2.VideoCapture. If TrackingLoop's hold logic
+    changes, update the corresponding block in _SignallingLoop.run() here.
+    """
 
     def __init__(
         self,
@@ -22,6 +29,7 @@ class _SignallingLoop:
         on_frame: Callable[[bytes], None],
         on_position: Callable[[float, float, float], None],
         on_status: Callable[[str], None],
+        on_camera_error: Callable[[], None],
         tracker: FaceTracker,
         writer: FreetracWriter,
         smoother: HeadSmoother,
@@ -31,6 +39,7 @@ class _SignallingLoop:
         self._on_frame_cb = on_frame
         self._on_position_cb = on_position
         self._on_status_cb = on_status
+        self._on_camera_error_cb = on_camera_error
         self._tracker = tracker
         self._writer = writer
         self._smoother = smoother
@@ -75,6 +84,8 @@ class _SignallingLoop:
                 self._writer.write(x=x, y=y, z=z)
                 self._on_position_cb(x, y, z)
                 self._on_status_cb(status)
+            if not self._stop_event.is_set():
+                self._on_camera_error_cb()
         finally:
             cap.release()
 
@@ -121,6 +132,7 @@ class TrackerThread(QThread):
                     on_frame=self.frame_ready.emit,
                     on_position=self.position_updated.emit,
                     on_status=self.status_changed.emit,
+                    on_camera_error=lambda: self.status_changed.emit("error"),
                     tracker=tracker,
                     writer=writer,
                     smoother=smoother,

@@ -139,3 +139,59 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
 
     statuses = [s[0] for s in _spy_list(spy)]
     assert "error" in statuses
+
+
+def test_tracker_thread_emits_hold_status(qapp):
+    """status_changed emits 'hold' when face is lost but hold_ms has not expired."""
+    # Frame 1: face detected. Frame 2: face lost (within 500ms hold window).
+    mock_cap = _make_mock_cap(frames=2)
+    face_pos = MagicMock()
+    face_pos.x_cm = 1.0
+    face_pos.y_cm = 0.0
+    face_pos.z_cm = 60.0
+
+    with (
+        patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
+        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+    ):
+        ft_instance = MockFT.return_value.__enter__.return_value
+        # Frame 1 → face detected; Frame 2 → None (face lost)
+        ft_instance.process_frame.side_effect = [face_pos, None]
+        MockFW.return_value.__enter__.return_value = MagicMock()
+        MockHS.return_value.update.return_value = (1.0, 0.0, 60.0)
+
+        thread = TrackerThread(camera_index=0, config=CONFIG)
+        spy = QSignalSpy(thread.status_changed)
+        thread.start()
+        thread.wait(2000)
+
+    statuses = [s[0] for s in _spy_list(spy)]
+    # With hold_ms=500, the second frame is processed microseconds after the first,
+    # so it must be in the hold window → status "hold"
+    assert "hold" in statuses
+
+
+def test_tracker_thread_emits_paused_status(qapp):
+    """status_changed emits 'paused' when face was never detected."""
+    mock_cap = _make_mock_cap(frames=1)
+
+    with (
+        patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
+        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+    ):
+        MockFT.return_value.__enter__.return_value.process_frame.return_value = None
+        MockFW.return_value.__enter__.return_value = MagicMock()
+        MockHS.return_value.update.return_value = (0.0, 0.0, 60.0)
+
+        thread = TrackerThread(camera_index=0, config=CONFIG)
+        spy = QSignalSpy(thread.status_changed)
+        thread.start()
+        thread.wait(2000)
+
+    statuses = [s[0] for s in _spy_list(spy)]
+    # _last_face_ms is None → hold_expired=True → "paused"
+    assert "paused" in statuses
