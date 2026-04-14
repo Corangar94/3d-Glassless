@@ -16,9 +16,12 @@ def _is_first_run(config_path: str = CONFIG_PATH) -> bool:
     return not os.path.exists(config_path)
 
 
-def _load_config(config_path: str = CONFIG_PATH) -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+def _load_config(config_path: str = CONFIG_PATH) -> dict[str, object]:
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config at {config_path!r} is not a YAML mapping")
+    return data
 
 
 def main() -> None:

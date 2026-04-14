@@ -1,7 +1,5 @@
 # tests/test_app.py
 import os
-from unittest.mock import MagicMock, patch
-
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -21,7 +19,8 @@ def test_is_first_run_true_when_config_absent(tmp_path):
 
 def test_is_first_run_false_when_config_exists(tmp_path):
     path = str(tmp_path / "config.yaml")
-    open(path, "w").close()
+    with open(path, "w"):
+        pass
     assert _is_first_run(path) is False
 
 
