@@ -11,3 +11,5 @@ vendor/
 *.dll
 *.pdb
 .venv/
+*.zip
+*.exe

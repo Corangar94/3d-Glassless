@@ -2,6 +2,7 @@ camera:
   index: 0          # webcam device index (0 = default camera)
   width: 1280
   height: 720
+  fps: 0            # 0 = no explicit cap; OpenCV will use camera default
 
 screen:
   width_cm: 59.8    # physical screen width in centimetres (27" = 59.8cm)
