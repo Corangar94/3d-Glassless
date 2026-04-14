@@ -35,10 +35,12 @@ class TrackingLoop:
             raise RuntimeError(f"Could not open camera {camera_index}")
         frame_count = 0
         try:
-            while True:
+            while not self._should_stop():
                 ok, frame = cap.read()
                 if not ok:
                     break
+
+                self._on_frame(frame)
 
                 pos: Optional[HeadPosition] = self._tracker.process_frame(frame)
 
@@ -47,6 +49,7 @@ class TrackingLoop:
                     smoothed = self._smoother.update(pos.x_cm, pos.y_cm, pos.z_cm)
                     self._last_smoothed = smoothed
                     x, y, z = smoothed
+                    status = "tracking"
                 else:
                     now_ms = time.monotonic() * 1000.0
                     hold_expired = (
@@ -55,15 +58,28 @@ class TrackingLoop:
                     )
                     if hold_expired:
                         x, y, z = 0.0, 0.0, 60.0
+                        status = "paused"
                     else:
                         x, y, z = self._last_smoothed  # replay last output, do not update filter
+                        status = "hold"
 
                 self._writer.write(x=x, y=y, z=z)
+                self._on_position(x, y, z, status)
                 frame_count += 1
                 if max_frames is not None and frame_count >= max_frames:
                     break
         finally:
             cap.release()
+
+    def _should_stop(self) -> bool:
+        """Return True to exit the loop. Base class never stops early."""
+        return False
+
+    def _on_frame(self, frame: object) -> None:  # noqa: ARG002
+        """Called with each captured frame before face detection."""
+
+    def _on_position(self, x: float, y: float, z: float, status: str) -> None:  # noqa: ARG002
+        """Called after each position is computed and written."""
 
 
 def _load_config(path: str = "config.yaml") -> dict:

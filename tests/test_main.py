@@ -129,3 +129,34 @@ def test_tracking_loop_raises_on_camera_open_failure():
     with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap):
         with pytest.raises(RuntimeError, match="Could not open camera 0"):
             loop.run(camera_index=0)
+
+
+def test_tracking_loop_calls_on_position_hook():
+    """_on_position is called once per frame with correct status strings."""
+    positions = []
+
+    class RecordingLoop(TrackingLoop):
+        def _on_position(self, x, y, z, status):
+            positions.append(status)
+
+    mock_tracker = MagicMock()
+    mock_tracker.process_frame.side_effect = [
+        HeadPosition(x_cm=1.0, y_cm=0.0, z_cm=60.0),
+        None,
+    ]
+    mock_writer = MagicMock()
+    mock_smoother = MagicMock()
+    mock_smoother.update.return_value = (1.0, 0.0, 60.0)
+
+    loop = RecordingLoop(
+        tracker=mock_tracker,
+        writer=mock_writer,
+        smoother=mock_smoother,
+        hold_ms=500,
+    )
+    mock_cap = _make_mock_cap()
+    with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap):
+        loop.run(camera_index=0, max_frames=2)
+
+    assert positions[0] == "tracking"
+    assert positions[1] in ("hold", "paused")
