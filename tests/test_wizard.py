@@ -87,3 +87,56 @@ def test_install_page_shows_error_on_install_failure(qapp, tmp_path):
 
     assert not page.isComplete()
     assert "Copying ReShade" in page._error_label.text()
+
+
+from launcher.wizard import CameraScreenPage, DonePage
+
+
+def test_camera_screen_page_populates_combo(qapp):
+    """CameraScreenPage lists cameras found by probing VideoCapture."""
+    mock_cap = MagicMock()
+    # index 0 opens; indices 1-4 fail
+    mock_cap.isOpened.side_effect = [True, False, False, False, False]
+
+    with patch("launcher.wizard.cv2.VideoCapture", return_value=mock_cap):
+        page = CameraScreenPage()
+        page.initializePage()
+
+    assert page._camera_combo.count() >= 1
+
+
+def test_camera_screen_page_fills_screen_from_edid(qapp):
+    with patch("launcher.wizard.detect_screen_size_cm", return_value=(59.8, 33.6)):
+        page = CameraScreenPage()
+        page.initializePage()
+
+    assert page._width_edit.text() == "59.8"
+    assert page._height_edit.text() == "33.6"
+
+
+def test_camera_screen_page_leaves_screen_blank_on_edid_failure(qapp):
+    with patch("launcher.wizard.detect_screen_size_cm", return_value=None):
+        page = CameraScreenPage()
+        page.initializePage()
+
+    assert page._width_edit.text() == ""
+    assert page._height_edit.text() == ""
+
+
+def test_done_page_writes_config(qapp, tmp_path):
+    import yaml
+    config_path = str(tmp_path / "config.yaml")
+
+    page = DonePage(config_path=config_path)
+    page._camera_index = 0
+    page._screen_width_cm = 59.8
+    page._screen_height_cm = 33.6
+    page._write_config()
+
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    assert cfg["camera"]["index"] == 0
+    assert cfg["screen"]["width_cm"] == pytest.approx(59.8)
+    assert cfg["tracking"]["ipd_cm"] == 6.3
+    assert "gui" in cfg

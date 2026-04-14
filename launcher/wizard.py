@@ -19,6 +19,10 @@ from PySide6.QtWidgets import (
 
 from launcher.reshade_install import InstallError, install_steps
 
+import cv2
+import yaml
+from launcher.edid import detect_screen_size_cm
+
 
 # ── Page 1: Welcome ────────────────────────────────────────────────────────────
 
@@ -172,3 +176,128 @@ class InstallPage(QWizardPage):
 
     def isComplete(self) -> bool:
         return self._complete
+
+
+# ── Page 4: Camera & Screen ────────────────────────────────────────────────────
+
+class CameraScreenPage(QWizardPage):
+    def __init__(self, parent: Optional[object] = None) -> None:
+        super().__init__(parent)  # type: ignore[call-overload]
+        self.setTitle("Camera & Screen")
+        self.setSubTitle(
+            "Select your webcam and confirm your monitor size."
+        )
+
+        self._camera_combo = QComboBox()
+        self._width_edit = QLineEdit()
+        self._width_edit.setPlaceholderText("Width (cm)")
+        self._height_edit = QLineEdit()
+        self._height_edit.setPlaceholderText("Height (cm)")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Webcam:"))
+        layout.addWidget(self._camera_combo)
+        layout.addWidget(QLabel("Monitor width (cm):"))
+        layout.addWidget(self._width_edit)
+        layout.addWidget(QLabel("Monitor height (cm):"))
+        layout.addWidget(self._height_edit)
+
+        self.registerField("camera_index", self._camera_combo, "currentIndex",
+                           self._camera_combo.currentIndexChanged)
+        self.registerField("screen_width_cm*", self._width_edit)
+        self.registerField("screen_height_cm*", self._height_edit)
+
+    def initializePage(self) -> None:
+        self._probe_cameras()
+        dims = detect_screen_size_cm()
+        if dims is not None:
+            self._width_edit.setText(f"{dims[0]:.1f}")
+            self._height_edit.setText(f"{dims[1]:.1f}")
+
+    def _probe_cameras(self) -> None:
+        self._camera_combo.clear()
+        for idx in range(5):
+            cap = cv2.VideoCapture(idx)
+            if cap.isOpened():
+                self._camera_combo.addItem(f"Camera {idx}", idx)
+                cap.release()
+            else:
+                cap.release()
+                break
+
+
+# ── Page 5: Done ───────────────────────────────────────────────────────────────
+
+_DEFAULT_TRACKING = {
+    "ipd_cm": 6.3,
+    "smoothing_q": 0.01,
+    "smoothing_r": 0.1,
+    "hold_ms": 500,
+}
+
+
+class DonePage(QWizardPage):
+    def __init__(
+        self,
+        config_path: str,
+        parent: Optional[object] = None,
+    ) -> None:
+        super().__init__(parent)  # type: ignore[call-overload]
+        self.setTitle("Ready to go!")
+        self.setSubTitle(
+            "Launch your game, press Home to open ReShade, then enable Glassless3D."
+        )
+        self._config_path = config_path
+        self._camera_index: int = 0
+        self._screen_width_cm: float = 59.8
+        self._screen_height_cm: float = 33.6
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Click Finish to start tracking."))
+
+    def initializePage(self) -> None:
+        self._camera_index = self.field("camera_index")
+        try:
+            self._screen_width_cm = float(self.field("screen_width_cm"))
+            self._screen_height_cm = float(self.field("screen_height_cm"))
+        except (ValueError, TypeError):
+            self._screen_width_cm = 59.8
+            self._screen_height_cm = 33.6
+
+    def validatePage(self) -> bool:
+        self._write_config()
+        return True
+
+    def _write_config(self) -> None:
+        config = {
+            "camera": {"index": self._camera_index},
+            "screen": {
+                "width_cm": self._screen_width_cm,
+                "height_cm": self._screen_height_cm,
+            },
+            "tracking": _DEFAULT_TRACKING,
+            "gui": {"compact_mode": False},
+        }
+        dirname = os.path.dirname(self._config_path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        with open(self._config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+
+
+# ── SetupWizard ────────────────────────────────────────────────────────────────
+
+class SetupWizard(QWizard):
+    def __init__(
+        self,
+        config_path: str,
+        parent: Optional[object] = None,
+    ) -> None:
+        super().__init__(parent)  # type: ignore[call-overload]
+        self.setWindowTitle("Glassless3D Setup")
+        self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+        self.addPage(WelcomePage())
+        self.addPage(GameDirPage())
+        self.addPage(InstallPage())
+        self.addPage(CameraScreenPage())
+        self.addPage(DonePage(config_path=config_path))
