@@ -1,6 +1,7 @@
 """QThread that runs the head-tracking loop and emits Qt signals."""
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Callable, Optional
@@ -10,7 +11,26 @@ from PySide6.QtCore import QThread, Signal
 
 from tracker.face_tracker import FaceTracker, HeadPosition
 from tracker.freetrack import FreetracWriter
+from tracker.shared_memory import SharedMemoryWriter
+from tracker.shared_settings import SharedSettingsReader
 from tracker.smoother import HeadSmoother
+
+
+def _apply_deadzone(
+    raw: tuple[float, float, float],
+    prev: tuple[float, float, float] | None,
+    deadzone_cm: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Return (effective_pos, new_prev).
+
+    Suppresses XY movements smaller than deadzone_cm. Z (distance) is
+    always passed through.
+    """
+    if prev is None:
+        return raw, raw
+    if math.hypot(raw[0] - prev[0], raw[1] - prev[1]) < deadzone_cm:
+        return prev, prev
+    return raw, raw
 
 
 class _SignallingLoop:
@@ -32,6 +52,7 @@ class _SignallingLoop:
         on_camera_error: Callable[[], None],
         tracker: FaceTracker,
         writer: FreetracWriter,
+        g3d_writer: SharedMemoryWriter,
         smoother: HeadSmoother,
         hold_ms: int = 500,
     ) -> None:
@@ -42,8 +63,11 @@ class _SignallingLoop:
         self._on_camera_error_cb = on_camera_error
         self._tracker = tracker
         self._writer = writer
+        self._g3d_writer = g3d_writer
         self._smoother = smoother
         self._hold_ms = hold_ms
+        self._settings_reader = SharedSettingsReader()
+        self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_face_ms: Optional[float] = None
         self._last_smoothed: tuple[float, float, float] = (0.0, 0.0, 60.0)
 
@@ -64,7 +88,15 @@ class _SignallingLoop:
 
                 if pos is not None:
                     self._last_face_ms = time.monotonic() * 1000.0
-                    smoothed = self._smoother.update(pos.x_cm, pos.y_cm, pos.z_cm)
+                    settings = self._settings_reader.read()
+                    deadzone_cm = (settings.deadzone_mm / 10.0) if settings else 0.5
+                    smoothing_r = settings.smoothing_alpha if settings else 0.1
+                    self._smoother.set_measurement_noise(max(smoothing_r, 1e-6))
+                    raw = (pos.x_cm, pos.y_cm, pos.z_cm)
+                    effective, self._last_raw_pos = _apply_deadzone(
+                        raw, self._last_raw_pos, deadzone_cm
+                    )
+                    smoothed = self._smoother.update(effective[0], effective[1], effective[2])
                     self._last_smoothed = smoothed
                     x, y, z = smoothed
                     status = "tracking"
@@ -82,12 +114,15 @@ class _SignallingLoop:
                         status = "hold"
 
                 self._writer.write(x=x, y=y, z=z)
+                # Also publish to the G3D shared memory that the overlay reads
+                self._g3d_writer.write(x=x, y=y, z=z)
                 self._on_position_cb(x, y, z)
                 self._on_status_cb(status)
             if not self._stop_event.is_set():
                 self._on_camera_error_cb()
         finally:
             cap.release()
+            self._settings_reader.close()
 
     def _emit_frame(self, frame: object) -> None:
         try:
@@ -118,14 +153,29 @@ class TrackerThread(QThread):
             process_noise=trk["smoothing_q"],
             measurement_noise=trk["smoothing_r"],
         )
+        _r = SharedSettingsReader()
+        _startup = _r.read()
+        _r.close()
+        _ipd_cm = (
+            (_startup.ipd_mm / 10.0)
+            if _startup and _startup.ipd_mm > 0
+            else trk["ipd_cm"]
+        )
+        _fov_deg = (
+            _startup.camera_fov_deg
+            if _startup and _startup.camera_fov_deg > 0
+            else 60.0
+        )
         try:
             with (
                 FaceTracker(
-                    real_ipd_cm=trk["ipd_cm"],
+                    real_ipd_cm=_ipd_cm,
                     screen_width_cm=scr["width_cm"],
                     screen_height_cm=scr["height_cm"],
+                    camera_fov_deg=_fov_deg,
                 ) as tracker,
                 FreetracWriter() as writer,
+                SharedMemoryWriter() as g3d_writer,
             ):
                 loop = _SignallingLoop(
                     stop_event=self._stop_event,
@@ -135,6 +185,7 @@ class TrackerThread(QThread):
                     on_camera_error=lambda: self.status_changed.emit("error"),
                     tracker=tracker,
                     writer=writer,
+                    g3d_writer=g3d_writer,
                     smoother=smoother,
                     hold_ms=trk["hold_ms"],
                 )

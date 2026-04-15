@@ -51,6 +51,7 @@ def test_tracker_thread_emits_position_updated(qapp):
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
     ):
         ft_instance = MockFT.return_value.__enter__.return_value
@@ -81,6 +82,7 @@ def test_tracker_thread_emits_status_changed_tracking(qapp):
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = mock_face_pos
@@ -106,6 +108,7 @@ def test_tracker_thread_stop_terminates_thread(qapp):
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=cap),
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = None
@@ -154,6 +157,7 @@ def test_tracker_thread_emits_hold_status(qapp):
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
     ):
         ft_instance = MockFT.return_value.__enter__.return_value
@@ -181,6 +185,7 @@ def test_tracker_thread_emits_paused_status(qapp):
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = None
@@ -195,3 +200,22 @@ def test_tracker_thread_emits_paused_status(qapp):
     statuses = [s[0] for s in _spy_list(spy)]
     # _last_face_ms is None → hold_expired=True → "paused"
     assert "paused" in statuses
+
+
+def test_apply_deadzone_first_call_accepted():
+    from launcher.tracker_thread import _apply_deadzone
+    out, prev = _apply_deadzone((1.0, 0.0, 60.0), None, deadzone_cm=0.5)
+    assert out == (1.0, 0.0, 60.0)
+    assert prev == (1.0, 0.0, 60.0)
+
+def test_apply_deadzone_suppresses_small_move():
+    from launcher.tracker_thread import _apply_deadzone
+    _, prev = _apply_deadzone((1.0, 0.0, 60.0), None, deadzone_cm=0.5)
+    out, prev2 = _apply_deadzone((1.3, 0.0, 60.0), prev, deadzone_cm=0.5)
+    assert out == (1.0, 0.0, 60.0)  # clamped to previous
+
+def test_apply_deadzone_passes_large_move():
+    from launcher.tracker_thread import _apply_deadzone
+    _, prev = _apply_deadzone((1.0, 0.0, 60.0), None, deadzone_cm=0.5)
+    out, _ = _apply_deadzone((2.0, 0.0, 60.0), prev, deadzone_cm=0.5)
+    assert out == (2.0, 0.0, 60.0)
