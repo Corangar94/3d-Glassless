@@ -1,4 +1,3 @@
-import time
 import pytest
 from tracker.shared_memory import SharedMemoryWriter, SharedMemoryReader
 
@@ -31,3 +30,19 @@ def test_reader_context_manager():
     with SharedMemoryWriter(name):
         with SharedMemoryReader(name) as r:
             assert r.read() is not None
+
+
+def test_reader_reattaches_after_writer_starts():
+    """Reader constructed before writer should attach on next read() after writer starts."""
+    name = "G3D_TEST_REATTACH"
+    reader = SharedMemoryReader(name)
+    assert reader.read() is None          # writer not yet running
+    with SharedMemoryWriter(name) as w:
+        w.write(x=1.0, y=2.0, z=3.0)
+        result = reader.read()            # should now attach and return data
+    assert result is not None
+    x, y, z, _ = result
+    assert abs(x - 1.0) < 0.001
+    assert abs(y - 2.0) < 0.001
+    assert abs(z - 3.0) < 0.001
+    reader.close()

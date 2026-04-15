@@ -105,7 +105,10 @@ class SharedMemoryReader:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
             x, y, z, ts = struct.unpack(STRUCT_FORMAT, bytes(raw))
         except OSError:
-            self._view = None  # stale; force re-attach next call
+            _k32.UnmapViewOfFile(self._view)
+            self._view = None
+            _k32.CloseHandle(self._handle)
+            self._handle = None
             return None
         return x, y, z, ts
 
