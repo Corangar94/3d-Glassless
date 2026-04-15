@@ -69,12 +69,12 @@ class SharedSettingsWriter:
         self._handle = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STRUCT_SIZE, name,
         )
-        if not self._handle:
+        if self._handle is None:
             raise ctypes.WinError(ctypes.get_last_error())
         self._view = _k32.MapViewOfFile(
             self._handle, _FILE_MAP_ALL_ACCESS, 0, 0, STRUCT_SIZE,
         )
-        if not self._view:
+        if self._view is None:
             err = ctypes.get_last_error()
             _k32.CloseHandle(self._handle)
             self._handle = None
@@ -147,10 +147,10 @@ class SharedSettingsReader:
             return None
         try:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
+            f = struct.unpack(STRUCT_FORMAT, bytes(raw))
         except OSError:
             self._view = None  # stale view; force re-attach next call
             return None
-        f = struct.unpack(STRUCT_FORMAT, bytes(raw))
         return OverlaySettings(
             strength_x=f[0], strength_y=f[1],
             virtual_depth_cm=f[2],
