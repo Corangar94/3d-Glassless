@@ -37,6 +37,8 @@ def load_preset(config_path: str, name: str) -> dict:
 def delete_preset(config_path: str, name: str) -> None:
     cfg = _read(config_path)
     presets = cfg.get("presets") or {}
-    presets.pop(name, None)
+    if name not in presets:
+        return  # true no-op: nothing on disk changes
+    presets.pop(name)
     cfg["presets"] = presets
     _write(config_path, cfg)

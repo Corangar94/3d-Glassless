@@ -29,4 +29,6 @@ def test_delete(tmp_config):
     assert "to_delete" not in list_presets(tmp_config)
 
 def test_delete_missing_is_noop(tmp_config):
+    from pathlib import Path
     delete_preset(tmp_config, "nonexistent")  # must not raise
+    assert not Path(tmp_config).exists()      # must not create the file
