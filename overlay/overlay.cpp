@@ -114,10 +114,10 @@ cbuffer CB : register(b0) {
     float strengthY;    // vertical parallax amplifier
     float screenW;      // cm
     float screenH;      // cm
-    float virtualDepth; // cm, total depth budget
+    float virtualDepth; // cm — far-plane distance behind the screen
     float debugDepth;   // >0.5 = greyscale depth map
     float depthGamma;   // gamma exponent (curve mode 2)
-    float focusRadius;  // UV radius for focus ring taps
+    float focusRadius;  // (reserved — unused in current parallax model)
     float depthCurve;   // 0=linear, 1=sqrt, 2=gamma
 };
 Texture2D    SceneTex : register(t0);
@@ -132,10 +132,14 @@ float ApplyCurve(float rawD, float curve, float gamma) {
 }
 
 float4 main(PS_IN i) : SV_Target {
+    // Depth convention from depth_infer.cpp (Depth Anything V2, percentile-normalised):
+    //   0.0 = near / foreground   (screen surface, HUD)
+    //   1.0 = far  / background   (sky, distant terrain)
     float rawD = DepthTex.Sample(SceneSmp, i.uv).r;
     float depth = ApplyCurve(rawD, depthCurve, depthGamma);
 
     if (debugDepth > 0.5) {
+        // near → bright, far → dark  (standard disparity display)
         float v = 1.0 - depth;
         return float4(v, v, v, 1.0);
     }
@@ -144,21 +148,26 @@ float4 main(PS_IN i) : SV_Target {
     float sw = max(screenW, 1.0);
     float sh = max(screenH, 1.0);
     float vd = max(virtualDepth, 0.0);
-    float r  = max(focusRadius, 0.001);
 
-    float2 c = float2(0.5, 0.5);
-    float fr =
-        ApplyCurve(DepthTex.Sample(SceneSmp, c               ).r, depthCurve, depthGamma) * 0.40 +
-        ApplyCurve(DepthTex.Sample(SceneSmp, c + float2(-r, 0)).r, depthCurve, depthGamma) * 0.15 +
-        ApplyCurve(DepthTex.Sample(SceneSmp, c + float2( r, 0)).r, depthCurve, depthGamma) * 0.15 +
-        ApplyCurve(DepthTex.Sample(SceneSmp, c + float2(0, -r)).r, depthCurve, depthGamma) * 0.15 +
-        ApplyCurve(DepthTex.Sample(SceneSmp, c + float2(0,  r)).r, depthCurve, depthGamma) * 0.15;
-
-    float depthDelta = depth - fr;
+    // Pinhole-camera-through-window parallax model.
+    //
+    // oz  = virtual distance (cm) of this pixel behind the screen.
+    //       depth=0 (near) → oz=0 (on screen, zero parallax — HUD stays put).
+    //       depth=1 (far)  → oz=vd (far plane, maximum parallax).
+    //
+    // f   = fraction of the head's lateral offset that appears as a UV shift.
+    //       Derived from similar triangles: a point at oz cm behind a window
+    //       observed by an eye at hz cm in front of the window shifts by
+    //       headX * oz / (hz + oz)  in world-cm, or  / sw  in UV units.
+    //
+    // All objects shift in the SAME direction as head movement; far shifts
+    // more than near.  No bipolar artefacts, no doubling at high settings.
+    float oz = vd * depth;
+    float f  = oz / (hz + oz);   // 0 at screen plane, approaches 1 as oz→∞
 
     float2 sampleUV = float2(
-        i.uv.x + (headX / hz) * depthDelta * vd / sw * strengthX,
-        i.uv.y - (headY / hz) * depthDelta * vd / sh * strengthY
+        i.uv.x + (headX / sw) * f * strengthX,
+        i.uv.y - (headY / sh) * f * strengthY
     );
     return SceneTex.Sample(SceneSmp, saturate(sampleUV));
 }
