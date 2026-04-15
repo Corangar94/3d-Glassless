@@ -46,3 +46,62 @@ def test_reader_reattaches_after_writer_starts():
     assert abs(y - 2.0) < 0.001
     assert abs(z - 3.0) < 0.001
     reader.close()
+
+
+from tracker.debug_monitor import compute_shift_pct, _shift_tag, _is_stale
+
+
+def test_compute_shift_pct_zero_head():
+    """At (0, 0, 60) head position the shift is exactly 0%."""
+    sx, sy = compute_shift_pct(0.0, 0.0, 60.0, 1.0, 1.0, 30.0, 119.3, 33.6)
+    assert sx == 0.0
+    assert sy == 0.0
+
+
+def test_compute_shift_pct_known_values():
+    """Known inputs: headX=10, headZ=25, vd=30, sw=119.3, str=1.0 → ~4.575%."""
+    # f = 30 / (25 + 30) = 0.5455
+    # sx = abs(10 / 119.3) * 0.5455 * 1.0 * 100 ≈ 4.575%
+    sx, sy = compute_shift_pct(10.0, 0.0, 25.0, 1.0, 1.0, 30.0, 119.3, 33.6)
+    assert abs(sx - 4.575) < 0.01
+    assert sy == 0.0
+
+
+def test_compute_shift_pct_uses_abs():
+    """Negative headX gives same shift as positive headX (abs used)."""
+    sx_pos, _ = compute_shift_pct(10.0, 0.0, 60.0, 1.0, 1.0, 30.0, 119.3, 33.6)
+    sx_neg, _ = compute_shift_pct(-10.0, 0.0, 60.0, 1.0, 1.0, 30.0, 119.3, 33.6)
+    assert abs(sx_pos - sx_neg) < 0.001
+
+
+def test_shift_tag_good():
+    assert _shift_tag(1.5, 1.0) == "GOOD"
+
+
+def test_shift_tag_high():
+    assert _shift_tag(3.0, 1.0) == "HIGH"
+
+
+def test_shift_tag_danger():
+    assert _shift_tag(5.0, 1.0) == "DANGER"
+
+
+def test_is_stale_true():
+    """Timestamp 600 ms old is stale (threshold 500 ms)."""
+    now = 10_000
+    ts = now - 600
+    assert _is_stale(ts, now) is True
+
+
+def test_is_stale_false():
+    """Timestamp 100 ms old is not stale."""
+    now = 10_000
+    ts = now - 100
+    assert _is_stale(ts, now) is False
+
+
+def test_is_stale_wraps():
+    """Timestamp wraps correctly around 32-bit boundary."""
+    now = 100
+    ts = (0xFFFF_FFFF - 200)  # 200 ms before overflow, so age = 301 ms
+    assert _is_stale(ts, now, threshold_ms=250) is True
