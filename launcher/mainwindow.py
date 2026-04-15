@@ -7,6 +7,7 @@ import yaml
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -476,6 +477,7 @@ class MainWindow(QMainWindow):
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
+        QApplication.processEvents()
         w, h = detect_screen_cm()
         if w > 0 and h > 0:
             self._screen_w_spin.setValue(w)
@@ -486,6 +488,7 @@ class MainWindow(QMainWindow):
 
     def _on_measure_head(self) -> None:
         self._calib_status.setText("Measuring (hold still 3 s)\u2026")
+        QApplication.processEvents()
         dist = measure_head_distance(ipd_mm=self._ipd_spin.value())
         self._head_dist_spin.setValue(dist)
         self._calib_status.setText(f"Measured: {dist:.1f} cm")
@@ -543,9 +546,12 @@ class MainWindow(QMainWindow):
         self._screen_h_spin.setValue(data.get("screen_h_cm", 0.0))
         self._head_dist_spin.setValue(data.get("head_dist_cm", 60.0))
         self._depth_curve_combo.setCurrentIndex(int(data.get("depth_curve", 1)))
-        idx = self._fov_combo.findText(f"{int(data.get('camera_fov_deg', 90))}\u00b0")
+        fov_val = data.get("camera_fov_deg", 90)
+        idx = self._fov_combo.findText(f"{int(fov_val)}\u00b0")
         if idx >= 0:
             self._fov_combo.setCurrentIndex(idx)
+        else:
+            self._fov_combo.setCurrentText(str(fov_val))
         for w in widgets:
             w.blockSignals(False)
         self._on_settings_change()

@@ -20,11 +20,10 @@ def test_detect_screen_cm_nonzero_on_real_monitor():
 
 def _make_mock_cv2(cap: MagicMock) -> MagicMock:
     """Build a cv2 mock whose VideoCapture returns `cap`."""
-    import cv2 as real_cv2
-    mock = MagicMock(spec=real_cv2)
+    mock = MagicMock()
     mock.VideoCapture.return_value = cap
-    mock.COLOR_BGR2RGB = real_cv2.COLOR_BGR2RGB
-    mock.cvtColor.side_effect = real_cv2.cvtColor
+    mock.COLOR_BGR2RGB = 4  # cv2.COLOR_BGR2RGB == 4
+    mock.cvtColor.side_effect = lambda src, _code: src  # return frame unchanged
     return mock
 
 
@@ -49,7 +48,6 @@ def test_measure_head_distance_no_face():
 
 def test_detect_face_distance_returns_none_on_no_face():
     """_detect_face_distance returns None when MediaPipe finds no landmarks."""
-    import cv2 as real_cv2
     fake_frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
     mock_result = MagicMock()
@@ -74,9 +72,9 @@ def test_detect_face_distance_returns_none_on_no_face():
     mock_mp.ImageFormat.SRGB = "SRGB"
 
     # cv2 is lazy-imported inside the function; patch via sys.modules
-    mock_cv2 = MagicMock(spec=real_cv2)
+    mock_cv2 = MagicMock()
     mock_cv2.cvtColor.return_value = fake_frame
-    mock_cv2.COLOR_BGR2RGB = real_cv2.COLOR_BGR2RGB
+    mock_cv2.COLOR_BGR2RGB = 4  # cv2.COLOR_BGR2RGB == 4
 
     with patch.dict("sys.modules", {
         "cv2": mock_cv2,
