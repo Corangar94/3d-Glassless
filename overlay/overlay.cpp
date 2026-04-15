@@ -267,10 +267,9 @@ static ID3DBlob* CompileShader(const char* src, const char* entry, const char* p
             // Convert error to wide string for MessageBox
             const char* msg = (const char*)err->GetBufferPointer();
             int len = MultiByteToWideChar(CP_ACP, 0, msg, -1, nullptr, 0);
-            wchar_t* wmsg = new wchar_t[len];
-            MultiByteToWideChar(CP_ACP, 0, msg, -1, wmsg, len);
-            FatalError(wmsg);
-            delete[] wmsg;
+            std::wstring wmsg(len, L'\0');
+            MultiByteToWideChar(CP_ACP, 0, msg, -1, wmsg.data(), len);
+            FatalError(wmsg.c_str());
             err->Release();
         }
         return nullptr;
@@ -875,12 +874,18 @@ static void Frame() {
                     // Build timestamped path next to the exe.
                     SYSTEMTIME t = {};
                     GetLocalTime(&t);
-                    char path[512];
-                    snprintf(path, sizeof(path),
-                        "E:\\Glassless 3d\\screenshot_%04d%02d%02d_%02d%02d%02d%s.bmp",
+                    wchar_t exeDir[MAX_PATH]; GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+                    wchar_t* sl = wcsrchr(exeDir, L'\\');
+                    if (sl) *(sl + 1) = L'\0';
+                    wchar_t wpath[MAX_PATH];
+                    swprintf_s(wpath, MAX_PATH,
+                        L"%sscreenshot_%04d%02d%02d_%02d%02d%02d%s.bmp",
+                        exeDir,
                         t.wYear, t.wMonth, t.wDay,
                         t.wHour, t.wMinute, t.wSecond,
-                        g_debugDepth ? "_depth" : "");
+                        g_debugDepth ? L"_depth" : L"");
+                    char path[MAX_PATH];
+                    WideCharToMultiByte(CP_UTF8, 0, wpath, -1, path, MAX_PATH, nullptr, nullptr);
 
                     UINT W = desc.Width, H = desc.Height;
                     UINT rowBytes  = W * 4;          // BGRA, 4 bytes/px
