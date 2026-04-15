@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from typing import Optional
 
+import dataclasses
+import logging
 import yaml
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
+
+_log = logging.getLogger(__name__)
 from PySide6.QtWidgets import (
-    QApplication,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -234,7 +237,7 @@ class MainWindow(QMainWindow):
         try:
             self._overlay.start()
         except OverlayStartError as e:
-            print(f"[launcher] overlay launch failed: {e}")
+            _log.warning("overlay launch failed: %s", e)
             self._on_status("error")
 
         self._action_btn.setText("■ STOP TRACKING")
@@ -399,8 +402,9 @@ class MainWindow(QMainWindow):
         self._head_dist_spin.setSuffix(" cm")
         self._head_dist_spin.setValue(self._settings.head_dist_cm)
         self._head_dist_spin.valueChanged.connect(self._on_settings_change)
-        measure_btn = QPushButton("Measure head distance from camera")
-        measure_btn.clicked.connect(self._on_measure_head)
+        self._measure_btn = QPushButton("Measure head distance from camera")
+        self._measure_btn.clicked.connect(self._on_measure_head)
+        measure_btn = self._measure_btn
         self._calib_status = QLabel("")
         self._calib_status.setStyleSheet("color:#4a4;font-size:10px;")
         cf.addRow("Screen W", self._screen_w_spin)
@@ -477,7 +481,6 @@ class MainWindow(QMainWindow):
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
-        QApplication.processEvents()
         w, h = detect_screen_cm()
         if w > 0 and h > 0:
             self._screen_w_spin.setValue(w)
@@ -487,11 +490,15 @@ class MainWindow(QMainWindow):
             self._calib_status.setText("Detection failed \u2014 enter manually")
 
     def _on_measure_head(self) -> None:
+        # Disable button to prevent re-entrant calls while the webcam grab runs.
+        self._measure_btn.setEnabled(False)
         self._calib_status.setText("Measuring (hold still 3 s)\u2026")
-        QApplication.processEvents()
-        dist = measure_head_distance(ipd_mm=self._ipd_spin.value())
-        self._head_dist_spin.setValue(dist)
-        self._calib_status.setText(f"Measured: {dist:.1f} cm")
+        try:
+            dist = measure_head_distance(ipd_mm=self._ipd_spin.value())
+            self._head_dist_spin.setValue(dist)
+            self._calib_status.setText(f"Measured: {dist:.1f} cm")
+        finally:
+            self._measure_btn.setEnabled(True)
 
     def _refresh_presets(self) -> None:
         self._preset_combo.clear()
@@ -503,16 +510,12 @@ class MainWindow(QMainWindow):
         if not name:
             return
         s = self._snapshot_settings()
-        save_preset(self._config_path, name, {
-            "strength_x": s.strength_x, "strength_y": s.strength_y,
-            "virtual_depth_cm": s.virtual_depth_cm,
-            "screen_w_cm": s.screen_w_cm, "screen_h_cm": s.screen_h_cm,
-            "depth_curve": s.depth_curve, "depth_gamma": s.depth_gamma,
-            "focus_radius": s.focus_radius, "head_dist_cm": s.head_dist_cm,
-            "camera_fov_deg": s.camera_fov_deg, "ipd_mm": s.ipd_mm,
-            "smoothing_alpha": s.smoothing_alpha, "deadzone_mm": s.deadzone_mm,
-        })
+        save_preset(self._config_path, name, dataclasses.asdict(s))
         self._refresh_presets()
+
+    def _set_slider_value(self, sl: QSlider, v: float) -> None:
+        """Set a slider created by `_make_slider` to the float value `v`."""
+        sl.setValue(int(round((v - sl.property("_lo")) / sl.property("_step"))))
 
     def _on_preset_load(self) -> None:
         name = self._preset_combo.currentText().strip()
@@ -530,16 +533,12 @@ class MainWindow(QMainWindow):
         ]
         for w in widgets:
             w.blockSignals(True)
-
-        def _set_slider(sl: QSlider, v: float) -> None:
-            sl.setValue(int(round((v - sl.property("_lo")) / sl.property("_step"))))
-
-        _set_slider(self._strength_x_slider,    data.get("strength_x",      1.0))
-        _set_slider(self._strength_y_slider,    data.get("strength_y",      1.0))
-        _set_slider(self._virtual_depth_slider, data.get("virtual_depth_cm", 30.0))
-        _set_slider(self._focus_radius_slider,  data.get("focus_radius",    0.1))
-        _set_slider(self._smoothing_slider,     data.get("smoothing_alpha", 0.1))
-        _set_slider(self._deadzone_slider,      data.get("deadzone_mm",     5.0))
+        self._set_slider_value(self._strength_x_slider,    data.get("strength_x",      1.0))
+        self._set_slider_value(self._strength_y_slider,    data.get("strength_y",      1.0))
+        self._set_slider_value(self._virtual_depth_slider, data.get("virtual_depth_cm", 30.0))
+        self._set_slider_value(self._focus_radius_slider,  data.get("focus_radius",    0.1))
+        self._set_slider_value(self._smoothing_slider,     data.get("smoothing_alpha", 0.1))
+        self._set_slider_value(self._deadzone_slider,      data.get("deadzone_mm",     5.0))
         self._depth_gamma_spin.setValue(data.get("depth_gamma", 1.0))
         self._ipd_spin.setValue(data.get("ipd_mm", 64.0))
         self._screen_w_spin.setValue(data.get("screen_w_cm", 0.0))
@@ -547,7 +546,7 @@ class MainWindow(QMainWindow):
         self._head_dist_spin.setValue(data.get("head_dist_cm", 60.0))
         self._depth_curve_combo.setCurrentIndex(int(data.get("depth_curve", 1)))
         fov_val = data.get("camera_fov_deg", 90)
-        idx = self._fov_combo.findText(f"{int(fov_val)}\u00b0")
+        idx = self._fov_combo.findText(f"{round(fov_val)}\u00b0")
         if idx >= 0:
             self._fov_combo.setCurrentIndex(idx)
         else:
@@ -558,6 +557,8 @@ class MainWindow(QMainWindow):
 
     def _on_preset_delete(self) -> None:
         name = self._preset_combo.currentText().strip()
+        if not name:
+            return
         delete_preset(self._config_path, name)
         self._refresh_presets()
 
@@ -569,15 +570,7 @@ class MainWindow(QMainWindow):
                     cfg = yaml.safe_load(f) or {}
             except FileNotFoundError:
                 cfg = {}
-            cfg.setdefault("overlay", {}).update(
-                strength_x=s.strength_x, strength_y=s.strength_y,
-                virtual_depth_cm=s.virtual_depth_cm,
-                screen_w_cm=s.screen_w_cm, screen_h_cm=s.screen_h_cm,
-                depth_curve=s.depth_curve, depth_gamma=s.depth_gamma,
-                focus_radius=s.focus_radius, head_dist_cm=s.head_dist_cm,
-                camera_fov_deg=s.camera_fov_deg, ipd_mm=s.ipd_mm,
-                smoothing_alpha=s.smoothing_alpha, deadzone_mm=s.deadzone_mm,
-            )
+            cfg.setdefault("overlay", {}).update(dataclasses.asdict(s))
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
         except OSError:
