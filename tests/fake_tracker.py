@@ -12,6 +12,7 @@ import argparse
 import math
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +28,16 @@ _DEFAULT_SETTINGS = OverlaySettings(
     screen_w_cm=119.3,
     screen_h_cm=33.6,
 )
+
+_WRITE_HZ: int = 120
+_STATUS_INTERVAL_S: float = 0.5
+_DEFAULT_Z_CM: float = 60.0
+_SHIFT_GOOD: float = 2.0
+_SHIFT_HIGH: float = 4.0
+_INTERACTIVE_XY_STEP: float = 1.0
+_INTERACTIVE_Z_STEP: float = 5.0
+_INTERACTIVE_Z_MAX: float = 300.0
+_INTERACTIVE_Z_MIN: float = 5.0
 
 
 # ----------------------------------------------------------------- helpers --
@@ -44,9 +55,9 @@ def _compute_shift_pct(
 
 def _shift_tag(sx: float, sy: float) -> str:
     worst = max(sx, sy)
-    if worst < 2.0:
+    if worst < _SHIFT_GOOD:
         return "GOOD"
-    if worst < 4.0:
+    if worst < _SHIFT_HIGH:
         return "HIGH"
     return "DANGER"
 
@@ -64,6 +75,9 @@ def _parse_kvs(kvs: list[str], defaults: dict) -> dict:
     for kv in kvs:
         k, v = kv.split("=", 1)
         d[k.strip()] = float(v)
+    for k in d:
+        if k not in defaults:
+            raise ValueError(f"Unknown key '{k}'. Valid keys: {sorted(defaults)}")
     return d
 
 
@@ -79,11 +93,11 @@ def _print_status(x: float, y: float, z: float, settings: OverlaySettings) -> No
 
 # ------------------------------------------------------------------- modes --
 
-def _write_loop(gen: object) -> None:
-    """Run the write loop. gen() returns (x, y, z) each tick; raises to stop."""
+def _write_loop(gen: Callable[[], tuple[float, float, float]]) -> None:
+    """Run the write loop. gen is called every tick and must return (x, y, z). Loop runs until KeyboardInterrupt."""
     with SharedMemoryWriter() as w:
-        frame = 0
         last_print = 0.0
+        last_settings_read = time.monotonic() - 2.0  # force immediate first read
         settings = _read_settings()
         try:
             while True:
@@ -91,13 +105,13 @@ def _write_loop(gen: object) -> None:
                 x, y, z = result
                 w.write(x=x, y=y, z=z)
                 now = time.monotonic()
-                if now - last_print >= 0.5:
-                    if frame % 60 == 0:
-                        settings = _read_settings()
+                if now - last_settings_read >= 1.0:
+                    settings = _read_settings()
+                    last_settings_read = now
+                if now - last_print >= _STATUS_INTERVAL_S:
                     _print_status(x, y, z, settings)
                     last_print = now
-                frame += 1
-                time.sleep(1 / 120)
+                time.sleep(1 / _WRITE_HZ)
         except KeyboardInterrupt:
             pass
 
@@ -114,6 +128,10 @@ def _static_mode(x: float, y: float, z: float) -> None:
 
 
 def _sweep_mode(amp: float, period: float, z: float) -> None:
+    if z <= 0:
+        raise ValueError(f"z must be > 0, got {z}")
+    if period <= 0:
+        raise ValueError(f"period must be > 0, got {period}")
     print(
         f"fake_tracker [sweep]: amp={amp} period={period}s z={z} — Ctrl+C to stop",
         flush=True,
@@ -131,7 +149,7 @@ def _interactive_mode() -> None:
     """Keyboard-driven mode (Windows only — uses msvcrt)."""
     import msvcrt
 
-    x, y, z = 0.0, 0.0, 60.0
+    x, y, z = 0.0, 0.0, _DEFAULT_Z_CM
     print(
         "fake_tracker [interactive]: ←→=x  ↑↓=y  +/-=z  r=reset  q=quit",
         flush=True,
@@ -139,28 +157,31 @@ def _interactive_mode() -> None:
     settings = _read_settings()
 
     with SharedMemoryWriter() as w:
-        frame = 0
         last_print = time.monotonic() - 1.0  # force immediate first print
+        last_settings_read = time.monotonic() - 2.0  # force immediate first read
         try:
             while True:
                 now = time.monotonic()
-                if now - last_print >= 0.5:
+                if now - last_settings_read >= 1.0:
+                    settings = _read_settings()
+                    last_settings_read = now
+                if now - last_print >= _STATUS_INTERVAL_S:
                     _print_status(x, y, z, settings)
                     last_print = now
                 if msvcrt.kbhit():
                     ch = msvcrt.getwch()
                     if ch in ("\x00", "\xe0"):   # extended key prefix
                         ch2 = msvcrt.getwch()
-                        if ch2 == "K":   x -= 1.0           # left arrow
-                        elif ch2 == "M": x += 1.0           # right arrow
-                        elif ch2 == "H": y += 1.0           # up arrow
-                        elif ch2 == "P": y -= 1.0           # down arrow
+                        if ch2 == "K":   x -= _INTERACTIVE_XY_STEP   # left arrow
+                        elif ch2 == "M": x += _INTERACTIVE_XY_STEP   # right arrow
+                        elif ch2 == "H": y += _INTERACTIVE_XY_STEP   # up arrow
+                        elif ch2 == "P": y -= _INTERACTIVE_XY_STEP   # down arrow
                     elif ch in ("+", "="):
-                        z = min(z + 5.0, 300.0)
+                        z = min(z + _INTERACTIVE_Z_STEP, _INTERACTIVE_Z_MAX)
                     elif ch == "-":
-                        z = max(z - 5.0, 5.0)
+                        z = max(z - _INTERACTIVE_Z_STEP, _INTERACTIVE_Z_MIN)
                     elif ch == "r":
-                        x, y, z = 0.0, 0.0, 60.0
+                        x, y, z = 0.0, 0.0, _DEFAULT_Z_CM
                     elif ch in ("q", "Q", "\x03"):
                         break
                     sx, sy = _compute_shift_pct(x, y, z, settings)
@@ -171,10 +192,7 @@ def _interactive_mode() -> None:
                         flush=True,
                     )
                 w.write(x=x, y=y, z=z)
-                if frame % 60 == 0:
-                    settings = _read_settings()
-                frame += 1
-                time.sleep(1 / 120)
+                time.sleep(1 / _WRITE_HZ)
         except KeyboardInterrupt:
             pass
 
@@ -189,9 +207,9 @@ def main(duration_sec: float = 10.0) -> None:
         while (t := time.monotonic() - t0) < duration_sec:
             x = 5.0 * math.sin(t * 2.0)
             y = 2.0 * math.cos(t * 2.0)
-            z = 60.0
+            z = _DEFAULT_Z_CM
             w.write(x=x, y=y, z=z)
-            time.sleep(1 / 120)
+            time.sleep(1 / _WRITE_HZ)
         print("fake_tracker: done", flush=True)
 
 
@@ -219,10 +237,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.static is not None:
-        kv = _parse_kvs(args.static, {"x": 0.0, "y": 0.0, "z": 60.0})
+        kv = _parse_kvs(args.static, {"x": 0.0, "y": 0.0, "z": _DEFAULT_Z_CM})
         _static_mode(kv["x"], kv["y"], kv["z"])
     elif args.sweep is not None:
-        kv = _parse_kvs(args.sweep, {"amp": 10.0, "period": 4.0, "z": 60.0})
+        kv = _parse_kvs(args.sweep, {"amp": 10.0, "period": 4.0, "z": _DEFAULT_Z_CM})
         _sweep_mode(kv["amp"], kv["period"], kv["z"])
     elif args.interactive:
         _interactive_mode()

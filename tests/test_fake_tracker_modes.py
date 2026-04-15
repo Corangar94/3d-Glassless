@@ -54,7 +54,13 @@ def test_static_rejects_zero_z():
 
 
 def test_sweep_formula_at_quarter_period():
-    """At t = period/4, x should equal amp (sin(π/2) = 1)."""
+    """At t = period/4, x should equal amp (sin(π/2) = 1).
+
+    NOTE: This test verifies the expected mathematical formula used inside
+    _sweep_mode's generator, not the _sweep_mode function itself. The generator
+    blocks inside _write_loop (infinite loop + sleep), so it cannot be driven
+    directly in a unit test. This makes the coverage gap explicit.
+    """
     amp, period = 10.0, 4.0
     t = period / 4  # quarter period
     x = amp * math.sin(2 * math.pi * t / period)
@@ -62,7 +68,13 @@ def test_sweep_formula_at_quarter_period():
 
 
 def test_sweep_formula_at_zero():
-    """At t = 0, x = 0 (sin(0) = 0)."""
+    """At t = 0, x = 0 (sin(0) = 0).
+
+    NOTE: This test verifies the expected mathematical formula used inside
+    _sweep_mode's generator, not the _sweep_mode function itself. The generator
+    blocks inside _write_loop (infinite loop + sleep), so it cannot be driven
+    directly in a unit test. This makes the coverage gap explicit.
+    """
     amp, period = 10.0, 4.0
     x = amp * math.sin(2 * math.pi * 0.0 / period)
     assert x == 0.0
@@ -79,7 +91,7 @@ def test_static_writes_given_values():
         reader = SharedMemoryReader("G3D")
         try:
             for _ in range(5):
-                writer.write(3.5, -2.1, 70.0)
+                writer.write(x=3.5, y=-2.1, z=70.0)
                 data = reader.read()
                 assert data is not None
                 x, y, z, _ = data
@@ -93,11 +105,13 @@ def test_static_writes_given_values():
 
 
 def test_sweep_oscillates_x():
-    """--sweep x should cross zero and reach near amp within one period."""
-    import math
-    import time
-    from fake_tracker import _sweep_mode  # noqa: F401 — import verifies it exists
+    """--sweep x should cross zero and reach near amp within one period.
 
+    NOTE: This test verifies the expected mathematical formula used inside
+    _sweep_mode's generator, not the _sweep_mode function itself. The generator
+    blocks inside _write_loop (infinite loop + sleep), so it cannot be driven
+    directly in a unit test. This makes the coverage gap explicit.
+    """
     # Mirror the exact generator that _sweep_mode creates internally:
     # gen() = amp * math.sin(2 * math.pi * (time.monotonic() - t0) / period)
     # Sample at synthetic times spaced 1/120 s apart (same as _write_loop tick rate).
