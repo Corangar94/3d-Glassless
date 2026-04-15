@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 
-import cv2
-import numpy as np
+_log = logging.getLogger(__name__)
 
 _HORZSIZE   = 4
 _VERTSIZE   = 6
@@ -17,6 +17,9 @@ _LOGPIXELSY = 90
 
 _LEFT_IRIS  = 468
 _RIGHT_IRIS = 473
+
+# Typical webcam FOV — used for focal-length estimation in head distance calc.
+_ASSUMED_FOV_DEG = 90.0
 
 
 def detect_screen_cm() -> tuple[float, float]:
@@ -46,8 +49,10 @@ def detect_screen_cm() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def _detect_face_distance(frame_bgr: np.ndarray, ipd_mm: float) -> float | None:
+def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | None:
     """Run MediaPipe on one BGR frame, return head distance in cm or None."""
+    import cv2
+    import numpy as np
     import mediapipe as mp
     from mediapipe import tasks
     import pathlib
@@ -78,12 +83,13 @@ def _detect_face_distance(frame_bgr: np.ndarray, ipd_mm: float) -> float | None:
     if ipd_px < 1.0:
         return None
 
-    focal_px = w / (2.0 * math.tan(math.radians(45.0)))  # assume 90° FOV
+    focal_px = w / (2.0 * math.tan(math.radians(_ASSUMED_FOV_DEG / 2.0)))
     return (focal_px * (ipd_mm / 10.0)) / ipd_px
 
 
 def measure_head_distance(ipd_mm: float = 64.0) -> float:
     """Return estimated head distance in cm (60.0 fallback on any failure)."""
+    import cv2
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         return 60.0
@@ -94,6 +100,7 @@ def measure_head_distance(ipd_mm: float = 64.0) -> float:
         result = _detect_face_distance(frame, ipd_mm)
         return result if result is not None else 60.0
     except Exception:  # noqa: BLE001
+        _log.warning("measure_head_distance failed", exc_info=True)
         return 60.0
     finally:
         cap.release()
