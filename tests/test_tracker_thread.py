@@ -40,6 +40,15 @@ def _spy_list(spy: QSignalSpy) -> list:
     return [spy.at(i) for i in range(spy.count())]
 
 
+def _mock_settings_reader():
+    """Return a MagicMock that works both as a plain instance and context manager."""
+    m = MagicMock()
+    m.return_value.read.return_value = None
+    m.return_value.__enter__ = MagicMock(return_value=m.return_value)
+    m.return_value.__exit__ = MagicMock(return_value=False)
+    return m
+
+
 def test_tracker_thread_emits_position_updated(qapp):
     mock_cap = _make_mock_cap(frames=2)
     mock_face_pos = MagicMock()
@@ -53,6 +62,7 @@ def test_tracker_thread_emits_position_updated(qapp):
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         ft_instance = MockFT.return_value.__enter__.return_value
         ft_instance.process_frame.return_value = mock_face_pos
@@ -84,6 +94,7 @@ def test_tracker_thread_emits_status_changed_tracking(qapp):
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = mock_face_pos
         MockFW.return_value.__enter__.return_value = MagicMock()
@@ -110,6 +121,7 @@ def test_tracker_thread_stop_terminates_thread(qapp):
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = None
         MockFW.return_value.__enter__.return_value = MagicMock()
@@ -131,6 +143,7 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
         patch("launcher.tracker_thread.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.HeadSmoother"),
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         MockFT.return_value.__enter__.return_value = MagicMock()
         MockFW.return_value.__enter__.return_value = MagicMock()
@@ -146,7 +159,6 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
 
 def test_tracker_thread_emits_hold_status(qapp):
     """status_changed emits 'hold' when face is lost but hold_ms has not expired."""
-    # Frame 1: face detected. Frame 2: face lost (within 500ms hold window).
     mock_cap = _make_mock_cap(frames=2)
     face_pos = MagicMock()
     face_pos.x_cm = 1.0
@@ -159,9 +171,9 @@ def test_tracker_thread_emits_hold_status(qapp):
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         ft_instance = MockFT.return_value.__enter__.return_value
-        # Frame 1 → face detected; Frame 2 → None (face lost)
         ft_instance.process_frame.side_effect = [face_pos, None]
         MockFW.return_value.__enter__.return_value = MagicMock()
         MockHS.return_value.update.return_value = (1.0, 0.0, 60.0)
@@ -172,8 +184,6 @@ def test_tracker_thread_emits_hold_status(qapp):
         thread.wait(2000)
 
     statuses = [s[0] for s in _spy_list(spy)]
-    # With hold_ms=500, the second frame is processed microseconds after the first,
-    # so it must be in the hold window → status "hold"
     assert "hold" in statuses
 
 
@@ -187,6 +197,7 @@ def test_tracker_thread_emits_paused_status(qapp):
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
     ):
         MockFT.return_value.__enter__.return_value.process_frame.return_value = None
         MockFW.return_value.__enter__.return_value = MagicMock()
@@ -198,7 +209,6 @@ def test_tracker_thread_emits_paused_status(qapp):
         thread.wait(2000)
 
     statuses = [s[0] for s in _spy_list(spy)]
-    # _last_face_ms is None → hold_expired=True → "paused"
     assert "paused" in statuses
 
 
@@ -208,11 +218,16 @@ def test_apply_deadzone_first_call_accepted():
     assert out == (1.0, 0.0, 60.0)
     assert prev == (1.0, 0.0, 60.0)
 
-def test_apply_deadzone_suppresses_small_move():
+
+def test_apply_deadzone_suppresses_small_xy_but_passes_z():
     from launcher.tracker_thread import _apply_deadzone
     _, prev = _apply_deadzone((1.0, 0.0, 60.0), None, deadzone_cm=0.5)
-    out, prev2 = _apply_deadzone((1.3, 0.0, 60.0), prev, deadzone_cm=0.5)
-    assert out == (1.0, 0.0, 60.0)  # clamped to previous
+    # XY moves 0.3 cm (< 0.5 cm deadzone), but Z changes from 60 → 65
+    out, _ = _apply_deadzone((1.3, 0.0, 65.0), prev, deadzone_cm=0.5)
+    assert out[0] == pytest.approx(1.0)   # X clamped
+    assert out[1] == pytest.approx(0.0)   # Y clamped
+    assert out[2] == pytest.approx(65.0)  # Z passed through
+
 
 def test_apply_deadzone_passes_large_move():
     from launcher.tracker_thread import _apply_deadzone

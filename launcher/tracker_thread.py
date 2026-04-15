@@ -29,7 +29,9 @@ def _apply_deadzone(
     if prev is None:
         return raw, raw
     if math.hypot(raw[0] - prev[0], raw[1] - prev[1]) < deadzone_cm:
-        return prev, prev
+        # XY clamped to previous; Z always passes through
+        effective = (prev[0], prev[1], raw[2])
+        return effective, prev
     return raw, raw
 
 
@@ -153,9 +155,8 @@ class TrackerThread(QThread):
             process_noise=trk["smoothing_q"],
             measurement_noise=trk["smoothing_r"],
         )
-        _r = SharedSettingsReader()
-        _startup = _r.read()
-        _r.close()
+        with SharedSettingsReader() as _r:
+            _startup = _r.read()
         _ipd_cm = (
             (_startup.ipd_mm / 10.0)
             if _startup and _startup.ipd_mm > 0
