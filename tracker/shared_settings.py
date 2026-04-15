@@ -126,35 +126,41 @@ class SharedSettingsReader:
         self._try_attach()
 
     def _try_attach(self) -> None:
-        if self._view:
+        if self._view is not None:
             return
-        if not self._handle:
+        if self._handle is None:
             self._handle = _k32.OpenFileMappingW(_FILE_MAP_READ, False, self._name)
-        if self._handle and not self._view:
-            self._view = _k32.MapViewOfFile(
-                self._handle, _FILE_MAP_READ, 0, 0, STRUCT_SIZE,
-            )
+            if self._handle is None:
+                return  # writer not running yet
+        self._view = _k32.MapViewOfFile(
+            self._handle, _FILE_MAP_READ, 0, 0, STRUCT_SIZE,
+        )
+        if self._view is None:
+            # Map failed; close handle so next call retries cleanly
+            _k32.CloseHandle(self._handle)
+            self._handle = None
 
     def read(self) -> OverlaySettings | None:
         """Return current settings snapshot, or None if writer not running."""
         self._try_attach()
-        if not self._view:
+        if self._view is None:
             return None
         try:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
-            f = struct.unpack(STRUCT_FORMAT, bytes(raw))
-            return OverlaySettings(
-                strength_x=f[0], strength_y=f[1],
-                virtual_depth_cm=f[2],
-                screen_w_cm=f[3], screen_h_cm=f[4],
-                depth_curve=f[5],
-                depth_gamma=f[6], focus_radius=f[7],
-                head_dist_cm=f[8], camera_fov_deg=f[9],
-                ipd_mm=f[10], smoothing_alpha=f[11],
-                deadzone_mm=f[12],
-            )
-        except Exception:
+        except OSError:
+            self._view = None  # stale view; force re-attach next call
             return None
+        f = struct.unpack(STRUCT_FORMAT, bytes(raw))
+        return OverlaySettings(
+            strength_x=f[0], strength_y=f[1],
+            virtual_depth_cm=f[2],
+            screen_w_cm=f[3], screen_h_cm=f[4],
+            depth_curve=f[5],
+            depth_gamma=f[6], focus_radius=f[7],
+            head_dist_cm=f[8], camera_fov_deg=f[9],
+            ipd_mm=f[10], smoothing_alpha=f[11],
+            deadzone_mm=f[12],
+        )
 
     def close(self) -> None:
         if self._view is not None:
