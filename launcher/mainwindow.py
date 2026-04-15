@@ -7,19 +7,30 @@ import yaml
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
+    QSlider,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
+from launcher.presets import list_presets, save_preset, load_preset, delete_preset
+from launcher.calibration import detect_screen_cm, measure_head_distance
 
+from launcher.overlay_process import OverlayProcess, OverlayStartError
 from launcher.tracker_thread import TrackerThread
 
 # Window dimensions
-_EXPANDED_W, _EXPANDED_H = 270, 310
-_COMPACT_W, _COMPACT_H = 400, 100
+_EXPANDED_W, _EXPANDED_H = 430, 440
+_COMPACT_W,  _COMPACT_H  = 430, 100
 
 _STATUS_TEXT = {
     "tracking": "● TRACKING",
@@ -51,7 +62,27 @@ class MainWindow(QMainWindow):
         self._config_path = config_path
         self._compact: bool = config.get("gui", {}).get("compact_mode", False)
         self._thread: Optional[TrackerThread] = None
+        self._overlay = OverlayProcess()
         self._drag_pos: Optional[QPoint] = None
+
+        self._settings_writer = SharedSettingsWriter()
+        ov = config.get("overlay", {})
+        self._settings = OverlaySettings(
+            strength_x=float(ov.get("strength_x", 1.0)),
+            strength_y=float(ov.get("strength_y", 1.0)),
+            virtual_depth_cm=float(ov.get("virtual_depth_cm", 30.0)),
+            screen_w_cm=float(ov.get("screen_w_cm", 0.0)),
+            screen_h_cm=float(ov.get("screen_h_cm", 0.0)),
+            depth_curve=int(ov.get("depth_curve", 1)),
+            depth_gamma=float(ov.get("depth_gamma", 1.0)),
+            focus_radius=float(ov.get("focus_radius", 0.1)),
+            head_dist_cm=float(ov.get("head_dist_cm", 60.0)),
+            camera_fov_deg=float(ov.get("camera_fov_deg", 90.0)),
+            ipd_mm=float(ov.get("ipd_mm", 64.0)),
+            smoothing_alpha=float(ov.get("smoothing_alpha", 0.1)),
+            deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
+        )
+        self._settings_writer.write(self._settings)
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -75,12 +106,27 @@ class MainWindow(QMainWindow):
         self._root_layout.setSpacing(0)
 
         self._root_layout.addWidget(self._make_titlebar())
+
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(
+            "QTabWidget::pane{border:none;background:#0d0d22;}"
+            "QTabBar::tab{background:#1a1a2e;color:#888;padding:5px 14px;}"
+            "QTabBar::tab:selected{background:#0d0d22;color:#c8c8e8;}"
+        )
+
+        tracker_tab = QWidget()
+        tl = QVBoxLayout(tracker_tab)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(0)
         self._camera_label = QLabel()
         self._camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._camera_label.setStyleSheet("background:#0a0a0a;")
-        self._root_layout.addWidget(self._camera_label)
-        self._root_layout.addLayout(self._make_xyz_row())
-        self._root_layout.addWidget(self._make_action_button())
+        tl.addWidget(self._camera_label)
+        tl.addLayout(self._make_xyz_row())
+        tl.addWidget(self._make_action_button())
+        self._tabs.addTab(tracker_tab, "Tracker")
+        self._tabs.addTab(self._make_advanced_tab(), "Advanced")
+        self._root_layout.addWidget(self._tabs)
 
     def _make_titlebar(self) -> QWidget:
         bar = QWidget()
@@ -180,6 +226,16 @@ class MainWindow(QMainWindow):
         thread.status_changed.connect(self._on_status)
         thread.start()
         self._thread = thread
+
+        # Launch the overlay process alongside the tracker. A missing binary
+        # is surfaced via status; the tracker keeps running so shared-memory
+        # consumers (or a manually-launched overlay) still get head pose.
+        try:
+            self._overlay.start()
+        except OverlayStartError as e:
+            print(f"[launcher] overlay launch failed: {e}")
+            self._on_status("error")
+
         self._action_btn.setText("■ STOP TRACKING")
         self._action_btn.setStyleSheet(
             "background:#e84040;color:#fff;font-weight:bold;"
@@ -190,6 +246,7 @@ class MainWindow(QMainWindow):
         if self._thread:
             self._thread.stop()
             self._thread = None
+        self._overlay.stop()
         self._on_status("stopped")
         self._action_btn.setText("▶ START TRACKING")
         self._action_btn.setStyleSheet(
@@ -246,7 +303,283 @@ class MainWindow(QMainWindow):
         if event.button() == Qt.MouseButton.LeftButton:  # type: ignore[attr-defined]
             self._drag_pos = None
 
+    # ── Slider helper ──────────────────────────────────────────────────────────
+
+    def _make_slider(self, lo: float, hi: float, value: float, step: float) -> QSlider:
+        s = QSlider(Qt.Orientation.Horizontal)
+        s.setMinimum(0)
+        s.setMaximum(int(round((hi - lo) / step)))
+        s.setValue(int(round((value - lo) / step)))
+        s.setProperty("_lo", lo)
+        s.setProperty("_step", step)
+        return s
+
+    def _slider_value(self, s: QSlider) -> float:
+        return s.property("_lo") + s.value() * s.property("_step")
+
+    # ── Advanced tab ───────────────────────────────────────────────────────────
+
+    def _make_advanced_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background:#0d0d22;}")
+        inner = QWidget()
+        inner.setStyleSheet("background:#0d0d22;color:#c8c8e8;")
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(8)
+
+        # Presets
+        pg = QGroupBox("Presets")
+        pg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        pl = QHBoxLayout(pg)
+        self._preset_combo = QComboBox()
+        self._preset_combo.setEditable(True)
+        self._refresh_presets()
+        for label, slot in [("Save", self._on_preset_save),
+                             ("Load", self._on_preset_load),
+                             ("Delete", self._on_preset_delete)]:
+            btn = QPushButton(label)
+            btn.clicked.connect(slot)
+            pl.addWidget(btn)
+        pl.insertWidget(0, self._preset_combo)
+        lay.addWidget(pg)
+
+        # Shader
+        sg = QGroupBox("Shader Tuning")
+        sg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        sf = QFormLayout(sg)
+        self._depth_curve_combo = QComboBox()
+        self._depth_curve_combo.addItems(["Linear", "\u221a sqrt", "Gamma \u03b3"])
+        self._depth_curve_combo.setCurrentIndex(int(self._settings.depth_curve))
+        self._depth_curve_combo.currentIndexChanged.connect(self._on_settings_change)
+        sf.addRow("Depth curve", self._depth_curve_combo)
+        self._depth_gamma_spin = QDoubleSpinBox()
+        self._depth_gamma_spin.setRange(0.3, 3.0)
+        self._depth_gamma_spin.setSingleStep(0.1)
+        self._depth_gamma_spin.setValue(self._settings.depth_gamma)
+        self._depth_gamma_spin.valueChanged.connect(self._on_settings_change)
+        sf.addRow("Gamma \u03b3", self._depth_gamma_spin)
+        self._strength_x_slider = self._make_slider(0.0, 5.0, self._settings.strength_x, 0.05)
+        self._strength_x_slider.valueChanged.connect(self._on_settings_change)
+        sf.addRow("Strength X", self._strength_x_slider)
+        self._strength_y_slider = self._make_slider(0.0, 5.0, self._settings.strength_y, 0.05)
+        self._strength_y_slider.valueChanged.connect(self._on_settings_change)
+        sf.addRow("Strength Y", self._strength_y_slider)
+        self._focus_radius_slider = self._make_slider(0.0, 0.5, self._settings.focus_radius, 0.01)
+        self._focus_radius_slider.valueChanged.connect(self._on_settings_change)
+        sf.addRow("Focus radius", self._focus_radius_slider)
+        self._virtual_depth_slider = self._make_slider(0.0, 200.0, self._settings.virtual_depth_cm, 1.0)
+        self._virtual_depth_slider.valueChanged.connect(self._on_settings_change)
+        sf.addRow("Virtual depth cm", self._virtual_depth_slider)
+        lay.addWidget(sg)
+
+        # Calibration
+        cg = QGroupBox("Auto-Calibration")
+        cg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        cf = QFormLayout(cg)
+        self._screen_w_spin = QDoubleSpinBox()
+        self._screen_w_spin.setRange(0.0, 500.0)
+        self._screen_w_spin.setDecimals(1)
+        self._screen_w_spin.setSuffix(" cm")
+        self._screen_w_spin.setValue(self._settings.screen_w_cm)
+        self._screen_w_spin.valueChanged.connect(self._on_settings_change)
+        self._screen_h_spin = QDoubleSpinBox()
+        self._screen_h_spin.setRange(0.0, 500.0)
+        self._screen_h_spin.setDecimals(1)
+        self._screen_h_spin.setSuffix(" cm")
+        self._screen_h_spin.setValue(self._settings.screen_h_cm)
+        self._screen_h_spin.valueChanged.connect(self._on_settings_change)
+        detect_btn = QPushButton("Auto-detect screen size")
+        detect_btn.clicked.connect(self._on_detect_screen)
+        self._head_dist_spin = QDoubleSpinBox()
+        self._head_dist_spin.setRange(20.0, 200.0)
+        self._head_dist_spin.setDecimals(1)
+        self._head_dist_spin.setSuffix(" cm")
+        self._head_dist_spin.setValue(self._settings.head_dist_cm)
+        self._head_dist_spin.valueChanged.connect(self._on_settings_change)
+        measure_btn = QPushButton("Measure head distance from camera")
+        measure_btn.clicked.connect(self._on_measure_head)
+        self._calib_status = QLabel("")
+        self._calib_status.setStyleSheet("color:#4a4;font-size:10px;")
+        cf.addRow("Screen W", self._screen_w_spin)
+        cf.addRow("Screen H", self._screen_h_spin)
+        cf.addRow("", detect_btn)
+        cf.addRow("Head dist", self._head_dist_spin)
+        cf.addRow("", measure_btn)
+        cf.addRow("", self._calib_status)
+        lay.addWidget(cg)
+
+        # Tracker
+        tg = QGroupBox("Tracker Calibration")
+        tg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        tf = QFormLayout(tg)
+        self._fov_combo = QComboBox()
+        self._fov_combo.setEditable(True)
+        for fov in ["60", "70", "78", "90", "100", "110", "120"]:
+            self._fov_combo.addItem(f"{fov}\u00b0", float(fov))
+        idx = self._fov_combo.findText(f"{int(self._settings.camera_fov_deg)}\u00b0")
+        if idx >= 0:
+            self._fov_combo.setCurrentIndex(idx)
+        self._fov_combo.currentIndexChanged.connect(self._on_settings_change)
+        tf.addRow("Camera FOV", self._fov_combo)
+        self._ipd_spin = QDoubleSpinBox()
+        self._ipd_spin.setRange(50.0, 80.0)
+        self._ipd_spin.setDecimals(1)
+        self._ipd_spin.setSuffix(" mm")
+        self._ipd_spin.setValue(self._settings.ipd_mm)
+        self._ipd_spin.valueChanged.connect(self._on_settings_change)
+        tf.addRow("IPD", self._ipd_spin)
+        self._smoothing_slider = self._make_slider(0.01, 1.0, self._settings.smoothing_alpha, 0.01)
+        self._smoothing_slider.valueChanged.connect(self._on_settings_change)
+        tf.addRow("Smoothing \u03b1", self._smoothing_slider)
+        self._deadzone_slider = self._make_slider(0.0, 30.0, self._settings.deadzone_mm, 0.5)
+        self._deadzone_slider.valueChanged.connect(self._on_settings_change)
+        tf.addRow("Deadzone mm", self._deadzone_slider)
+        lay.addWidget(tg)
+        lay.addStretch()
+
+        save_cfg_btn = QPushButton("Save to config.yaml")
+        save_cfg_btn.clicked.connect(self._on_save_config)
+        lay.addWidget(save_cfg_btn)
+
+        scroll.setWidget(inner)
+        return scroll
+
+    # ── Settings slots ─────────────────────────────────────────────────────────
+
+    def _snapshot_settings(self) -> OverlaySettings:
+        fov_text = self._fov_combo.currentText().replace("\u00b0", "").strip()
+        try:
+            fov = float(fov_text)
+        except ValueError:
+            fov = 90.0
+        return OverlaySettings(
+            strength_x=self._slider_value(self._strength_x_slider),
+            strength_y=self._slider_value(self._strength_y_slider),
+            virtual_depth_cm=self._slider_value(self._virtual_depth_slider),
+            screen_w_cm=float(self._screen_w_spin.value()),
+            screen_h_cm=float(self._screen_h_spin.value()),
+            depth_curve=self._depth_curve_combo.currentIndex(),
+            depth_gamma=float(self._depth_gamma_spin.value()),
+            focus_radius=self._slider_value(self._focus_radius_slider),
+            head_dist_cm=float(self._head_dist_spin.value()),
+            camera_fov_deg=fov,
+            ipd_mm=float(self._ipd_spin.value()),
+            smoothing_alpha=self._slider_value(self._smoothing_slider),
+            deadzone_mm=self._slider_value(self._deadzone_slider),
+        )
+
+    def _on_settings_change(self, *_: object) -> None:
+        self._settings = self._snapshot_settings()
+        self._settings_writer.write(self._settings)
+
+    def _on_detect_screen(self) -> None:
+        self._calib_status.setText("Detecting\u2026")
+        w, h = detect_screen_cm()
+        if w > 0 and h > 0:
+            self._screen_w_spin.setValue(w)
+            self._screen_h_spin.setValue(h)
+            self._calib_status.setText(f"Detected: {w:.1f} \u00d7 {h:.1f} cm")
+        else:
+            self._calib_status.setText("Detection failed \u2014 enter manually")
+
+    def _on_measure_head(self) -> None:
+        self._calib_status.setText("Measuring (hold still 3 s)\u2026")
+        dist = measure_head_distance(ipd_mm=self._ipd_spin.value())
+        self._head_dist_spin.setValue(dist)
+        self._calib_status.setText(f"Measured: {dist:.1f} cm")
+
+    def _refresh_presets(self) -> None:
+        self._preset_combo.clear()
+        for name in list_presets(self._config_path):
+            self._preset_combo.addItem(name)
+
+    def _on_preset_save(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        if not name:
+            return
+        s = self._snapshot_settings()
+        save_preset(self._config_path, name, {
+            "strength_x": s.strength_x, "strength_y": s.strength_y,
+            "virtual_depth_cm": s.virtual_depth_cm,
+            "screen_w_cm": s.screen_w_cm, "screen_h_cm": s.screen_h_cm,
+            "depth_curve": s.depth_curve, "depth_gamma": s.depth_gamma,
+            "focus_radius": s.focus_radius, "head_dist_cm": s.head_dist_cm,
+            "camera_fov_deg": s.camera_fov_deg, "ipd_mm": s.ipd_mm,
+            "smoothing_alpha": s.smoothing_alpha, "deadzone_mm": s.deadzone_mm,
+        })
+        self._refresh_presets()
+
+    def _on_preset_load(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        try:
+            data = load_preset(self._config_path, name)
+        except KeyError:
+            return
+        widgets = [
+            self._strength_x_slider, self._strength_y_slider,
+            self._virtual_depth_slider, self._focus_radius_slider,
+            self._smoothing_slider, self._deadzone_slider,
+            self._depth_gamma_spin, self._ipd_spin,
+            self._screen_w_spin, self._screen_h_spin,
+            self._head_dist_spin, self._depth_curve_combo, self._fov_combo,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+
+        def _set_slider(sl: QSlider, v: float) -> None:
+            sl.setValue(int(round((v - sl.property("_lo")) / sl.property("_step"))))
+
+        _set_slider(self._strength_x_slider,    data.get("strength_x",      1.0))
+        _set_slider(self._strength_y_slider,    data.get("strength_y",      1.0))
+        _set_slider(self._virtual_depth_slider, data.get("virtual_depth_cm", 30.0))
+        _set_slider(self._focus_radius_slider,  data.get("focus_radius",    0.1))
+        _set_slider(self._smoothing_slider,     data.get("smoothing_alpha", 0.1))
+        _set_slider(self._deadzone_slider,      data.get("deadzone_mm",     5.0))
+        self._depth_gamma_spin.setValue(data.get("depth_gamma", 1.0))
+        self._ipd_spin.setValue(data.get("ipd_mm", 64.0))
+        self._screen_w_spin.setValue(data.get("screen_w_cm", 0.0))
+        self._screen_h_spin.setValue(data.get("screen_h_cm", 0.0))
+        self._head_dist_spin.setValue(data.get("head_dist_cm", 60.0))
+        self._depth_curve_combo.setCurrentIndex(int(data.get("depth_curve", 1)))
+        idx = self._fov_combo.findText(f"{int(data.get('camera_fov_deg', 90))}\u00b0")
+        if idx >= 0:
+            self._fov_combo.setCurrentIndex(idx)
+        for w in widgets:
+            w.blockSignals(False)
+        self._on_settings_change()
+
+    def _on_preset_delete(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        delete_preset(self._config_path, name)
+        self._refresh_presets()
+
+    def _on_save_config(self) -> None:
+        s = self._snapshot_settings()
+        try:
+            try:
+                with open(self._config_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+            except FileNotFoundError:
+                cfg = {}
+            cfg.setdefault("overlay", {}).update(
+                strength_x=s.strength_x, strength_y=s.strength_y,
+                virtual_depth_cm=s.virtual_depth_cm,
+                screen_w_cm=s.screen_w_cm, screen_h_cm=s.screen_h_cm,
+                depth_curve=s.depth_curve, depth_gamma=s.depth_gamma,
+                focus_radius=s.focus_radius, head_dist_cm=s.head_dist_cm,
+                camera_fov_deg=s.camera_fov_deg, ipd_mm=s.ipd_mm,
+                smoothing_alpha=s.smoothing_alpha, deadzone_mm=s.deadzone_mm,
+            )
+            with open(self._config_path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+        except OSError:
+            pass
+
     def closeEvent(self, event: object) -> None:
         if self._thread and self._thread.isRunning():
             self._thread.stop()
+        self._overlay.stop()
+        self._settings_writer.close()
         event.accept()  # type: ignore[attr-defined]

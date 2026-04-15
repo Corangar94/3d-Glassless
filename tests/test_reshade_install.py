@@ -5,11 +5,14 @@ from unittest.mock import patch
 from launcher.reshade_install import install_steps, install, InstallError
 
 
+_ADDON_BUILD_SIZE = 4_155_904  # bytes expected by reshade_install size guard
+
+
 def _make_bundle(tmp_path):
     """Create a fake bundle directory with all required assets."""
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    (bundle / "ReShade64.dll").write_bytes(b"fake_dll")
+    (bundle / "ReShade64.dll").write_bytes(b"\x00" * _ADDON_BUILD_SIZE)
     shaders = bundle / "shaders"
     shaders.mkdir()
     (shaders / "Glassless3D.fx").write_text("fx")
@@ -33,7 +36,8 @@ def test_install_steps_copies_reshade_dll(tmp_path):
     os.makedirs(game_dir)
     with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
         list(install_steps(game_dir))
-    assert os.path.exists(os.path.join(game_dir, "d3d11.dll"))
+    # reshade_install copies ReShade64.dll as dxgi.dll (DX12 proxy for WoW)
+    assert os.path.exists(os.path.join(game_dir, "dxgi.dll"))
 
 
 def test_install_steps_copies_shaders(tmp_path):
@@ -115,4 +119,4 @@ def test_install_convenience_wrapper(tmp_path):
     os.makedirs(game_dir)
     with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
         install(game_dir)  # must not raise
-    assert os.path.exists(os.path.join(game_dir, "d3d11.dll"))
+    assert os.path.exists(os.path.join(game_dir, "dxgi.dll"))

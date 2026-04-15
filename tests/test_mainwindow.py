@@ -36,14 +36,16 @@ def window(qapp, tmp_path):
 
 def test_mainwindow_starts_in_expanded_mode(window):
     assert not window._compact
-    # Expanded width ~270, compact ~400 — expanded must be narrower
-    assert window.width() < 350
+    # Both modes share width=430; expanded is taller than compact
+    assert window.width() == 430
+    assert window.height() > 200
 
 
 def test_mainwindow_toggle_switches_to_compact(window):
     window._toggle_mode()
     assert window._compact
-    assert window.width() >= 350
+    assert window.width() == 430
+    assert window.height() == 100
 
 
 def test_mainwindow_toggle_back_to_expanded(window):
@@ -51,7 +53,8 @@ def test_mainwindow_toggle_back_to_expanded(window):
     window._apply_mode()
     window._toggle_mode()
     assert not window._compact
-    assert window.width() < 350
+    assert window.width() == 430
+    assert window.height() > 200
 
 
 def test_mainwindow_xyz_labels_update_on_signal(window):
