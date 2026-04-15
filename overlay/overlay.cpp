@@ -169,7 +169,14 @@ float4 main(PS_IN i) : SV_Target {
         i.uv.x + (headX / sw) * f * strengthX,
         i.uv.y - (headY / sh) * f * strengthY
     );
-    return SceneTex.Sample(SceneSmp, saturate(sampleUV));
+    // If the parallax shift pushes sampling outside the captured frame,
+    // fall back to the unshifted pixel.  This prevents the saturate()-clamp
+    // from stretching the screen edge across dozens/hundreds of pixels
+    // ("doubling" artifact at high head-offset or high virtual-depth).
+    if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
+        sampleUV.y < 0.0 || sampleUV.y > 1.0)
+        return SceneTex.Sample(SceneSmp, i.uv);
+    return SceneTex.Sample(SceneSmp, sampleUV);
 }
 )hlsl";
 
