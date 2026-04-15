@@ -9,12 +9,14 @@ STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 16
 _PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
 _INVALID_HANDLE = ctypes.c_void_p(-1)  # INVALID_HANDLE_VALUE (-1 as a void pointer)
+_FILE_MAP_READ = 0x0004
 
 _k32 = ctypes.windll.kernel32
 
 # NOTE: These assignments mutate the process-global windll.kernel32 object.
 # All callers in this process will inherit these restype/argtypes settings.
 _k32.CreateFileMappingW.restype = ctypes.c_void_p
+_k32.OpenFileMappingW.restype = ctypes.c_void_p
 _k32.MapViewOfFile.restype = ctypes.c_void_p
 _k32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
 _k32.CloseHandle.argtypes = [ctypes.c_void_p]
@@ -61,6 +63,61 @@ class SharedMemoryWriter:
             self._handle = None
 
     def __enter__(self) -> "SharedMemoryWriter":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class SharedMemoryReader:
+    """Read-only view of a Windows Named Shared Memory segment.
+
+    Returns None from read() if the segment does not exist yet.
+    Retries attachment automatically on each read() call.
+    """
+
+    def __init__(self, name: str = "G3D") -> None:
+        self._name = name
+        self._handle: int | None = None
+        self._view: int | None = None
+        self._try_attach()
+
+    def _try_attach(self) -> None:
+        if self._view is not None:
+            return
+        if self._handle is None:
+            self._handle = _k32.OpenFileMappingW(_FILE_MAP_READ, False, self._name)
+            if self._handle is None:
+                return  # writer not running yet
+        self._view = _k32.MapViewOfFile(
+            self._handle, _FILE_MAP_READ, 0, 0, STRUCT_SIZE,
+        )
+        if self._view is None:
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+
+    def read(self) -> tuple[float, float, float, int] | None:
+        """Return (x_cm, y_cm, z_cm, timestamp_ms) or None if segment absent."""
+        self._try_attach()
+        if self._view is None:
+            return None
+        try:
+            raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
+            x, y, z, ts = struct.unpack(STRUCT_FORMAT, bytes(raw))
+        except OSError:
+            self._view = None  # stale; force re-attach next call
+            return None
+        return x, y, z, ts
+
+    def close(self) -> None:
+        if self._view is not None:
+            _k32.UnmapViewOfFile(self._view)
+            self._view = None
+        if self._handle is not None:
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "SharedMemoryReader":
         return self
 
     def __exit__(self, *_: object) -> None:
