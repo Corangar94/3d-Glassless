@@ -140,8 +140,13 @@ def _interactive_mode() -> None:
 
     with SharedMemoryWriter() as w:
         frame = 0
+        last_print = time.monotonic() - 1.0  # force immediate first print
         try:
             while True:
+                now = time.monotonic()
+                if now - last_print >= 0.5:
+                    _print_status(x, y, z, settings)
+                    last_print = now
                 if msvcrt.kbhit():
                     ch = msvcrt.getwch()
                     if ch in ("\x00", "\xe0"):   # extended key prefix
