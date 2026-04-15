@@ -41,6 +41,12 @@ class KalmanFilter1D:
         self._x = value
         self._p = 1.0
 
+    def set_measurement_noise(self, r: float) -> None:
+        """Update measurement noise covariance in-place."""
+        if r <= 0:
+            raise ValueError(f"measurement_noise must be positive, got {r}")
+        self._r = r
+
 
 class HeadSmoother:
     """Three independent Kalman filters for X, Y, Z head position axes."""
@@ -73,3 +79,9 @@ class HeadSmoother:
         self._kf_x.reset()
         self._kf_y.reset()
         self._kf_z.reset(60.0)
+
+    def set_measurement_noise(self, r: float) -> None:
+        """Update measurement noise on all three axes (higher r = more smoothing)."""
+        self._kf_x.set_measurement_noise(r)
+        self._kf_y.set_measurement_noise(r)
+        self._kf_z.set_measurement_noise(r)

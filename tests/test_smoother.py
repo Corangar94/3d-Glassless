@@ -47,3 +47,20 @@ def test_kalman_rejects_invalid_noise():
         KalmanFilter1D(process_noise=0.01, measurement_noise=0.0)
     with pytest.raises(ValueError):
         KalmanFilter1D(process_noise=-0.01, measurement_noise=0.1)
+
+
+def test_set_measurement_noise_updates_responsiveness():
+    s = HeadSmoother(process_noise=0.01, measurement_noise=0.1)
+    s.set_measurement_noise(0.001)  # very responsive
+    for _ in range(15):
+        s.update(10.0, 0.0, 60.0)
+    x, _, _ = s.update(10.0, 0.0, 60.0)
+    assert x > 9.5  # after 16 frames with very low r, should be close to 10
+
+
+def test_set_measurement_noise_rejects_nonpositive():
+    s = HeadSmoother()
+    with pytest.raises(ValueError):
+        s.set_measurement_noise(0.0)
+    with pytest.raises(ValueError):
+        s.set_measurement_noise(-1.0)
