@@ -1,6 +1,7 @@
 """Always-on-top two-mode tracker window."""
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 import dataclasses
@@ -37,21 +38,35 @@ _EXPANDED_W, _EXPANDED_H = 430, 440
 _COMPACT_W,  _COMPACT_H  = 430, 100
 
 _STATUS_TEXT = {
-    "tracking": "● TRACKING",
-    "hold":     "● HOLD",
-    "paused":   "● PAUSED",
-    "stopped":  "● STOPPED",
-    "error":    "✕ NO CAMERA",
+    "tracking":     "● TRACKING",
+    "hold":         "● HOLD",
+    "paused":       "● PAUSED",
+    "stopped":      "● STOPPED",
+    "initializing": "⟳ INITIALIZING",
+    "error":        "✕ ERROR",
 }
 _STATUS_COLOR = {
-    "tracking": "#28c840",
-    "hold":     "#febc2e",
-    "paused":   "#888888",
-    "stopped":  "#888888",
-    "error":    "#e84040",
+    "tracking":     "#28c840",
+    "hold":         "#febc2e",
+    "paused":       "#888888",
+    "stopped":      "#888888",
+    "initializing": "#3ecfcf",
+    "error":        "#e84040",
 }
 _DARK_BG = "#0d0d22"
 _TITLE_BG = "#1a1a2e"
+
+
+def _preload_face_tracker() -> None:
+    """Import tracker.face_tracker (and mediapipe) in the background on startup.
+
+    This warms the import cache so the first Start Tracking click is instant
+    instead of waiting 30+ seconds for mediapipe to initialise.
+    """
+    try:
+        import tracker.face_tracker  # noqa: F401, PLC0415
+    except Exception:
+        pass  # will fail again at start-tracking time with a proper error message
 
 
 class MainWindow(QMainWindow):
@@ -89,6 +104,9 @@ class MainWindow(QMainWindow):
             deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
         )
         self._settings_writer.write(self._settings)
+
+        # Pre-warm mediapipe in the background so the first Start Tracking is instant.
+        threading.Thread(target=_preload_face_tracker, daemon=True).start()
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -234,6 +252,13 @@ class MainWindow(QMainWindow):
             self._start_tracking()
 
     def _start_tracking(self) -> None:
+        self._on_status("initializing")
+        self._action_btn.setText("■ STOP TRACKING")
+        self._action_btn.setStyleSheet(
+            "background:#e84040;color:#fff;font-weight:bold;"
+            "font-size:11px;padding:8px;border:none;"
+        )
+
         cam_idx = self._config["camera"]["index"]
         thread = TrackerThread(
             camera_index=cam_idx,
@@ -247,19 +272,12 @@ class MainWindow(QMainWindow):
         self._thread = thread
 
         # Launch the overlay process alongside the tracker. A missing binary
-        # is surfaced via status; the tracker keeps running so shared-memory
-        # consumers (or a manually-launched overlay) still get head pose.
+        # is surfaced in overlay.log; the tracker keeps running so shared-memory
+        # consumers still get head pose.
         try:
             self._overlay.start()
         except OverlayStartError as e:
             _log.warning("overlay launch failed: %s", e)
-            self._on_status("error")
-
-        self._action_btn.setText("■ STOP TRACKING")
-        self._action_btn.setStyleSheet(
-            "background:#e84040;color:#fff;font-weight:bold;"
-            "font-size:11px;padding:8px;border:none;"
-        )
 
     def _stop_tracking(self) -> None:
         if self._thread:

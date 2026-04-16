@@ -1,11 +1,14 @@
 """QThread that runs the head-tracking loop and emits Qt signals."""
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
 from collections import deque
 from typing import TYPE_CHECKING, Callable, Optional
+
+_log = logging.getLogger(__name__)
 
 import cv2
 from PySide6.QtCore import QThread, Signal
@@ -236,7 +239,8 @@ class TrackerThread(QThread):
                     config_path=self._config_path,
                 )
                 loop.run(camera_index=self._camera_index)
-        except RuntimeError:
+        except Exception as exc:
+            _log.error("TrackerThread failed: %s", exc, exc_info=True)
             self.status_changed.emit("error")
 
     def stop(self) -> None:
