@@ -6,7 +6,7 @@ from typing import Optional
 import dataclasses
 import logging
 import yaml
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QPixmap
 
 _log = logging.getLogger(__name__)
@@ -523,6 +523,21 @@ class MainWindow(QMainWindow):
             self._stop_tracking()
             self._start_tracking()
         self._tilt_status.setText("Recalibrating — sit normally for 3 s...")
+        QTimer.singleShot(3500, self._on_calibration_done)
+
+    def _on_calibration_done(self) -> None:
+        """Update tilt label after the 3-second calibration window closes."""
+        try:
+            with open(self._config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            tilt = cfg.get("tracking", {}).get("camera_tilt_deg")
+            if tilt is not None:
+                self._tilt_spin.setValue(float(tilt))
+                self._tilt_status.setText(f"Auto-detected: {tilt:.1f}°")
+            else:
+                self._tilt_status.setText("No face detected — try again")
+        except OSError:
+            self._tilt_status.setText("Done")
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
