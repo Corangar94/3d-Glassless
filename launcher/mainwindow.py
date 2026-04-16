@@ -522,6 +522,9 @@ class MainWindow(QMainWindow):
             self._tilt_status.setText(f"Error: {e}")
             return
 
+        # Also clear from the in-memory config so TrackerThread sees auto_calibrate=True
+        self._config.get("tracking", {}).pop("camera_tilt_deg", None)
+
         was_running = self._thread and self._thread.isRunning()
         if was_running:
             self._stop_tracking()
