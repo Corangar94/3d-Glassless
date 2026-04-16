@@ -151,10 +151,19 @@ class MainWindow(QMainWindow):
         )
         self._toggle_btn.clicked.connect(self._toggle_mode)
 
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(24, 18)
+        close_btn.setStyleSheet(
+            "background:transparent;color:#555;font-size:11px;border:none;"
+            "QPushButton:hover{color:#e84040;}"
+        )
+        close_btn.clicked.connect(self.close)
+
         layout.addWidget(logo)
         layout.addStretch()
         layout.addWidget(self._status_label)
         layout.addWidget(self._toggle_btn)
+        layout.addWidget(close_btn)
         return bar
 
     def _make_xyz_row(self) -> QHBoxLayout:
