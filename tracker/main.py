@@ -13,6 +13,39 @@ from tracker.freetrack import FreetracWriter
 from tracker.shared_memory import SharedMemoryWriter
 from tracker.smoother import HeadSmoother
 
+_CAL_DURATION_S = 3.0
+
+
+def _calibrate_tilt(
+    y_samples: list[float],
+    z_samples: list[float],
+    min_samples: int = 10,
+) -> float | None:
+    """Return auto-detected tilt_deg, or None if not enough data.
+
+    Uses arctan(mean_y / mean_z) to estimate the angle at which the camera
+    is tilted downward relative to the scene horizon.
+    """
+    if len(y_samples) < min_samples:
+        return None
+    mean_y = sum(y_samples) / len(y_samples)
+    mean_z = sum(z_samples) / len(z_samples)
+    if mean_z <= 0:
+        return None
+    return math.degrees(math.atan2(mean_y, mean_z))
+
+
+def _save_tilt_to_config(config_path: str, tilt_deg: float) -> None:
+    """Persist auto-calibrated tilt back to config.yaml."""
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        cfg.setdefault("tracking", {})["camera_tilt_deg"] = round(tilt_deg, 2)
+        with open(config_path, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False)
+    except OSError as e:
+        print(f"[tracker] Warning: could not save tilt to config: {e}")
+
 
 def _apply_camera_tilt(x: float, y: float, z: float, tilt_deg: float) -> tuple[float, float, float]:
     """Rotate head pose from camera space to screen space.
@@ -41,6 +74,8 @@ class TrackingLoop:
         hold_ms: int = 500,
         stop_event: Optional[threading.Event] = None,
         camera_tilt_deg: float = 0.0,
+        config_path: Optional[str] = None,
+        auto_calibrate: bool = False,
     ) -> None:
         self._tracker = tracker
         self._writer = writer
@@ -50,6 +85,8 @@ class TrackingLoop:
         self._last_smoothed: tuple[float, float, float] = (0.0, 0.0, 60.0)
         self._stop_event = stop_event
         self._camera_tilt_deg: float = camera_tilt_deg
+        self._config_path: Optional[str] = config_path
+        self._auto_calibrate: bool = auto_calibrate
 
     def run(self, camera_index: int = 0, max_frames: Optional[int] = None) -> None:
         """Run the tracking loop. Blocks until max_frames reached or Ctrl+C."""
@@ -57,6 +94,10 @@ class TrackingLoop:
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
         frame_count = 0
+        cal_y: list[float] = []
+        cal_z: list[float] = []
+        cal_start = time.monotonic()
+        calibrated = not self._auto_calibrate  # skip calibration window if already have a value
         try:
             while not self._should_stop():
                 ok, frame = cap.read()
@@ -66,6 +107,21 @@ class TrackingLoop:
                 self._on_frame(frame)
 
                 pos: Optional[HeadPosition] = self._tracker.process_frame(frame)
+
+                # Calibration window: collect raw pre-tilt samples for 3 seconds
+                if not calibrated:
+                    elapsed = time.monotonic() - cal_start
+                    if pos is not None:
+                        cal_y.append(pos.y_cm)
+                        cal_z.append(pos.z_cm)
+                    if elapsed >= _CAL_DURATION_S:
+                        detected = _calibrate_tilt(cal_y, cal_z)
+                        if detected is not None:
+                            self._camera_tilt_deg = detected
+                            if self._config_path is not None:
+                                _save_tilt_to_config(self._config_path, detected)
+                            print(f"[tracker] Auto-calibrated camera tilt: {detected:.1f}\u00b0")
+                        calibrated = True
 
                 if pos is not None:
                     self._last_face_ms = time.monotonic() * 1000.0
@@ -181,6 +237,7 @@ def main() -> None:
                 ft_writer.write(x=x, y=y, z=z)
                 g3d_writer.write(x=x, y=y, z=z)
 
+        tilt_in_config = "camera_tilt_deg" in trk
         loop = TrackingLoop(
             tracker=tracker,
             writer=_MultiWriter(),  # type: ignore[arg-type]
@@ -188,6 +245,8 @@ def main() -> None:
             hold_ms=trk["hold_ms"],
             stop_event=stop_event,
             camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)),
+            config_path=args.config,
+            auto_calibrate=not tilt_in_config,
         )
         try:
             loop.run(camera_index=cam["index"])

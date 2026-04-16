@@ -3,8 +3,27 @@ import math
 import pytest
 from unittest.mock import MagicMock, patch
 
-from tracker.main import TrackingLoop, _apply_camera_tilt
+from tracker.main import TrackingLoop, _apply_camera_tilt, _calibrate_tilt
 from tracker.face_tracker import HeadPosition
+
+
+# ── _calibrate_tilt tests ───────────────────────────────────────────────────
+
+def test_calibrate_tilt_returns_none_when_too_few_samples():
+    assert _calibrate_tilt([1.0], [45.0]) is None
+
+
+def test_calibrate_tilt_computes_correct_angle():
+    # arctan(13.8 / 45) ≈ 17.0°
+    y = [13.8] * 20
+    z = [45.0] * 20
+    result = _calibrate_tilt(y, z)
+    assert result is not None
+    assert abs(result - 17.0) < 0.5
+
+
+def test_calibrate_tilt_returns_none_for_zero_z():
+    assert _calibrate_tilt([1.0] * 15, [0.0] * 15) is None
 
 
 # ── _apply_camera_tilt tests ────────────────────────────────────────────────

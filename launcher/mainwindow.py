@@ -450,7 +450,21 @@ class MainWindow(QMainWindow):
         self._camera_tilt_spin.setSuffix(" °")
         self._camera_tilt_spin.setValue(self._camera_tilt_deg)
         self._camera_tilt_spin.valueChanged.connect(self._on_camera_tilt_change)
-        tf.addRow("Camera tilt", self._camera_tilt_spin)
+        tilt_row = QWidget()
+        tilt_row_layout = QHBoxLayout(tilt_row)
+        tilt_row_layout.setContentsMargins(0, 0, 0, 0)
+        tilt_row_layout.setSpacing(4)
+        tilt_row_layout.addWidget(self._camera_tilt_spin)
+        recal_btn = QPushButton("Re-calibrate")
+        recal_btn.setToolTip(
+            "Remove saved tilt angle so the tracker auto-detects it on next start"
+        )
+        recal_btn.clicked.connect(self._on_recalibrate_tilt)
+        tilt_row_layout.addWidget(recal_btn)
+        self._tilt_status = QLabel("")
+        self._tilt_status.setStyleSheet("color:#4a4;font-size:10px;")
+        tilt_row_layout.addWidget(self._tilt_status)
+        tf.addRow("Camera tilt", tilt_row)
         lay.addWidget(tg)
         lay.addStretch()
 
@@ -491,6 +505,18 @@ class MainWindow(QMainWindow):
 
     def _on_camera_tilt_change(self, value: float) -> None:
         self._camera_tilt_deg = float(value)
+
+    def _on_recalibrate_tilt(self) -> None:
+        """Remove camera_tilt_deg from config so the tracker auto-detects it on next start."""
+        try:
+            with open(self._config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            cfg.get("tracking", {}).pop("camera_tilt_deg", None)
+            with open(self._config_path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False)
+            self._tilt_status.setText("Restart tracker to re-calibrate")
+        except OSError as e:
+            self._tilt_status.setText(f"Error: {e}")
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
