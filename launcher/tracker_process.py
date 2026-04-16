@@ -63,6 +63,10 @@ class TrackerProcess(QObject):
         self._timer.start()
         self.status_changed.emit("initializing")
 
+    def isRunning(self) -> bool:
+        """API-compat with QThread.isRunning()."""
+        return self._proc is not None and self._proc.poll() is None
+
     def stop(self) -> None:
         """Terminate the subprocess and release resources."""
         self._timer.stop()
