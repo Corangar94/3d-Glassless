@@ -11,6 +11,7 @@ from PySide6.QtCore import QThread, Signal
 
 from tracker.face_tracker import FaceTracker, HeadPosition
 from tracker.freetrack import FreetracWriter
+from tracker.main import _apply_camera_tilt, _calibrate_tilt, _save_tilt_to_config
 from tracker.shared_memory import SharedMemoryWriter
 from tracker.shared_settings import SharedSettingsReader
 from tracker.smoother import HeadSmoother
@@ -45,6 +46,8 @@ class _SignallingLoop:
     changes, update the corresponding block in _SignallingLoop.run() here.
     """
 
+    _CAL_DURATION_S = 3.0
+
     def __init__(
         self,
         stop_event: threading.Event,
@@ -57,6 +60,9 @@ class _SignallingLoop:
         g3d_writer: SharedMemoryWriter,
         smoother: HeadSmoother,
         hold_ms: int = 500,
+        camera_tilt_deg: float = 0.0,
+        config_path: Optional[str] = None,
+        auto_calibrate: bool = False,
     ) -> None:
         self._stop_event = stop_event
         self._on_frame_cb = on_frame
@@ -68,6 +74,9 @@ class _SignallingLoop:
         self._g3d_writer = g3d_writer
         self._smoother = smoother
         self._hold_ms = hold_ms
+        self._camera_tilt_deg = camera_tilt_deg
+        self._config_path = config_path
+        self._auto_calibrate = auto_calibrate
         self._settings_reader = SharedSettingsReader()
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_face_ms: Optional[float] = None
@@ -78,6 +87,10 @@ class _SignallingLoop:
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
+        cal_y: list[float] = []
+        cal_z: list[float] = []
+        cal_start = time.monotonic()
+        calibrated = not self._auto_calibrate
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
@@ -102,6 +115,11 @@ class _SignallingLoop:
                     self._last_smoothed = smoothed
                     x, y, z = smoothed
                     status = "tracking"
+
+                    # Collect raw (pre-tilt) samples during calibration window
+                    if not calibrated:
+                        cal_y.append(pos.y_cm)
+                        cal_z.append(pos.z_cm)
                 else:
                     now_ms = time.monotonic() * 1000.0
                     hold_expired = (
@@ -115,6 +133,16 @@ class _SignallingLoop:
                         x, y, z = self._last_smoothed
                         status = "hold"
 
+                # Close calibration window
+                if not calibrated and time.monotonic() - cal_start >= self._CAL_DURATION_S:
+                    detected = _calibrate_tilt(cal_y, cal_z)
+                    if detected is not None:
+                        self._camera_tilt_deg = detected
+                        if self._config_path:
+                            _save_tilt_to_config(self._config_path, detected)
+                    calibrated = True
+
+                x, y, z = _apply_camera_tilt(x, y, z, self._camera_tilt_deg)
                 self._writer.write(x=x, y=y, z=z)
                 # Also publish to the G3D shared memory that the overlay reads
                 self._g3d_writer.write(x=x, y=y, z=z)
@@ -142,10 +170,17 @@ class TrackerThread(QThread):
     frame_ready = Signal(bytes)                      # JPEG-encoded camera frame
     status_changed = Signal(str)                     # "tracking"|"hold"|"paused"|"error"
 
-    def __init__(self, camera_index: int, config: dict, parent: object = None) -> None:
+    def __init__(
+        self,
+        camera_index: int,
+        config: dict,
+        config_path: str = "",
+        parent: object = None,
+    ) -> None:
         super().__init__(parent)  # type: ignore[call-overload]
         self._camera_index = camera_index
         self._config = config
+        self._config_path = config_path
         self._stop_event = threading.Event()
 
     def run(self) -> None:
@@ -178,6 +213,7 @@ class TrackerThread(QThread):
                 FreetracWriter() as writer,
                 SharedMemoryWriter() as g3d_writer,
             ):
+                tilt_in_config = "camera_tilt_deg" in trk
                 loop = _SignallingLoop(
                     stop_event=self._stop_event,
                     on_frame=self.frame_ready.emit,
@@ -189,6 +225,9 @@ class TrackerThread(QThread):
                     g3d_writer=g3d_writer,
                     smoother=smoother,
                     hold_ms=trk["hold_ms"],
+                    camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)),
+                    config_path=self._config_path,
+                    auto_calibrate=not tilt_in_config,
                 )
                 loop.run(camera_index=self._camera_index)
         except RuntimeError:

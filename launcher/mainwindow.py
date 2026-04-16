@@ -226,7 +226,11 @@ class MainWindow(QMainWindow):
 
     def _start_tracking(self) -> None:
         cam_idx = self._config["camera"]["index"]
-        thread = TrackerThread(camera_index=cam_idx, config=self._config)
+        thread = TrackerThread(
+            camera_index=cam_idx,
+            config=self._config,
+            config_path=self._config_path,
+        )
         thread.position_updated.connect(self._on_position)
         thread.frame_ready.connect(self._on_frame)
         thread.status_changed.connect(self._on_status)
