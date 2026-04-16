@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(24, 18)
         close_btn.setStyleSheet(
-            "background:transparent;color:#555;font-size:11px;border:none;"
+            "QPushButton{background:transparent;color:#555;font-size:11px;border:none;}"
             "QPushButton:hover{color:#e84040;}"
         )
         close_btn.clicked.connect(self.close)
