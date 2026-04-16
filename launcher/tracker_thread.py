@@ -97,11 +97,23 @@ class _SignallingLoop:
         """Run the tracking loop. Raises RuntimeError if camera cannot open."""
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
-            # Find which cameras ARE available to produce a useful error message.
             available = [i for i in range(6) if cv2.VideoCapture(i).isOpened()]
             raise RuntimeError(
                 f"Could not open camera {camera_index}. "
-                f"Available indices: {available or 'none found — camera may be in use by another app'}"
+                f"Available indices: {available or 'none — camera may be in use by Discord/Teams/Zoom'}"
+            )
+        # Verify the camera can actually stream (MSMF opens but returns no frames
+        # when Discord/Teams holds the camera in exclusive mode).
+        for _ in range(15):
+            ok, _frame = cap.read()
+            if ok:
+                break
+            time.sleep(0.1)
+        else:
+            cap.release()
+            raise RuntimeError(
+                f"Camera {camera_index} opened but returned no frames. "
+                "Close Discord, Teams, or any other app using the camera and try again."
             )
         tilt_buf_y: deque[float] = deque(maxlen=_TILT_WINDOW)
         tilt_buf_z: deque[float] = deque(maxlen=_TILT_WINDOW)
