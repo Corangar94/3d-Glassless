@@ -70,6 +70,8 @@ class MainWindow(QMainWindow):
         self._drag_pos: Optional[QPoint] = None
 
         self._settings_writer = SharedSettingsWriter()
+        trk = config.get("tracking", {})
+        self._camera_tilt_deg: float = float(trk.get("camera_tilt_deg", 0.0))
         ov = config.get("overlay", {})
         self._settings = OverlaySettings(
             strength_x=float(ov.get("strength_x", 1.0)),
@@ -441,6 +443,14 @@ class MainWindow(QMainWindow):
         self._deadzone_slider = self._make_slider(0.0, 30.0, self._settings.deadzone_mm, 0.5)
         self._deadzone_slider.valueChanged.connect(self._on_settings_change)
         tf.addRow("Deadzone mm", self._deadzone_slider)
+        self._camera_tilt_spin = QDoubleSpinBox()
+        self._camera_tilt_spin.setRange(-45.0, 45.0)
+        self._camera_tilt_spin.setSingleStep(1.0)
+        self._camera_tilt_spin.setDecimals(1)
+        self._camera_tilt_spin.setSuffix(" °")
+        self._camera_tilt_spin.setValue(self._camera_tilt_deg)
+        self._camera_tilt_spin.valueChanged.connect(self._on_camera_tilt_change)
+        tf.addRow("Camera tilt", self._camera_tilt_spin)
         lay.addWidget(tg)
         lay.addStretch()
 
@@ -478,6 +488,9 @@ class MainWindow(QMainWindow):
     def _on_settings_change(self, *_: object) -> None:
         self._settings = self._snapshot_settings()
         self._settings_writer.write(self._settings)
+
+    def _on_camera_tilt_change(self, value: float) -> None:
+        self._camera_tilt_deg = float(value)
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
@@ -571,6 +584,7 @@ class MainWindow(QMainWindow):
             except FileNotFoundError:
                 cfg = {}
             cfg.setdefault("overlay", {}).update(dataclasses.asdict(s))
+            cfg.setdefault("tracking", {})["camera_tilt_deg"] = self._camera_tilt_deg
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
         except OSError:

@@ -1,9 +1,29 @@
 # tests/test_main.py
+import math
 import pytest
 from unittest.mock import MagicMock, patch
 
-from tracker.main import TrackingLoop
+from tracker.main import TrackingLoop, _apply_camera_tilt
 from tracker.face_tracker import HeadPosition
+
+
+# ── _apply_camera_tilt tests ────────────────────────────────────────────────
+
+def test_tilt_zero_is_identity():
+    x, y, z = _apply_camera_tilt(1.0, 2.0, 3.0, 0.0)
+    assert x == 1.0 and y == 2.0 and z == 3.0
+
+
+def test_tilt_corrects_y_offset():
+    """20° downward camera tilt: y=13.8, z=45 should give y≈-2.4, z≈47."""
+    x, y, z = _apply_camera_tilt(0.0, 13.8, 45.0, 20.0)
+    assert abs(y - (-2.4)) < 0.2   # y corrected to near zero
+    assert abs(z - 47.0) < 0.5     # z slightly adjusted
+
+
+def test_tilt_x_unchanged():
+    x, y, z = _apply_camera_tilt(5.0, 13.8, 45.0, 20.0)
+    assert x == 5.0  # x is not affected by X-axis rotation
 
 
 def _make_mock_cap():
