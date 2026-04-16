@@ -39,12 +39,31 @@ def estimate_z_cm(
 def estimate_xy_cm(
     nose_x_norm: float,
     nose_y_norm: float,
-    screen_width_cm: float,
-    screen_height_cm: float,
+    z_cm: float,
+    camera_fov_deg: float,
+    image_width: int,
+    image_height: int,
 ) -> tuple[float, float]:
-    """Convert normalised nose position to cm offset from screen centre."""
-    x_cm = (nose_x_norm - 0.5) * screen_width_cm
-    y_cm = -((nose_y_norm - 0.5) * screen_height_cm)  # flip Y: up is positive
+    """Convert normalised nose position to physical cm offset from the camera optical axis.
+
+    Uses the actual depth (z_cm) and horizontal camera FOV to triangulate the
+    user's real lateral position instead of scaling by screen dimensions.
+    This ensures the output is in true centimetres regardless of screen size,
+    so headX/sw in the parallax shader gives the physically correct UV shift.
+
+    Sign convention (for a non-mirroring webcam):
+      x_cm positive = user's head to the right of the camera centre
+      y_cm positive = user's head above    the camera centre
+    """
+    h_half_fov = math.radians(camera_fov_deg / 2.0)
+    phys_half_w = z_cm * math.tan(h_half_fov)
+
+    # Vertical half-FOV derived from sensor aspect ratio (square pixels assumed).
+    aspect = image_width / max(image_height, 1)
+    phys_half_h = phys_half_w / aspect
+
+    x_cm = -((nose_x_norm - 0.5) * 2.0 * phys_half_w)   # negate: webcam x is mirrored
+    y_cm = -((nose_y_norm - 0.5) * 2.0 * phys_half_h)   # negate: y=0 is top, up=+
     return x_cm, y_cm
 
 
@@ -65,14 +84,27 @@ class FaceTracker:
         self._screen_width_cm = screen_width_cm
         self._screen_height_cm = screen_height_cm
         self._camera_fov_deg = camera_fov_deg
-        options = tasks.vision.FaceLandmarkerOptions(
-            base_options=tasks.BaseOptions(model_asset_path=model_path),
-            running_mode=tasks.vision.RunningMode.IMAGE,
-            num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-        )
-        self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
+        # Try GPU first; fall back to CPU if the delegate fails to initialise.
+        for delegate in (
+            tasks.BaseOptions.Delegate.GPU,
+            tasks.BaseOptions.Delegate.CPU,
+        ):
+            try:
+                options = tasks.vision.FaceLandmarkerOptions(
+                    base_options=tasks.BaseOptions(
+                        model_asset_path=model_path,
+                        delegate=delegate,
+                    ),
+                    running_mode=tasks.vision.RunningMode.IMAGE,
+                    num_faces=1,
+                    min_face_detection_confidence=0.5,
+                    min_face_presence_confidence=0.5,
+                )
+                self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
+                break
+            except Exception:
+                if delegate == tasks.BaseOptions.Delegate.CPU:
+                    raise
 
     def process_frame(self, frame_bgr: np.ndarray) -> HeadPosition | None:
         """Process one BGR camera frame. Returns None if no face detected."""
@@ -96,7 +128,7 @@ class FaceTracker:
         z_cm = estimate_z_cm(ipd_px, w, self._real_ipd_cm, self._camera_fov_deg)
         x_cm, y_cm = estimate_xy_cm(
             lm[_NOSE_TIP].x, lm[_NOSE_TIP].y,
-            self._screen_width_cm, self._screen_height_cm,
+            z_cm, self._camera_fov_deg, w, h,
         )
         return HeadPosition(x_cm=x_cm, y_cm=y_cm, z_cm=z_cm)
 

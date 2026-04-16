@@ -6,7 +6,7 @@ from typing import Optional
 import dataclasses
 import logging
 import yaml
-from PySide6.QtCore import Qt, QPoint, QTimer
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QPixmap
 
 _log = logging.getLogger(__name__)
@@ -25,8 +25,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from tracker.main import _calibrate_tilt, _save_tilt_to_config
-from tracker.shared_memory import SharedMemoryReader
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
 from launcher.presets import list_presets, save_preset, load_preset, delete_preset
 from launcher.calibration import detect_screen_cm, measure_head_distance
@@ -463,7 +461,7 @@ class MainWindow(QMainWindow):
         tilt_row_layout.addWidget(self._camera_tilt_spin)
         recal_btn = QPushButton("Re-calibrate")
         recal_btn.setToolTip(
-            "Remove saved tilt angle so the tracker auto-detects it on next start"
+            "Reset tilt to 0° and restart tracker — auto-calibration runs continuously"
         )
         recal_btn.clicked.connect(self._on_recalibrate_tilt)
         tilt_row_layout.addWidget(recal_btn)
@@ -513,66 +511,23 @@ class MainWindow(QMainWindow):
         self._camera_tilt_deg = float(value)
 
     def _on_recalibrate_tilt(self) -> None:
-        """Restart tracker with tilt=0, read G3D SHM for 3 s, compute tilt."""
+        """Reset tilt to 0 and restart tracker — it will auto-detect continuously."""
+        import yaml  # local import to avoid shadowing module-level yaml
         try:
             with open(self._config_path) as f:
                 cfg = yaml.safe_load(f) or {}
-            cfg.get("tracking", {}).pop("camera_tilt_deg", None)
+            cfg.setdefault("tracking", {})["camera_tilt_deg"] = 0.0
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
         except OSError as e:
             self._tilt_status.setText(f"Error: {e}")
             return
-        self._config.get("tracking", {}).pop("camera_tilt_deg", None)
-
-        was_running = self._thread and self._thread.isRunning()
-        if was_running:
+        self._config.setdefault("tracking", {})["camera_tilt_deg"] = 0.0
+        self._camera_tilt_spin.setValue(0.0)
+        if self._thread and self._thread.isRunning():
             self._stop_tracking()
-            self._start_tracking()
-
-        self._tilt_status.setText("Sit normally — calibrating...")
-        self._cal_y: list[float] = []
-        self._cal_z: list[float] = []
-        self._cal_last_ts: int = -1
-        self._cal_polls_left: int = 80  # 8 s × 10 Hz
-        self._cal_reader = SharedMemoryReader("G3D")
-        QTimer.singleShot(2000, self._collect_tilt_sample)
-
-    def _collect_tilt_sample(self) -> None:
-        """Read one G3D sample every 100 ms; finish after 30 good samples or timeout."""
-        _NEEDED = 30
-        _POLL_MS = 100
-
-        data = self._cal_reader.read()
-        if data is not None:
-            x, y, z, ts = data
-            paused = (x == 0.0 and y == 0.0 and z == 60.0)
-            if not paused and ts != self._cal_last_ts and 15.0 < z < 200.0:
-                self._cal_y.append(y)
-                self._cal_z.append(z)
-                self._cal_last_ts = ts
-
-        if len(self._cal_y) >= _NEEDED:
-            self._cal_reader.close()
-            tilt = _calibrate_tilt(self._cal_y, self._cal_z, min_samples=_NEEDED)
-            if tilt is not None:
-                _save_tilt_to_config(self._config_path, tilt)
-                self._config.setdefault("tracking", {})["camera_tilt_deg"] = tilt
-                self._tilt_spin.setValue(float(tilt))
-                self._tilt_status.setText(f"Auto-detected: {tilt:.1f}°")
-                if self._thread and self._thread.isRunning():
-                    self._stop_tracking()
-                    self._start_tracking()
-            else:
-                self._tilt_status.setText("No face detected — try again")
-            return
-
-        self._cal_polls_left -= 1
-        if self._cal_polls_left <= 0:
-            self._cal_reader.close()
-            self._tilt_status.setText("No face detected — try again")
-        else:
-            QTimer.singleShot(_POLL_MS, self._collect_tilt_sample)
+        self._start_tracking()
+        self._tilt_status.setText("Auto-calibrating\u2026 (updates every ~30 s)")
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")

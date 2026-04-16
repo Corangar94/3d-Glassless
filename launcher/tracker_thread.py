@@ -4,17 +4,29 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import Callable, Optional
+from collections import deque
+from typing import TYPE_CHECKING, Callable, Optional
 
 import cv2
 from PySide6.QtCore import QThread, Signal
 
-from tracker.face_tracker import FaceTracker, HeadPosition
+# Heavy tracker deps (mediapipe) are imported lazily inside TrackerThread.run()
+# so that importing this module doesn't block the launcher for 30+ seconds.
 from tracker.freetrack import FreetracWriter
-from tracker.main import _apply_camera_tilt, _calibrate_tilt, _save_tilt_to_config
 from tracker.shared_memory import SharedMemoryWriter
 from tracker.shared_settings import SharedSettingsReader
 from tracker.smoother import HeadSmoother
+from tracker.tilt import (
+    _TILT_EVERY,
+    _TILT_MIN,
+    _TILT_WINDOW,
+    _apply_camera_tilt,
+    _calibrate_tilt,
+    _save_tilt_to_config,
+)
+
+if TYPE_CHECKING:
+    from tracker.face_tracker import FaceTracker, HeadPosition
 
 
 def _apply_deadzone(
@@ -46,8 +58,6 @@ class _SignallingLoop:
     changes, update the corresponding block in _SignallingLoop.run() here.
     """
 
-    _CAL_DURATION_S = 3.0
-
     def __init__(
         self,
         stop_event: threading.Event,
@@ -62,7 +72,6 @@ class _SignallingLoop:
         hold_ms: int = 500,
         camera_tilt_deg: float = 0.0,
         config_path: Optional[str] = None,
-        auto_calibrate: bool = False,
     ) -> None:
         self._stop_event = stop_event
         self._on_frame_cb = on_frame
@@ -76,7 +85,6 @@ class _SignallingLoop:
         self._hold_ms = hold_ms
         self._camera_tilt_deg = camera_tilt_deg
         self._config_path = config_path
-        self._auto_calibrate = auto_calibrate
         self._settings_reader = SharedSettingsReader()
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_face_ms: Optional[float] = None
@@ -87,10 +95,9 @@ class _SignallingLoop:
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
-        cal_y: list[float] = []
-        cal_z: list[float] = []
-        cal_start = time.monotonic()
-        calibrated = not self._auto_calibrate
+        tilt_buf_y: deque[float] = deque(maxlen=_TILT_WINDOW)
+        tilt_buf_z: deque[float] = deque(maxlen=_TILT_WINDOW)
+        tilt_face_count = 0
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
@@ -116,10 +123,18 @@ class _SignallingLoop:
                     x, y, z = smoothed
                     status = "tracking"
 
-                    # Collect raw (pre-tilt) samples during calibration window
-                    if not calibrated:
-                        cal_y.append(pos.y_cm)
-                        cal_z.append(pos.z_cm)
+                    # Continuous tilt calibration: collect raw pre-tilt samples
+                    tilt_buf_y.append(pos.y_cm)
+                    tilt_buf_z.append(pos.z_cm)
+                    tilt_face_count += 1
+                    if tilt_face_count % _TILT_EVERY == 0 and len(tilt_buf_y) >= _TILT_MIN:
+                        new_tilt = _calibrate_tilt(
+                            list(tilt_buf_y), list(tilt_buf_z), _TILT_MIN
+                        )
+                        if new_tilt is not None:
+                            self._camera_tilt_deg = new_tilt
+                            if self._config_path:
+                                _save_tilt_to_config(self._config_path, new_tilt)
                 else:
                     now_ms = time.monotonic() * 1000.0
                     hold_expired = (
@@ -132,15 +147,6 @@ class _SignallingLoop:
                     else:
                         x, y, z = self._last_smoothed
                         status = "hold"
-
-                # Close calibration window
-                if not calibrated and time.monotonic() - cal_start >= self._CAL_DURATION_S:
-                    detected = _calibrate_tilt(cal_y, cal_z)
-                    if detected is not None:
-                        self._camera_tilt_deg = detected
-                        if self._config_path:
-                            _save_tilt_to_config(self._config_path, detected)
-                    calibrated = True
 
                 x, y, z = _apply_camera_tilt(x, y, z, self._camera_tilt_deg)
                 self._writer.write(x=x, y=y, z=z)
@@ -184,6 +190,8 @@ class TrackerThread(QThread):
         self._stop_event = threading.Event()
 
     def run(self) -> None:
+        # Lazy import: mediapipe loads here (in the QThread worker), not at module level.
+        from tracker.face_tracker import FaceTracker  # noqa: PLC0415
         trk = self._config["tracking"]
         scr = self._config["screen"]
         smoother = HeadSmoother(
@@ -213,7 +221,6 @@ class TrackerThread(QThread):
                 FreetracWriter() as writer,
                 SharedMemoryWriter() as g3d_writer,
             ):
-                tilt_in_config = "camera_tilt_deg" in trk
                 loop = _SignallingLoop(
                     stop_event=self._stop_event,
                     on_frame=self.frame_ready.emit,
@@ -227,7 +234,6 @@ class TrackerThread(QThread):
                     hold_ms=trk["hold_ms"],
                     camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)),
                     config_path=self._config_path,
-                    auto_calibrate=not tilt_in_config,
                 )
                 loop.run(camera_index=self._camera_index)
         except RuntimeError:

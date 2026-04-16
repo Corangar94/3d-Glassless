@@ -74,15 +74,30 @@ class GameDirPage(QWizardPage):
         return bool(self._dir_edit.text().strip())
 
     def _detect_wow(self) -> Optional[str]:
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE, _WOW_REGISTRY_KEY
-            ) as key:
-                value, _ = winreg.QueryValueEx(key, _WOW_REGISTRY_VALUE)
-                if os.path.isdir(value):
-                    return value
-        except (FileNotFoundError, OSError):
-            pass
+        root = self._wow_registry_root()
+        if root is None:
+            return None
+        # Registry points to the WoW root; the exe lives one level deeper.
+        # Try each known subfolder in preference order.
+        for sub in ("_retail_", "_classic_", "_classic_era_", "_ptr_", "_beta_"):
+            candidate = os.path.join(root, sub)
+            exe = os.path.join(candidate, "Wow.exe")
+            if not os.path.isfile(exe):
+                exe = os.path.join(candidate, "WowClassic.exe")
+            if os.path.isfile(exe):
+                return candidate
+        # Fall back to the root if no subfolder has an exe (manual installs).
+        return root
+
+    def _wow_registry_root(self) -> Optional[str]:
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, _WOW_REGISTRY_KEY) as key:
+                    value, _ = winreg.QueryValueEx(key, _WOW_REGISTRY_VALUE)
+                    if os.path.isdir(value):
+                        return value
+            except (FileNotFoundError, OSError):
+                continue
         return None
 
     def _browse(self) -> None:
