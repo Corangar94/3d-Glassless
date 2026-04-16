@@ -507,16 +507,22 @@ class MainWindow(QMainWindow):
         self._camera_tilt_deg = float(value)
 
     def _on_recalibrate_tilt(self) -> None:
-        """Remove camera_tilt_deg from config so the tracker auto-detects it on next start."""
+        """Remove camera_tilt_deg from config and restart the tracker to auto-detect tilt."""
         try:
             with open(self._config_path) as f:
                 cfg = yaml.safe_load(f) or {}
             cfg.get("tracking", {}).pop("camera_tilt_deg", None)
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
-            self._tilt_status.setText("Restart tracker to re-calibrate")
         except OSError as e:
             self._tilt_status.setText(f"Error: {e}")
+            return
+
+        was_running = self._thread and self._thread.isRunning()
+        if was_running:
+            self._stop_tracking()
+            self._start_tracking()
+        self._tilt_status.setText("Recalibrating — sit normally for 3 s...")
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
