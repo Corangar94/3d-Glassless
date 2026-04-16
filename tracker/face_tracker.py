@@ -84,27 +84,21 @@ class FaceTracker:
         self._screen_width_cm = screen_width_cm
         self._screen_height_cm = screen_height_cm
         self._camera_fov_deg = camera_fov_deg
-        # Try GPU first; fall back to CPU if the delegate fails to initialise.
-        for delegate in (
-            tasks.BaseOptions.Delegate.GPU,
-            tasks.BaseOptions.Delegate.CPU,
-        ):
-            try:
-                options = tasks.vision.FaceLandmarkerOptions(
-                    base_options=tasks.BaseOptions(
-                        model_asset_path=model_path,
-                        delegate=delegate,
-                    ),
-                    running_mode=tasks.vision.RunningMode.IMAGE,
-                    num_faces=1,
-                    min_face_detection_confidence=0.5,
-                    min_face_presence_confidence=0.5,
-                )
-                self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
-                break
-            except Exception:
-                if delegate == tasks.BaseOptions.Delegate.CPU:
-                    raise
+        # Use CPU delegate only. The GPU (DirectML) delegate can hang indefinitely
+        # on Windows when any other DirectML process (overlay, game) is active,
+        # instead of raising an exception. CPU is fast enough for webcam-rate
+        # single-face tracking and avoids all GPU contention.
+        options = tasks.vision.FaceLandmarkerOptions(
+            base_options=tasks.BaseOptions(
+                model_asset_path=model_path,
+                delegate=tasks.BaseOptions.Delegate.CPU,
+            ),
+            running_mode=tasks.vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+        )
+        self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
 
     def process_frame(self, frame_bgr: np.ndarray) -> HeadPosition | None:
         """Process one BGR camera frame. Returns None if no face detected."""
