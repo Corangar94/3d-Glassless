@@ -523,21 +523,28 @@ class MainWindow(QMainWindow):
             self._stop_tracking()
             self._start_tracking()
         self._tilt_status.setText("Recalibrating — sit normally for 3 s...")
-        QTimer.singleShot(3500, self._on_calibration_done)
+        self._cal_poll_elapsed = 0
+        self._poll_calibration()
 
-    def _on_calibration_done(self) -> None:
-        """Update tilt label after the 3-second calibration window closes."""
+    def _poll_calibration(self) -> None:
+        """Poll config every 0.5 s until tilt is saved (up to 12 s)."""
+        _MAX_WAIT_S = 12
+        _POLL_MS = 500
+        self._cal_poll_elapsed += _POLL_MS
         try:
             with open(self._config_path) as f:
                 cfg = yaml.safe_load(f) or {}
             tilt = cfg.get("tracking", {}).get("camera_tilt_deg")
-            if tilt is not None:
-                self._tilt_spin.setValue(float(tilt))
-                self._tilt_status.setText(f"Auto-detected: {tilt:.1f}°")
-            else:
-                self._tilt_status.setText("No face detected — try again")
         except OSError:
-            self._tilt_status.setText("Done")
+            tilt = None
+
+        if tilt is not None:
+            self._tilt_spin.setValue(float(tilt))
+            self._tilt_status.setText(f"Auto-detected: {tilt:.1f}°")
+        elif self._cal_poll_elapsed >= _MAX_WAIT_S * 1000:
+            self._tilt_status.setText("No face detected — try again")
+        else:
+            QTimer.singleShot(_POLL_MS, self._poll_calibration)
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
