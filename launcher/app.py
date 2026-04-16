@@ -1,10 +1,17 @@
 """QApplication entry point for Glassless3D."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
 import yaml
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 from PySide6.QtWidgets import QApplication, QWizard
 
 CONFIG_PATH = os.path.join(

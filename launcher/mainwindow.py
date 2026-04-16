@@ -1,7 +1,6 @@
 """Always-on-top two-mode tracker window."""
 from __future__ import annotations
 
-import threading
 from typing import Optional
 
 import dataclasses
@@ -57,17 +56,6 @@ _DARK_BG = "#0d0d22"
 _TITLE_BG = "#1a1a2e"
 
 
-def _preload_face_tracker() -> None:
-    """Import tracker.face_tracker (and mediapipe) in the background on startup.
-
-    This warms the import cache so the first Start Tracking click is instant
-    instead of waiting 30+ seconds for mediapipe to initialise.
-    """
-    try:
-        import tracker.face_tracker  # noqa: F401, PLC0415
-    except Exception:
-        pass  # will fail again at start-tracking time with a proper error message
-
 
 class MainWindow(QMainWindow):
     def __init__(
@@ -105,8 +93,8 @@ class MainWindow(QMainWindow):
         )
         self._settings_writer.write(self._settings)
 
-        # Pre-warm mediapipe in the background so the first Start Tracking is instant.
-        threading.Thread(target=_preload_face_tracker, daemon=True).start()
+        # NOTE: preload thread removed — it holds the Python import lock while
+        # mediapipe loads and blocks TrackerThread.run() when the user clicks Start.
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint

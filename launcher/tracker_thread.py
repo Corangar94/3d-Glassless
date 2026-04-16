@@ -95,7 +95,10 @@ class _SignallingLoop:
 
     def run(self, camera_index: int = 0) -> None:
         """Run the tracking loop. Raises RuntimeError if camera cannot open."""
-        cap = cv2.VideoCapture(camera_index)
+        # Use DirectShow on Windows — MSMF (the default) can hang indefinitely
+        # when the camera is initialising or held by another process.
+        backend = cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else cv2.CAP_ANY
+        cap = cv2.VideoCapture(camera_index, backend)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
         tilt_buf_y: deque[float] = deque(maxlen=_TILT_WINDOW)
@@ -193,27 +196,34 @@ class TrackerThread(QThread):
         self._stop_event = threading.Event()
 
     def run(self) -> None:
-        # Lazy import: mediapipe loads here (in the QThread worker), not at module level.
-        from tracker.face_tracker import FaceTracker  # noqa: PLC0415
-        trk = self._config["tracking"]
-        scr = self._config["screen"]
-        smoother = HeadSmoother(
-            process_noise=trk["smoothing_q"],
-            measurement_noise=trk["smoothing_r"],
-        )
-        with SharedSettingsReader() as _r:
-            _startup = _r.read()
-        _ipd_cm = (
-            (_startup.ipd_mm / 10.0)
-            if _startup and _startup.ipd_mm > 0
-            else trk["ipd_cm"]
-        )
-        _fov_deg = (
-            _startup.camera_fov_deg
-            if _startup and _startup.camera_fov_deg > 0
-            else 60.0
-        )
         try:
+            # Lazy import: mediapipe loads here (in the QThread worker), not at module level.
+            _log.debug("TrackerThread: importing FaceTracker")
+            from tracker.face_tracker import FaceTracker  # noqa: PLC0415
+
+            _log.debug("TrackerThread: reading config")
+            trk = self._config["tracking"]
+            scr = self._config["screen"]
+            smoother = HeadSmoother(
+                process_noise=trk["smoothing_q"],
+                measurement_noise=trk["smoothing_r"],
+            )
+
+            _log.debug("TrackerThread: reading shared settings")
+            with SharedSettingsReader() as _r:
+                _startup = _r.read()
+            _ipd_cm = (
+                (_startup.ipd_mm / 10.0)
+                if _startup and _startup.ipd_mm > 0
+                else trk["ipd_cm"]
+            )
+            _fov_deg = (
+                _startup.camera_fov_deg
+                if _startup and _startup.camera_fov_deg > 0
+                else 60.0
+            )
+
+            _log.debug("TrackerThread: creating FaceTracker (model load)")
             with (
                 FaceTracker(
                     real_ipd_cm=_ipd_cm,
@@ -224,6 +234,7 @@ class TrackerThread(QThread):
                 FreetracWriter() as writer,
                 SharedMemoryWriter() as g3d_writer,
             ):
+                _log.debug("TrackerThread: entering tracking loop (camera_index=%d)", self._camera_index)
                 loop = _SignallingLoop(
                     stop_event=self._stop_event,
                     on_frame=self.frame_ready.emit,
