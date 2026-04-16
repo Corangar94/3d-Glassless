@@ -246,4 +246,6 @@ class TrackerThread(QThread):
     def stop(self) -> None:
         """Signal the loop to stop and block until the thread exits."""
         self._stop_event.set()
-        self.wait()
+        if not self.wait(5000):  # 5-second timeout
+            self.terminate()      # force-kill if stuck in mediapipe import
+            self.wait(2000)

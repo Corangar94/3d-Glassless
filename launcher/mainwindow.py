@@ -258,6 +258,7 @@ class MainWindow(QMainWindow):
             "background:#e84040;color:#fff;font-weight:bold;"
             "font-size:11px;padding:8px;border:none;"
         )
+        self._overlay_started = False
 
         cam_idx = self._config["camera"]["index"]
         thread = TrackerThread(
@@ -268,12 +269,17 @@ class MainWindow(QMainWindow):
         thread.position_updated.connect(self._on_position)
         thread.frame_ready.connect(self._on_frame)
         thread.status_changed.connect(self._on_status)
+        thread.status_changed.connect(self._on_tracker_status_for_overlay)
         thread.start()
         self._thread = thread
 
-        # Launch the overlay process alongside the tracker. A missing binary
-        # is surfaced in overlay.log; the tracker keeps running so shared-memory
-        # consumers still get head pose.
+    def _on_tracker_status_for_overlay(self, status: str) -> None:
+        """Start the overlay the first time the tracker is actually running."""
+        if status not in ("tracking", "hold", "paused") or self._overlay_started:
+            return
+        self._overlay_started = True
+        if self._thread:
+            self._thread.status_changed.disconnect(self._on_tracker_status_for_overlay)
         try:
             self._overlay.start()
         except OverlayStartError as e:
