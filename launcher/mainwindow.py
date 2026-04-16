@@ -30,7 +30,7 @@ from launcher.presets import list_presets, save_preset, load_preset, delete_pres
 from launcher.calibration import detect_screen_cm, measure_head_distance
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
-from launcher.tracker_thread import TrackerThread
+from launcher.tracker_process import TrackerProcess
 
 # Window dimensions
 _EXPANDED_W, _EXPANDED_H = 430, 440
@@ -248,18 +248,13 @@ class MainWindow(QMainWindow):
         )
         self._overlay_started = False
 
-        cam_idx = self._config["camera"]["index"]
-        thread = TrackerThread(
-            camera_index=cam_idx,
-            config=self._config,
-            config_path=self._config_path,
-        )
-        thread.position_updated.connect(self._on_position)
-        thread.frame_ready.connect(self._on_frame)
-        thread.status_changed.connect(self._on_status)
-        thread.status_changed.connect(self._on_tracker_status_for_overlay)
-        thread.start()
-        self._thread = thread
+        tracker = TrackerProcess(config_path=self._config_path)
+        tracker.position_updated.connect(self._on_position)
+        tracker.frame_ready.connect(self._on_frame)
+        tracker.status_changed.connect(self._on_status)
+        tracker.status_changed.connect(self._on_tracker_status_for_overlay)
+        tracker.start()
+        self._thread = tracker
 
     def _on_tracker_status_for_overlay(self, status: str) -> None:
         """Start the overlay the first time the tracker is actually running."""
