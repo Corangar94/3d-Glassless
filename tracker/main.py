@@ -8,7 +8,7 @@ from typing import Optional
 import cv2
 import yaml
 
-from tracker.face_tracker import FaceTracker, HeadPosition
+from tracker.face_tracker_cv2 import FaceTracker, HeadPosition
 from tracker.freetrack import FreetracWriter
 from tracker.shared_memory import SharedMemoryWriter
 from tracker.smoother import HeadSmoother
