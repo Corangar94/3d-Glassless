@@ -95,20 +95,8 @@ class _SignallingLoop:
 
     def run(self, camera_index: int = 0) -> None:
         """Run the tracking loop. Raises RuntimeError if camera cannot open."""
-        # Try DirectShow first (avoids MSMF hangs on Windows), fall back to default.
-        cap: cv2.VideoCapture | None = None
-        for backend in (
-            cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") else None,
-            cv2.CAP_ANY,
-        ):
-            if backend is None:
-                continue
-            _candidate = cv2.VideoCapture(camera_index, backend)
-            if _candidate.isOpened():
-                cap = _candidate
-                break
-            _candidate.release()
-        if cap is None or not cap.isOpened():
+        cap = cv2.VideoCapture(camera_index)
+        if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
         tilt_buf_y: deque[float] = deque(maxlen=_TILT_WINDOW)
         tilt_buf_z: deque[float] = deque(maxlen=_TILT_WINDOW)
