@@ -58,6 +58,12 @@ python scripts/generate_depth_fixture.py path\to\depth_frames --mode breathing -
 These metrics are not a replacement for visual inspection, but they make
 “watery depth” regressions measurable across repeated captures.
 
+To compare a captured sequence against a synthetic or known-good baseline:
+
+```powershell
+python scripts/compare_depth_fixture.py path\to\captured_depth path\to\baseline_depth --max-ratio 2.0
+```
+
 For renderer experiments, `tracker.depth_reprojection.synthesize_views` provides
 a tested CPU reference path for generating mono, stereo, or quilt view stacks
 from an RGB image and normalized depth map.

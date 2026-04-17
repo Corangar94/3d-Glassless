@@ -26,7 +26,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 
 | Recommendation | Current implementation | Remaining work |
 |---|---|---|
-| Temporal depth stabilization | Overlay already has asynchronous inference, previous/current depth textures, render-rate blend, EMA-style postprocess, crop handling, debug depth view, reusable depth-stability metrics, a `.npy` sequence benchmark CLI, and synthetic static/breathing depth fixture generation. | Add real captured-sequence fixtures and compare them against the synthetic baseline. |
+| Temporal depth stabilization | Overlay already has asynchronous inference, previous/current depth textures, render-rate blend, EMA-style postprocess, crop handling, debug depth view, reusable depth-stability metrics, a `.npy` sequence benchmark CLI, synthetic static/breathing depth fixture generation, and captured-vs-baseline comparison tooling. | Add real captured-sequence fixture data from overlay runs. |
 | Performance hardening | Overlay logs render/acquisition/depth cadence, diagnostics parses the latest summary, reusable frame-pacing metrics cover average/p95/max frame time plus budget overruns, `tracker.performance_capture` writes compatible timing CSVs, exports approximate overlay-log cadence samples, support bundles include `overlay_timings.csv` when available, and `tracker.performance_benchmark` classifies captured CSV timing data. | Add true per-frame GPU timing queries from the overlay render loop. |
 | Depth-image-based reprojection | Current overlay performs depth-dependent inverse-warp parallax for a single desktop view, and `tracker.depth_reprojection` provides a tested CPU reference synthesizer for stereo/quilt view stacks. | Move the reference synthesis into a real-time renderer path. |
 | Display abstraction layer | Product docs separate core overlay from experimental integrations, and `tracker.display_backends` defines stable backend IDs/status plus concrete 1x1, 2x1 stereo, and 9x5 quilt layout contracts. | Add real stereo/quilt renderer implementations behind the registered backend IDs. |
@@ -45,8 +45,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 
 ## Next Engineering Slices
 
-1. Add real captured-frame fixtures for `tracker.depth_benchmark` and compare
-   them against `tracker.depth_synthetic` baselines.
+1. Add real captured-frame fixture data for `tracker.depth_benchmark`.
 2. Add true per-frame GPU timing queries from the overlay render loop.
 3. Implement real stereo or quilt output behind the `tracker.display_backends`
    IDs.
