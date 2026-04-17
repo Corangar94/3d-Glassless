@@ -45,6 +45,7 @@ def _is_stale(timestamp_ms: int, now_ms: int, threshold_ms: int = 500) -> bool:
 
 
 import time
+from collections import deque
 
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont
@@ -55,6 +56,7 @@ from PySide6.QtWidgets import (
 
 from tracker.shared_memory import SharedMemoryReader
 from tracker.shared_settings import OverlaySettings, SharedSettingsReader
+from tracker.evaluation import PoseSample, classify_tracking_quality, compute_tracking_metrics
 
 _DEFAULT_SETTINGS = OverlaySettings(
     strength_x=1.0,
@@ -77,6 +79,7 @@ class MonitorWidget(QWidget):
 
         self._pose_reader = SharedMemoryReader("G3D")
         self._settings_reader = SharedSettingsReader("G3D_Settings")
+        self._quality_samples: deque[PoseSample] = deque(maxlen=300)
 
         self._build_ui()
 
@@ -135,6 +138,19 @@ class MonitorWidget(QWidget):
             pgrid.addWidget(lbl, 1, col)
         root.addWidget(par_box)
 
+        quality_box = QGroupBox("Tracking Quality (rolling window)")
+        qgrid = QGridLayout(quality_box)
+        self._quality_vals: dict[str, QLabel] = {}
+        for col, name in enumerate(["quality", "loss", "jitter", "reacq"]):
+            key = QLabel(f"{name}:")
+            key.setStyleSheet("color:#888; font-size:11px;")
+            val = QLabel("—")
+            val.setStyleSheet("font-size:11px;")
+            qgrid.addWidget(key, 0, col)
+            qgrid.addWidget(val, 1, col)
+            self._quality_vals[name] = val
+        root.addWidget(quality_box)
+
         # Settings panel
         set_box = QGroupBox("Settings (from G3D_Settings — or defaults if absent)")
         sgrid = QGridLayout(set_box)
@@ -159,12 +175,17 @@ class MonitorWidget(QWidget):
         settings = self._settings_reader.read() or _DEFAULT_SETTINGS
 
         if pose is None:
+            self._quality_samples.append(PoseSample(timestamp_ms=now_ms, valid=False))
             self._status_lbl.setText("● NO TRACKER")
             self._status_lbl.setStyleSheet("color:#e74c3c; font-weight:bold;")
             self._age_lbl.setText("")
         else:
             x, y, z, ts = pose
-            if _is_stale(ts, now_ms):
+            stale = _is_stale(ts, now_ms)
+            self._quality_samples.append(
+                PoseSample(timestamp_ms=now_ms, x_cm=x, y_cm=y, z_cm=z, valid=not stale)
+            )
+            if stale:
                 self._status_lbl.setText("● STALE")
                 self._status_lbl.setStyleSheet("color:#f39c12; font-weight:bold;")
             else:
@@ -201,6 +222,15 @@ class MonitorWidget(QWidget):
             self._sy.setText(f"{sy_pct:.2f}%")
             self._sx.setStyleSheet(f"color:{color};")
             self._sy.setStyleSheet(f"color:{color};")
+
+        metrics = compute_tracking_metrics(list(self._quality_samples))
+        quality = classify_tracking_quality(metrics)
+        qcolor = {"GOOD": "#2ecc71", "WARN": "#f39c12", "DANGER": "#e74c3c"}[quality]
+        self._quality_vals["quality"].setText(quality)
+        self._quality_vals["quality"].setStyleSheet(f"color:{qcolor}; font-weight:bold;")
+        self._quality_vals["loss"].setText(f"{metrics.loss_rate * 100.0:.1f}%")
+        self._quality_vals["jitter"].setText(f"{metrics.jitter_cm:.2f} cm")
+        self._quality_vals["reacq"].setText(f"{metrics.max_reacquisition_ms} ms")
 
         sw = settings.screen_w_cm if settings.screen_w_cm > 0 else 119.3
         sh = settings.screen_h_cm if settings.screen_h_cm > 0 else 33.6

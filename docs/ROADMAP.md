@@ -19,6 +19,7 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - stabilize camera selection
 - validate screen sizing and head-distance defaults
 - keep tracker + overlay startup reliable
+- measure tracking jitter, loss rate, and reacquisition in the debug monitor
 
 ## Milestone 2: Overlay Quality And Temporal Stability
 
@@ -31,6 +32,7 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - first-run overlay readiness checks
 - actionable startup errors
 - settings and troubleshooting docs
+- repeatable evaluation guide for tracking, depth, performance, and comfort
 
 ## Milestone 4: Performance Hardening
 
