@@ -29,7 +29,7 @@ def qapp():
 @pytest.fixture
 def window(qapp, tmp_path):
     cfg_path = str(tmp_path / "config.yaml")
-    with patch("launcher.mainwindow.TrackerThread"):
+    with patch("launcher.mainwindow.TrackerProcess"):
         win = MainWindow(config=CONFIG, config_path=cfg_path)
     return win
 
@@ -84,7 +84,7 @@ def test_mainwindow_toggle_saves_compact_pref_when_config_absent(qapp, tmp_path)
     """Toggling mode writes compact_mode even when config file doesn't yet exist."""
     import yaml
     cfg_path = str(tmp_path / "config.yaml")
-    with patch("launcher.mainwindow.TrackerThread"):
+    with patch("launcher.mainwindow.TrackerProcess"):
         win = MainWindow(config=CONFIG, config_path=cfg_path)
     win._toggle_mode()  # triggers _save_compact_pref
     with open(cfg_path) as f:

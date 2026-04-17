@@ -30,7 +30,9 @@ def _make_mock_cap(frames=3):
     cap = MagicMock()
     cap.isOpened.return_value = True
     frame = MagicMock()
-    reads = [(True, frame)] * frames + [(False, None)]
+    # _SignallingLoop verifies stream health with up to 15 reads before
+    # entering the status loop, so include preflight frames in the mock.
+    reads = [(True, frame)] * (15 + frames) + [(False, None)]
     cap.read.side_effect = reads
     return cap
 
@@ -58,7 +60,7 @@ def test_tracker_thread_emits_position_updated(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
@@ -90,7 +92,7 @@ def test_tracker_thread_emits_status_changed_tracking(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
@@ -117,7 +119,7 @@ def test_tracker_thread_stop_terminates_thread(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
@@ -140,7 +142,7 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.HeadSmoother"),
         patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
@@ -157,6 +159,30 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
     assert "error" in statuses
 
 
+def test_tracker_thread_emits_error_when_camera_returns_no_frames(qapp):
+    cap = MagicMock()
+    cap.isOpened.return_value = True
+    cap.read.return_value = (False, None)
+
+    with (
+        patch("launcher.tracker_thread.cv2.VideoCapture", return_value=cap),
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
+        patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.HeadSmoother"),
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
+    ):
+        MockFT.return_value.__enter__.return_value = MagicMock()
+        MockFW.return_value.__enter__.return_value = MagicMock()
+
+        thread = TrackerThread(camera_index=0, config=CONFIG)
+        spy = QSignalSpy(thread.status_changed)
+        thread.start()
+        thread.wait(3000)
+
+    statuses = [s[0] for s in _spy_list(spy)]
+    assert "error" in statuses
+
+
 def test_tracker_thread_emits_hold_status(qapp):
     """status_changed emits 'hold' when face is lost but hold_ms has not expired."""
     mock_cap = _make_mock_cap(frames=2)
@@ -167,7 +193,7 @@ def test_tracker_thread_emits_hold_status(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,
@@ -193,7 +219,7 @@ def test_tracker_thread_emits_paused_status(qapp):
 
     with (
         patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap),
-        patch("launcher.tracker_thread.FaceTracker") as MockFT,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
         patch("launcher.tracker_thread.FreetracWriter") as MockFW,
         patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
         patch("launcher.tracker_thread.HeadSmoother") as MockHS,

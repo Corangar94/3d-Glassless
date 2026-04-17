@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # setup.py
-# Copies Glassless3D.addon + shaders into a game directory,
-# and updates ReShade.ini with the correct depth buffer settings.
+# Installs the experimental ReShade backend by copying Glassless3D.addon
+# + shaders into a game directory, and updates ReShade.ini with the correct
+# depth buffer settings.
 #
 # Usage:
 #   python setup.py --game wow
@@ -118,8 +119,8 @@ def install(game_dir: str, profile: dict, dry_run: bool) -> None:
 
     apply_depth_settings(game_dir, profile, dry_run)
 
-    print("\n── Next steps ────────────────────────────────────────────────")
-    print(f"  1. Install ReShade into {game_dir} if not already done:")
+    print("\n── Experimental backend prerequisites ────────────────────────")
+    print(f"  1. If you are opting into this backend, install ReShade into {game_dir}:")
     print(f"     Download: {RESHADE_URL}")
     print("     Run installer → select Wow.exe → choose DirectX 11")
     print("  2. Start the tracker:   python tracker/main.py")
@@ -130,7 +131,7 @@ def install(game_dir: str, profile: dict, dry_run: bool) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Glassless3D installer")
+    parser = argparse.ArgumentParser(description="Glassless3D experimental ReShade backend installer")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--game",     help="Profile name (wow, default)")
     group.add_argument("--game-dir", help="Path to game directory")

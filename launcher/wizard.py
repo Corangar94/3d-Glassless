@@ -1,27 +1,22 @@
-"""5-page first-run setup wizard."""
+"""4-page first-run setup wizard focused on overlay onboarding."""
 from __future__ import annotations
 
 import os
-import winreg
 from typing import Optional
 
-from PySide6.QtCore import QThread, Signal
+import cv2
+import yaml
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
     QLineEdit,
-    QProgressBar,
-    QPushButton,
     QVBoxLayout,
     QWizard,
     QWizardPage,
 )
 
-from launcher.reshade_install import InstallError, install_steps
-
-import cv2
-import yaml
 from launcher.edid import detect_screen_size_cm
+from launcher.overlay_process import find_depth_model, find_overlay_exe
 
 
 # ── Page 1: Welcome ────────────────────────────────────────────────────────────
@@ -38,162 +33,7 @@ class WelcomePage(QWizardPage):
         layout.addWidget(QLabel("Click Next to begin."))
 
 
-# ── Page 2: Game Directory ─────────────────────────────────────────────────────
-
-_WOW_REGISTRY_KEY = r"SOFTWARE\Blizzard Entertainment\World of Warcraft"
-_WOW_REGISTRY_VALUE = "InstallPath"
-
-
-class GameDirPage(QWizardPage):
-    def __init__(self, parent: Optional[object] = None) -> None:
-        super().__init__(parent)  # type: ignore[call-overload]
-        self.setTitle("Select your game folder")
-        self.setSubTitle(
-            "Glassless3D will install into this directory."
-        )
-
-        self._dir_edit = QLineEdit()
-        self._dir_edit.setPlaceholderText("Game directory…")
-        self._dir_edit.textChanged.connect(self.completeChanged)
-
-        browse_btn = QPushButton("Browse…")
-        browse_btn.clicked.connect(self._browse)
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._dir_edit)
-        layout.addWidget(browse_btn)
-
-        self.registerField("game_dir*", self._dir_edit)
-
-    def initializePage(self) -> None:
-        detected = self._detect_wow()
-        if detected:
-            self._dir_edit.setText(detected)
-
-    def isComplete(self) -> bool:
-        return bool(self._dir_edit.text().strip())
-
-    def _detect_wow(self) -> Optional[str]:
-        root = self._wow_registry_root()
-        if root is None:
-            return None
-        # Registry points to the WoW root; the exe lives one level deeper.
-        # Try each known subfolder in preference order.
-        for sub in ("_retail_", "_classic_", "_classic_era_", "_ptr_", "_beta_"):
-            candidate = os.path.join(root, sub)
-            exe = os.path.join(candidate, "Wow.exe")
-            if not os.path.isfile(exe):
-                exe = os.path.join(candidate, "WowClassic.exe")
-            if os.path.isfile(exe):
-                return candidate
-        # Fall back to the root if no subfolder has an exe (manual installs).
-        return root
-
-    def _wow_registry_root(self) -> Optional[str]:
-        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            try:
-                with winreg.OpenKey(hive, _WOW_REGISTRY_KEY) as key:
-                    value, _ = winreg.QueryValueEx(key, _WOW_REGISTRY_VALUE)
-                    if os.path.isdir(value):
-                        return value
-            except (FileNotFoundError, OSError):
-                continue
-        return None
-
-    def _browse(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        path = QFileDialog.getExistingDirectory(self, "Select game folder")
-        if path:
-            self._dir_edit.setText(path)
-
-
-# ── Page 3: Auto-Install ───────────────────────────────────────────────────────
-
-class _InstallWorker(QThread):
-    step_done = Signal(str)
-    all_done = Signal()
-    failed = Signal(str, str)
-
-    def __init__(self, game_dir: str, parent: Optional[object] = None) -> None:
-        super().__init__(parent)  # type: ignore[call-overload]
-        self._game_dir = game_dir
-
-    def run(self) -> None:
-        try:
-            for step_name in install_steps(self._game_dir):
-                self.step_done.emit(step_name)
-            self.all_done.emit()
-        except InstallError as e:
-            self.failed.emit(e.step, e.reason)
-
-
-class InstallPage(QWizardPage):
-    def __init__(self, parent: Optional[object] = None) -> None:
-        super().__init__(parent)  # type: ignore[call-overload]
-        self.setTitle("Installing…")
-        self.setSubTitle("No internet needed. This takes a few seconds.")
-
-        self._status_label = QLabel("Preparing…")
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)
-        self._progress.setValue(0)
-        self._error_label = QLabel("")
-        self._error_label.setStyleSheet("color: red;")
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self._status_label)
-        layout.addWidget(self._progress)
-        layout.addWidget(self._error_label)
-
-        self._complete = False
-        self._worker: Optional[_InstallWorker] = None
-        self._game_dir: str = ""
-
-    def initializePage(self) -> None:
-        if self._worker and self._worker.isRunning():
-            return  # already running, do not restart
-        self._game_dir = self.field("game_dir")
-        self._complete = False
-        self._error_label.setText("")
-        self._progress.setValue(0)
-        self._worker = _InstallWorker(self._game_dir)
-        self._worker.step_done.connect(self._on_step)
-        self._worker.all_done.connect(self._on_done)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.start()
-
-    def _run_install(self) -> None:
-        """Synchronous install used in tests (bypasses QThread)."""
-        try:
-            for step_name in install_steps(self._game_dir):
-                self._on_step(step_name)
-            self._on_done()
-        except InstallError as e:
-            self._on_failed(e.step, e.reason)
-
-    def _on_step(self, name: str) -> None:
-        self._status_label.setText(name)
-        self._progress.setValue(self._progress.value() + 1)
-
-    def _on_done(self) -> None:
-        self._complete = True
-        self.completeChanged.emit()
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(
-            500,
-            lambda: self.wizard().next()
-            if self.wizard() and self.wizard().currentPage() is self
-            else None,
-        )
-
-    def _on_failed(self, step: str, reason: str) -> None:
-        self._error_label.setText(f"Failed at '{step}': {reason}")
-
-    def isComplete(self) -> bool:
-        return self._complete
-
-
-# ── Page 4: Camera & Screen ────────────────────────────────────────────────────
+# ── Page 2: Camera & Screen ────────────────────────────────────────────────────
 
 class CameraScreenPage(QWizardPage):
     def __init__(self, parent: Optional[object] = None) -> None:
@@ -217,8 +57,12 @@ class CameraScreenPage(QWizardPage):
         layout.addWidget(QLabel("Monitor height (cm):"))
         layout.addWidget(self._height_edit)
 
-        self.registerField("camera_index", self._camera_combo, "currentIndex",
-                           self._camera_combo.currentIndexChanged)
+        self.registerField(
+            "camera_index",
+            self._camera_combo,
+            "currentIndex",
+            self._camera_combo.currentIndexChanged,
+        )
         self.registerField("screen_width_cm*", self._width_edit)
         self.registerField("screen_height_cm*", self._height_edit)
 
@@ -238,14 +82,57 @@ class CameraScreenPage(QWizardPage):
             if opened:
                 self._camera_combo.addItem(f"Camera {idx}", idx)
 
+    def selected_camera_index(self) -> int:
+        camera_index = self._camera_combo.currentData()
+        if isinstance(camera_index, int) and camera_index >= 0:
+            return camera_index
+        return 0
 
-# ── Page 5: Done ───────────────────────────────────────────────────────────────
+
+# ── Page 3: Overlay Ready ──────────────────────────────────────────────────────
+
+class OverlayReadyPage(QWizardPage):
+    def __init__(self, parent: Optional[object] = None) -> None:
+        super().__init__(parent)  # type: ignore[call-overload]
+        self.setTitle("Overlay readiness")
+        self.setSubTitle(
+            "Glassless3D uses the standalone desktop overlay as the primary runtime."
+        )
+        self._status_label = QLabel("")
+        self._status_label.setWordWrap(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self._status_label)
+
+    def initializePage(self) -> None:
+        problems: list[str] = []
+        if find_overlay_exe() is None:
+            problems.append("Overlay executable missing")
+        if find_depth_model() is None:
+            problems.append("Depth model missing")
+
+        if problems:
+            self._status_label.setText(
+                "Overlay not fully ready:\n- " + "\n- ".join(problems)
+            )
+            return
+
+        self._status_label.setText("Overlay executable and depth model were found.")
+
+
+# ── Page 4: Done ───────────────────────────────────────────────────────────────
 
 _DEFAULT_TRACKING = {
     "ipd_cm": 6.3,
     "smoothing_q": 0.01,
     "smoothing_r": 0.1,
     "hold_ms": 500,
+}
+
+_DEFAULT_OVERLAY = {
+    "strength_x": 1.0,
+    "strength_y": 1.0,
+    "virtual_depth_cm": 30.0,
 }
 
 
@@ -258,7 +145,7 @@ class DonePage(QWizardPage):
         super().__init__(parent)  # type: ignore[call-overload]
         self.setTitle("Ready to go!")
         self.setSubTitle(
-            "Launch your game, press Home to open ReShade, then enable Glassless3D."
+            "Finish setup, then launch the Glassless3D overlay workflow from the app."
         )
         self._config_path = config_path
         self._camera_index: int = 0
@@ -266,16 +153,28 @@ class DonePage(QWizardPage):
         self._screen_height_cm: float = 33.6
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Click Finish to start tracking."))
+        layout.addWidget(
+            QLabel("Click Finish to save your settings for the overlay workflow.")
+        )
 
     def initializePage(self) -> None:
-        self._camera_index = self.field("camera_index")
+        self._camera_index = self._read_camera_index()
         try:
             self._screen_width_cm = float(self.field("screen_width_cm"))
             self._screen_height_cm = float(self.field("screen_height_cm"))
         except (ValueError, TypeError):
             self._screen_width_cm = 59.8
             self._screen_height_cm = 33.6
+
+    def _read_camera_index(self) -> int:
+        wizard = self.wizard()
+        if wizard is None:
+            return 0
+        for page_id in wizard.pageIds():
+            page = wizard.page(page_id)
+            if isinstance(page, CameraScreenPage):
+                return page.selected_camera_index()
+        return 0
 
     def validatePage(self) -> bool:
         self._write_config()
@@ -289,6 +188,11 @@ class DonePage(QWizardPage):
                 "height_cm": self._screen_height_cm,
             },
             "tracking": _DEFAULT_TRACKING,
+            "overlay": {
+                **_DEFAULT_OVERLAY,
+                "screen_w_cm": self._screen_width_cm,
+                "screen_h_cm": self._screen_height_cm,
+            },
             "gui": {"compact_mode": False},
         }
         dirname = os.path.dirname(self._config_path)
@@ -310,7 +214,6 @@ class SetupWizard(QWizard):
         self.setWindowTitle("Glassless3D Setup")
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         self.addPage(WelcomePage())
-        self.addPage(GameDirPage())
-        self.addPage(InstallPage())
         self.addPage(CameraScreenPage())
+        self.addPage(OverlayReadyPage())
         self.addPage(DonePage(config_path=config_path))

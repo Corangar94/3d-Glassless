@@ -266,6 +266,9 @@ class MainWindow(QMainWindow):
         try:
             self._overlay.start()
         except OverlayStartError as e:
+            self._on_status("error")
+            self._status_label.setText("✕ OVERLAY ERROR")
+            self._status_label.setToolTip(str(e))
             _log.warning("overlay launch failed: %s", e)
 
     def _stop_tracking(self) -> None:
@@ -305,6 +308,8 @@ class MainWindow(QMainWindow):
         self._status_label.setStyleSheet(
             f"color:{color};font-size:10px;font-weight:bold;"
         )
+        if status != "error":
+            self._status_label.setToolTip("")
 
     # ── Drag to move ───────────────────────────────────────────────────────────
 
