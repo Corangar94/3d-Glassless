@@ -82,6 +82,7 @@ To render a concrete stereo strip or quilt PNG from one RGB frame plus a `.npy`
 depth map:
 
 ```powershell
+python scripts/generate_depth_confidence.py depth.npy confidence.npy --max-gradient 0.25
 python scripts/render_views.py image.png depth.npy stereo.png --backend stereo_autostereo
 python scripts/render_views.py image.png depth.npy quilt.png --backend lightfield_quilt
 python scripts/render_views.py image.png depth.npy masked.png --backend stereo_autostereo --confidence-mask confidence.npy --fill-value 0
