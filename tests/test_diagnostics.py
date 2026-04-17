@@ -30,6 +30,34 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
     assert "stereo_autostereo" in report.experimental_backend_ids
 
 
+def test_collect_diagnostics_reports_configured_display_backend_layout(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("overlay:\n  display_backend: stereo_autostereo\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.configured_backend_id == "stereo_autostereo"
+    assert report.configured_backend_layout == {
+        "columns": 2,
+        "rows": 1,
+        "view_count": 2,
+    }
+
+
+def test_collect_diagnostics_rejects_unknown_display_backend(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("overlay:\n  display_backend: mystery_backend\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.ready is False
+    assert "unknown display backend: mystery_backend" in report.problems
+
+
 def test_collect_diagnostics_reports_missing_overlay_requirements(tmp_path, monkeypatch):
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: None)
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: None)
@@ -135,6 +163,12 @@ def test_format_diagnostics_json_is_machine_readable(tmp_path):
     assert data["overlay_exe"].endswith("overlay.exe")
     assert data["default_backend_id"] == "desktop_overlay"
     assert data["experimental_backend_ids"] == ["stereo_autostereo"]
+    assert data["configured_backend_id"] == "desktop_overlay"
+    assert data["configured_backend_layout"] == {
+        "columns": 1,
+        "rows": 1,
+        "view_count": 1,
+    }
 
 
 def test_main_writes_json_report_when_requested(tmp_path, monkeypatch, capsys):

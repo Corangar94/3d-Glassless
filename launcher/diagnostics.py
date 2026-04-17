@@ -12,7 +12,7 @@ from typing import Sequence
 import yaml
 
 from launcher.overlay_process import _project_root, find_depth_model, find_overlay_exe
-from tracker.display_backends import DisplayBackendRegistry, built_in_backends
+from tracker.display_backends import DisplayBackendRegistry, build_display_layout, built_in_backends
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,10 @@ class DiagnosticsReport:
     overlay_log: Path | None = None
     overlay_summary: OverlayRuntimeSummary | None = None
     warnings: list[str] = field(default_factory=list)
+    configured_backend_id: str = "desktop_overlay"
+    configured_backend_layout: dict[str, int] = field(
+        default_factory=lambda: {"columns": 1, "rows": 1, "view_count": 1}
+    )
 
 
 _SUMMARY_RE = re.compile(
@@ -76,12 +80,15 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     if depth_model is None:
         problems.append("depth model missing")
 
-    config_loaded = _can_load_config(cfg_path, problems)
+    config = _load_config(cfg_path, problems)
+    config_loaded = config is not None
     overlay_log = _find_overlay_log(overlay_exe)
     overlay_summary = _latest_overlay_summary(overlay_log) if overlay_log else None
     registry = DisplayBackendRegistry(built_in_backends())
     default_backend_id = registry.default().id
     experimental_backend_ids = [backend.id for backend in registry.by_status("experimental")]
+    configured_backend_id = _configured_backend_id(config, default_backend_id)
+    configured_backend_layout = _backend_layout_dict(configured_backend_id, problems)
     if overlay_summary is not None:
         if not overlay_summary.shm_status.startswith("LIVE"):
             warnings.append("overlay log reports stale tracker shared memory")
@@ -105,6 +112,8 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
         default_backend_id=default_backend_id,
         experimental_backend_ids=experimental_backend_ids,
         warnings=warnings,
+        configured_backend_id=configured_backend_id,
+        configured_backend_layout=configured_backend_layout,
     )
 
 
@@ -121,6 +130,12 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
         f"Depth model: {report.depth_model or 'missing'}",
         f"Overlay log: {report.overlay_log or 'not found'}",
         f"Display backend: {report.default_backend_id}",
+        f"Configured backend: {report.configured_backend_id}",
+        (
+            "Configured layout: "
+            f"{report.configured_backend_layout['columns']}x{report.configured_backend_layout['rows']} "
+            f"({report.configured_backend_layout['view_count']} views)"
+        ),
         f"Experimental backends: {', '.join(report.experimental_backend_ids) or 'none'}",
         "",
         "Problems:",
@@ -177,6 +192,8 @@ def format_diagnostics_json(report: DiagnosticsReport) -> str:
         "warnings": report.warnings,
         "default_backend_id": report.default_backend_id,
         "experimental_backend_ids": report.experimental_backend_ids,
+        "configured_backend_id": report.configured_backend_id,
+        "configured_backend_layout": report.configured_backend_layout,
         "overlay_summary": _summary_to_dict(report.overlay_summary),
     }
     return json.dumps(data, indent=2, sort_keys=True)
@@ -205,17 +222,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if report.ready else 1
 
 
-def _can_load_config(path: Path, problems: list[str]) -> bool:
+def _load_config(path: Path, problems: list[str]) -> dict[str, object] | None:
     if not path.is_file():
         problems.append("config file missing")
-        return False
+        return None
     try:
         with open(path, encoding="utf-8") as f:
-            yaml.safe_load(f) or {}
+            config = yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError) as e:
         problems.append(f"config unreadable: {e}")
-        return False
-    return True
+        return None
+    if not isinstance(config, dict):
+        problems.append("config unreadable: top-level YAML is not a mapping")
+        return None
+    return config
+
+
+def _configured_backend_id(config: dict[str, object] | None, default_backend_id: str) -> str:
+    overlay = config.get("overlay", {}) if config is not None else {}
+    if not isinstance(overlay, dict):
+        return default_backend_id
+    value = overlay.get("display_backend", default_backend_id)
+    return str(value or default_backend_id)
+
+
+def _backend_layout_dict(backend_id: str, problems: list[str]) -> dict[str, int]:
+    try:
+        layout = build_display_layout(backend_id)
+    except ValueError as e:
+        problems.append(str(e))
+        layout = build_display_layout("desktop_overlay")
+    return {
+        "columns": layout.columns,
+        "rows": layout.rows,
+        "view_count": layout.view_count,
+    }
 
 
 def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object] | None:

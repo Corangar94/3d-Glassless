@@ -38,6 +38,7 @@ The report checks:
 - overlay executable discovery
 - depth model discovery
 - config file readability
+- configured display backend ID and output layout
 - latest `overlay.log` runtime summary, when available
 - primary and experimental display backend status
 - project root and Python executable
