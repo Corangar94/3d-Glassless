@@ -72,6 +72,8 @@ python -m tracker.performance_benchmark path\to\timings.csv --target-fps 60
 ```
 
 The command exits non-zero when frame pacing classifies as `DANGER`.
+Use `tracker.performance_capture.FrameTimingCsvWriter` for tools that need to
+write compatible captures.
 
 Targets:
 
