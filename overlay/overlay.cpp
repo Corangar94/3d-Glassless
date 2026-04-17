@@ -84,7 +84,7 @@ static const wchar_t* SHM_NAME      = L"G3D";            // head pose (tracker -
 static const wchar_t* SHM_SETTINGS  = L"G3D_Settings";   // live tuning (settings GUI -> us)
 #pragma pack(push, 1)
 struct HeadPose { float x, y, z; uint32_t ts; };
-// Must match tracker/shared_settings.py STRUCT_FORMAT = "<fffffIfffffffI" (56 bytes)
+// Must match tracker/shared_settings.py STRUCT_FORMAT = "<fffffIfffffffII" (60 bytes)
 struct Settings {
     float     strengthX;
     float     strengthY;
@@ -99,8 +99,9 @@ struct Settings {
     float     ipdMm;
     float     smoothingAlpha;
     float     deadzoneM;
+    uint32_t  displayBackend; // 0=desktop, 1=stereo, 2=quilt
     uint32_t  version;
-};  // 56 bytes
+};  // 60 bytes
 #pragma pack(pop)
 
 // ── Shader source ─────────────────────────────────────────────────────────
@@ -293,6 +294,7 @@ static uint32_t g_depthCurve  = 1;    // sqrt default
 static float    g_depthGamma  = 1.0f;
 static float    g_focusRadius = 0.1f;
 static float    g_deadzoneCm  = 0.5f; // soft deadzone on dx/dy (default 5 mm)
+static uint32_t g_displayBackend = 0;  // 0=desktop, 1=stereo, 2=quilt
 
 static bool InitGpuTiming() {
     D3D11_QUERY_DESC q = {};
@@ -649,6 +651,7 @@ static void ApplySettings() {
     float sw = g_autoScreenW, sh = g_autoScreenH;
     float sx = 1.0f, sy = 1.0f, dp = 30.0f;
     uint32_t dc = 1;
+    uint32_t db = 0;
     float dg = 1.0f, fr = 0.1f;
     float dz_cm = 0.5f;   // default 5 mm
 
@@ -663,6 +666,7 @@ static void ApplySettings() {
         if (s.depthGamma  > 0.0f)    dg = s.depthGamma;
         if (s.focusRadius >= 0.0f)    fr = s.focusRadius;
         if (s.deadzoneM   >= 0.0f)    dz_cm = s.deadzoneM * 0.1f;  // mm → cm
+        db = s.displayBackend;
     }
 
     if (g_cliScreenW  > 0.0f) sw = g_cliScreenW;
@@ -680,6 +684,7 @@ static void ApplySettings() {
     g_depthGamma   = dg;
     g_focusRadius  = fr;
     g_deadzoneCm   = dz_cm;
+    g_displayBackend = db;
 }
 
 // Query the primary monitor's physical size via EDID.
@@ -1135,10 +1140,10 @@ static void Frame() {
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
         else                            shmStatus = "LIVE";
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
-            "depth[total=%llu %dHz] gpu_ms=%.3f head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
+            "depth[total=%llu %dHz] gpu_ms=%.3f backend=%u head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
             frameCount, acquireOk, acquireTimeout, acquireLost, acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
-            (unsigned long long)infNow, depthHz, g_lastGpuMs,
+            (unsigned long long)infNow, depthHz, g_lastGpuMs, g_displayBackend,
             hx - wobble, hy, hz, g_emaX, g_emaY, dx - wobble, dy, wobble, g_strength, g_virtualDepth, g_hasFrame ? 1 : 0);
     }
 

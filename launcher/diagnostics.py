@@ -29,6 +29,7 @@ class OverlayRuntimeSummary:
     head_z_cm: float
     has_frame: bool
     gpu_ms: float | None = None
+    backend: int | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ _SUMMARY_RE = re.compile(
     r"shm\[(?P<shm_status>.*?)\s+reads=\d+\s+changes=\d+\s+\((?P<changes_sec>-?\d+)/s\)\s+ts=\d+\]\s+"
     r"depth\[total=(?P<depth_total>\d+)\s+(?P<depth_hz>-?\d+)Hz\]\s+"
     r"(?:gpu_ms=(?P<gpu_ms>-?\d+(?:\.\d+)?)\s+)?"
+    r"(?:backend=(?P<backend>\d+)\s+)?"
     r"head=\([^,]+,[^,]+,(?P<head_z>-?\d+(?:\.\d+)?)\).*?"
     r"hasFrame=(?P<has_frame>[01])"
 )
@@ -161,6 +163,7 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
                 f"- shm: {s.shm_status} ({s.shm_changes_per_sec}/s)",
                 f"- depth: {s.depth_hz}Hz total={s.depth_total}",
                 f"- gpu_ms: {s.gpu_ms:.2f}" if s.gpu_ms is not None else "- gpu_ms: unavailable",
+                f"- backend: {s.backend}" if s.backend is not None else "- backend: unavailable",
                 f"- headZ: {s.head_z_cm:.2f} cm",
                 f"- hasFrame: {s.has_frame}",
             ]
@@ -273,6 +276,7 @@ def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object]
         "depth_total": summary.depth_total,
         "depth_hz": summary.depth_hz,
         "gpu_ms": summary.gpu_ms,
+        "backend": summary.backend,
         "head_z_cm": summary.head_z_cm,
         "has_frame": summary.has_frame,
     }
@@ -293,6 +297,7 @@ def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:
         depth_total=int(match.group("depth_total")),
         depth_hz=int(match.group("depth_hz")),
         gpu_ms=float(match.group("gpu_ms")) if match.group("gpu_ms") is not None else None,
+        backend=int(match.group("backend")) if match.group("backend") is not None else None,
         head_z_cm=float(match.group("head_z")),
         has_frame=match.group("has_frame") == "1",
     )

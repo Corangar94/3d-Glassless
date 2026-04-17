@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from typing import Literal, Sequence
 
 BackendStatus = Literal["primary", "experimental", "deferred"]
+_BACKEND_CODES = {
+    "desktop_overlay": 0,
+    "stereo_autostereo": 1,
+    "lightfield_quilt": 2,
+}
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,20 @@ def build_display_layout(backend_id: str) -> DisplayLayout:
             view_offsets=_normalized_view_offsets(45),
         )
     raise ValueError(f"unknown display backend: {backend_id}")
+
+
+def backend_code(backend_id: str) -> int:
+    try:
+        return _BACKEND_CODES[backend_id]
+    except KeyError as e:
+        raise ValueError(f"unknown display backend: {backend_id}") from e
+
+
+def backend_id_from_code(code: int) -> str:
+    for backend_id, backend_code_value in _BACKEND_CODES.items():
+        if backend_code_value == code:
+            return backend_id
+    raise ValueError(f"unknown display backend code: {code}")
 
 
 def _normalized_view_offsets(view_count: int) -> list[float]:

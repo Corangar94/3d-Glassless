@@ -80,6 +80,27 @@ def test_mainwindow_is_always_on_top(window):
     assert flags & Qt.WindowType.WindowStaysOnTopHint
 
 
+def test_mainwindow_publishes_configured_display_backend(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    config = {**CONFIG, "overlay": {"display_backend": "stereo_autostereo"}}
+
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=config, config_path=cfg_path)
+
+    assert win._settings.display_backend == 1
+
+
+def test_mainwindow_settings_changes_preserve_configured_display_backend(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    config = {**CONFIG, "overlay": {"display_backend": "lightfield_quilt"}}
+
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=config, config_path=cfg_path)
+        win._on_settings_change()
+
+    assert win._settings.display_backend == 2
+
+
 def test_mainwindow_toggle_saves_compact_pref_when_config_absent(qapp, tmp_path):
     """Toggling mode writes compact_mode even when config file doesn't yet exist."""
     import yaml

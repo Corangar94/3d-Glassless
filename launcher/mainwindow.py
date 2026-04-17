@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
+from tracker.display_backends import backend_code
 from launcher.presets import list_presets, save_preset, load_preset, delete_preset
 from launcher.calibration import detect_screen_cm, measure_head_distance_or_none
 
@@ -94,6 +95,7 @@ class MainWindow(QMainWindow):
             ipd_mm=float(ov.get("ipd_mm", 64.0)),
             smoothing_alpha=float(ov.get("smoothing_alpha", 0.1)),
             deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
+            display_backend=backend_code(str(ov.get("display_backend", "desktop_overlay"))),
         )
         self._settings_writer.write(self._settings)
 
@@ -547,6 +549,7 @@ class MainWindow(QMainWindow):
             ipd_mm=float(self._ipd_spin.value()),
             smoothing_alpha=self._slider_value(self._smoothing_slider),
             deadzone_mm=self._slider_value(self._deadzone_slider),
+            display_backend=self._settings.display_backend,
         )
 
     def _on_settings_change(self, *_: object) -> None:

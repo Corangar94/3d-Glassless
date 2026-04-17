@@ -341,11 +341,11 @@ Python format string: `"<fffI"` (16 bytes)
 ### G3D_Settings (Live Tuning)
 
 **Named object:** `G3D_Settings`  
-**Size:** 56 bytes  
+**Size:** 60 bytes  
 **Owner:** Launcher `SharedSettingsWriter` (one writer, created when `MainWindow` opens)  
 **Readers:** Overlay `overlay.cpp` (reads every frame), `TrackerThread` (reads per frame for `smoothing_alpha` and `deadzone_mm`)
 
-Python format string: `"<fffffIfffffffI"` (56 bytes)
+Python format string: `"<fffffIfffffffII"` (60 bytes)
 
 | Offset | Type | Field | Default | Notes |
 |--------|------|-------|---------|-------|
@@ -362,7 +362,8 @@ Python format string: `"<fffffIfffffffI"` (56 bytes)
 | 40 | float32 | ipd_mm | 64.0 | Inter-pupillary distance |
 | 44 | float32 | smoothing_alpha | 0.1 | Kalman measurement noise r |
 | 48 | float32 | deadzone_mm | 5.0 | XY deadzone radius in mm |
-| 52 | uint32 | version | monotonic | Incremented on every write |
+| 52 | uint32 | display_backend | 0 | 0=desktop, 1=stereo, 2=quilt |
+| 56 | uint32 | version | monotonic | Incremented on every write |
 
 The overlay's `Settings` struct in `overlay.cpp` must stay byte-for-byte identical to this layout. The `#pragma pack(push, 1)` directive is required.
 

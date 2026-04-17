@@ -3,6 +3,8 @@ from tracker.display_backends import (
     DisplayBackendRegistry,
     build_display_layout,
     built_in_backends,
+    backend_code,
+    backend_id_from_code,
 )
 
 
@@ -80,3 +82,10 @@ def test_build_display_layout_returns_quilt_grid_contract():
     assert layout.view_count == 45
     assert layout.view_offsets[0] == -1.0
     assert layout.view_offsets[-1] == 1.0
+
+
+def test_backend_codes_roundtrip_stable_runtime_ids():
+    assert backend_code("desktop_overlay") == 0
+    assert backend_code("stereo_autostereo") == 1
+    assert backend_code("lightfield_quilt") == 2
+    assert backend_id_from_code(1) == "stereo_autostereo"

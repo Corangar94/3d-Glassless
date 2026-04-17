@@ -1,7 +1,7 @@
 # tracker/shared_settings.py
-"""Shared-memory channel for live overlay tuning (v2, 56 bytes).
+"""Shared-memory channel for live overlay tuning (v3, 60 bytes).
 
-Layout (56 bytes, little-endian):
+Layout (60 bytes, little-endian):
     float   strength_x
     float   strength_y
     float   virtual_depth_cm
@@ -15,6 +15,7 @@ Layout (56 bytes, little-endian):
     float   ipd_mm
     float   smoothing_alpha    (Kalman measurement noise r)
     float   deadzone_mm
+    uint32  display_backend    (0=desktop, 1=stereo, 2=quilt)
     uint32  version            (monotonic counter)
 """
 from __future__ import annotations
@@ -23,8 +24,8 @@ import ctypes
 import struct
 from dataclasses import dataclass
 
-STRUCT_FORMAT = "<fffffIfffffffI"
-STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 56
+STRUCT_FORMAT = "<fffffIfffffffII"
+STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 60
 SHM_NAME = "G3D_Settings"
 
 _PAGE_READWRITE   = 0x04
@@ -55,6 +56,7 @@ class OverlaySettings:
     ipd_mm: float = 64.0
     smoothing_alpha: float = 0.1
     deadzone_mm: float = 5.0
+    display_backend: int = 0
 
 
 class SharedSettingsWriter:
@@ -97,6 +99,7 @@ class SharedSettingsWriter:
             float(s.head_dist_cm), float(s.camera_fov_deg),
             float(s.ipd_mm), float(s.smoothing_alpha),
             float(s.deadzone_mm),
+            int(s.display_backend),
             self._version,
         )
         ctypes.memmove(view, data, STRUCT_SIZE)
@@ -160,6 +163,7 @@ class SharedSettingsReader:
             head_dist_cm=f[8], camera_fov_deg=f[9],
             ipd_mm=f[10], smoothing_alpha=f[11],
             deadzone_mm=f[12],
+            display_backend=f[13],
         )
 
     def close(self) -> None:
