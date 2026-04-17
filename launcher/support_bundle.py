@@ -28,6 +28,7 @@ def create_support_bundle(
     config_path: str | Path = "config.yaml",
     depth_dir: str | Path | None = None,
     timing_csv: str | Path | None = None,
+    comfort_csv: str | Path | None = None,
     target_fps: float = 60.0,
 ) -> SupportBundleManifest:
     out = Path(output_dir)
@@ -48,9 +49,14 @@ def create_support_bundle(
     feasibility_wow_path.write_text(format_assessment_json(feasibility_wow) + "\n", encoding="utf-8")
 
     evaluation_path: Path | None = None
-    if depth_dir is not None or timing_csv is not None:
+    if depth_dir is not None or timing_csv is not None or comfort_csv is not None:
         evaluation_path = out / "evaluation.json"
-        evaluation = run_suite(depth_dir=depth_dir, timing_csv=timing_csv, target_fps=target_fps)
+        evaluation = run_suite(
+            depth_dir=depth_dir,
+            timing_csv=timing_csv,
+            comfort_csv=comfort_csv,
+            target_fps=target_fps,
+        )
         evaluation_path.write_text(format_suite_json(evaluation) + "\n", encoding="utf-8")
 
     manifest_path = out / "manifest.json"
@@ -78,6 +84,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--depth-dir")
     parser.add_argument("--timing-csv")
+    parser.add_argument("--comfort-csv")
     parser.add_argument("--target-fps", type=float, default=60.0)
     args = parser.parse_args(argv)
 
@@ -86,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config_path=args.config,
         depth_dir=args.depth_dir,
         timing_csv=args.timing_csv,
+        comfort_csv=args.comfort_csv,
         target_fps=args.target_fps,
     )
     print(f"wrote support bundle to {manifest.output_dir}")

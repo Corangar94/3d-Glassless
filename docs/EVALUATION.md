@@ -161,6 +161,24 @@ Check:
 - lateral head movement produces depth change without nausea or eye strain
 - depth ordering tasks are easier than in flat mode, not just more dramatic
 
+For repeatable subjective captures, write a CSV with 1-5 scores:
+
+```csv
+eye_strain,headache,nausea,disorientation,depth_realism,ui_readability,crosstalk
+1,1,1,1,5,5,1
+```
+
+Discomfort and crosstalk are severity scores where `1` is best. Depth realism
+and UI readability are quality scores where `5` is best.
+
+Run:
+
+```powershell
+python scripts/run_comfort_evaluation.py path\to\comfort.csv
+python scripts/run_evaluation.py --comfort-csv path\to\comfort.csv --format json --output evaluation.json
+python scripts/collect_support.py --output-dir support_bundle --comfort-csv path\to\comfort.csv
+```
+
 ## Policy Boundary
 
 World of Warcraft and protected multiplayer titles remain a later feasibility

@@ -37,6 +37,25 @@ def test_create_support_bundle_includes_evaluation_when_inputs_provided(tmp_path
     assert manifest.evaluation_path == out_dir / "evaluation.json"
 
 
+def test_create_support_bundle_includes_comfort_evaluation_input(tmp_path):
+    comfort = tmp_path / "comfort.csv"
+    comfort.write_text(
+        "eye_strain,headache,nausea,disorientation,depth_realism,ui_readability,crosstalk\n"
+        "1,1,1,1,5,5,1\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        comfort_csv=comfort,
+    )
+
+    data = json.loads((out_dir / "evaluation.json").read_text(encoding="utf-8"))
+    assert data["comfort"]["quality"] == "GOOD"
+    assert manifest.evaluation_path == out_dir / "evaluation.json"
+
+
 def test_create_support_bundle_includes_overlay_timings_when_log_has_samples(tmp_path, monkeypatch):
     overlay_log = tmp_path / "overlay.log"
     overlay_log.write_text(

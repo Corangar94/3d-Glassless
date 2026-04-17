@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from tracker.comfort_evaluation import (
+    ComfortBenchmarkResult,
+    run_benchmark as run_comfort_benchmark,
+)
 from tracker.depth_benchmark import DepthBenchmarkResult, run_benchmark as run_depth_benchmark
 from tracker.performance_benchmark import (
     FramePacingBenchmarkResult,
@@ -20,12 +24,14 @@ _QUALITY_RANK = {"GOOD": 0, "WARN": 1, "DANGER": 2}
 class EvaluationSuiteResult:
     depth: DepthBenchmarkResult | None
     performance: FramePacingBenchmarkResult | None
+    comfort: ComfortBenchmarkResult | None
     overall_quality: str
 
 
 def run_suite(
     depth_dir: str | Path | None = None,
     timing_csv: str | Path | None = None,
+    comfort_csv: str | Path | None = None,
     target_fps: float = 60.0,
 ) -> EvaluationSuiteResult:
     depth = run_depth_benchmark(depth_dir) if depth_dir is not None else None
@@ -34,15 +40,17 @@ def run_suite(
         if timing_csv is not None
         else None
     )
+    comfort = run_comfort_benchmark(comfort_csv) if comfort_csv is not None else None
     qualities = [
         result.quality
-        for result in (depth, performance)
+        for result in (depth, performance, comfort)
         if result is not None
     ]
     overall = max(qualities, key=lambda q: _QUALITY_RANK[q]) if qualities else "WARN"
     return EvaluationSuiteResult(
         depth=depth,
         performance=performance,
+        comfort=comfort,
         overall_quality=overall,
     )
 
@@ -72,6 +80,17 @@ def format_suite_result(result: EvaluationSuiteResult) -> str:
                 f"- p95_frame_time_ms={result.performance.metrics.p95_frame_time_ms:.2f}",
             ]
         )
+    if result.comfort is not None:
+        lines.extend(
+            [
+                "",
+                "Comfort:",
+                f"- quality={result.comfort.quality}",
+                f"- avg_discomfort={result.comfort.metrics.avg_discomfort:.2f}",
+                f"- avg_ui_readability={result.comfort.metrics.avg_ui_readability:.2f}",
+                f"- avg_crosstalk={result.comfort.metrics.avg_crosstalk:.2f}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -80,6 +99,7 @@ def format_suite_json(result: EvaluationSuiteResult) -> str:
         "overall_quality": result.overall_quality,
         "depth": _depth_to_dict(result.depth),
         "performance": _performance_to_dict(result.performance),
+        "comfort": _comfort_to_dict(result.comfort),
     }
     return json.dumps(data, indent=2, sort_keys=True)
 
@@ -88,6 +108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Glassless3D benchmark suite")
     parser.add_argument("--depth-dir", help="Directory containing .npy depth frames")
     parser.add_argument("--timing-csv", help="CSV with timestamp_ms,frame_time_ms columns")
+    parser.add_argument("--comfort-csv", help="CSV with 1-5 comfort/display survey scores")
     parser.add_argument("--target-fps", type=float, default=60.0)
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument("--output", help="Optional path to write the suite report")
@@ -96,6 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = run_suite(
         depth_dir=args.depth_dir,
         timing_csv=args.timing_csv,
+        comfort_csv=args.comfort_csv,
         target_fps=args.target_fps,
     )
     text = format_suite_json(result) if args.format == "json" else format_suite_result(result)
@@ -139,6 +161,22 @@ def _performance_to_dict(
         "p95_frame_time_ms": m.p95_frame_time_ms,
         "max_frame_time_ms": m.max_frame_time_ms,
         "over_budget_rate": m.over_budget_rate,
+    }
+
+
+def _comfort_to_dict(result: ComfortBenchmarkResult | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    m = result.metrics
+    return {
+        "source_path": str(result.source_path),
+        "quality": result.quality,
+        "sample_count": m.sample_count,
+        "avg_discomfort": m.avg_discomfort,
+        "max_discomfort": m.max_discomfort,
+        "avg_depth_realism": m.avg_depth_realism,
+        "avg_ui_readability": m.avg_ui_readability,
+        "avg_crosstalk": m.avg_crosstalk,
     }
 
 

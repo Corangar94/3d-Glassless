@@ -24,6 +24,21 @@ def test_run_suite_combines_depth_and_performance_results(tmp_path):
     assert result.overall_quality == "GOOD"
 
 
+def test_run_suite_includes_comfort_result_when_csv_is_provided(tmp_path):
+    comfort = tmp_path / "comfort.csv"
+    comfort.write_text(
+        "eye_strain,headache,nausea,disorientation,depth_realism,ui_readability,crosstalk\n"
+        "1,1,1,1,5,5,1\n",
+        encoding="utf-8",
+    )
+
+    result = evaluation_suite.run_suite(comfort_csv=comfort)
+
+    assert result.comfort is not None
+    assert result.comfort.quality == "GOOD"
+    assert result.overall_quality == "GOOD"
+
+
 def test_run_suite_overall_quality_uses_worst_result(tmp_path):
     depth_dir = tmp_path / "depth"
     depth_dir.mkdir()
@@ -68,6 +83,20 @@ def test_format_suite_json_is_machine_readable(tmp_path):
     assert data["overall_quality"] == "GOOD"
     assert data["depth"]["quality"] == "GOOD"
     assert data["performance"] is None
+    assert data["comfort"] is None
+
+
+def test_main_accepts_comfort_csv(tmp_path):
+    comfort = tmp_path / "comfort.csv"
+    comfort.write_text(
+        "eye_strain,headache,nausea,disorientation,depth_realism,ui_readability,crosstalk\n"
+        "5,4,4,4,2,2,4\n",
+        encoding="utf-8",
+    )
+
+    code = evaluation_suite.main(["--comfort-csv", str(comfort)])
+
+    assert code == 1
 
 
 def test_main_writes_json_output(tmp_path):
