@@ -37,8 +37,8 @@ from launcher.overlay_process import OverlayProcess, OverlayStartError
 from launcher.tracker_process import TrackerProcess
 
 # Window dimensions
-_EXPANDED_W, _EXPANDED_H = 430, 440
-_COMPACT_W,  _COMPACT_H  = 430, 100
+_EXPANDED_W, _EXPANDED_H = 760, 560
+_COMPACT_W,  _COMPACT_H  = 760, 120
 
 _STATUS_TEXT = {
     "tracking":     "● TRACKING",
@@ -56,8 +56,10 @@ _STATUS_COLOR = {
     "initializing": "#3ecfcf",
     "error":        "#e84040",
 }
-_DARK_BG = "#0d0d22"
-_TITLE_BG = "#1a1a2e"
+_DARK_BG = "#08110f"
+_TITLE_BG = "#10231f"
+_CARD_BG = "#132b25"
+_ACCENT = "#f0c15a"
 
 
 
@@ -81,6 +83,7 @@ class MainWindow(QMainWindow):
         trk = config.get("tracking", {})
         self._camera_tilt_deg: float = float(trk.get("camera_tilt_deg", 0.0))
         ov = config.get("overlay", {})
+        self._display_backend_id = str(ov.get("display_backend", "desktop_overlay"))
         self._settings = OverlaySettings(
             strength_x=float(ov.get("strength_x", 1.0)),
             strength_y=float(ov.get("strength_y", 1.0)),
@@ -95,7 +98,7 @@ class MainWindow(QMainWindow):
             ipd_mm=float(ov.get("ipd_mm", 64.0)),
             smoothing_alpha=float(ov.get("smoothing_alpha", 0.1)),
             deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
-            display_backend=backend_code(str(ov.get("display_backend", "desktop_overlay"))),
+            display_backend=backend_code(self._display_backend_id),
         )
         self._settings_writer.write(self._settings)
 
@@ -117,7 +120,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         root = QWidget()
-        root.setStyleSheet(f"background:{_DARK_BG};border-radius:8px;")
+        root.setStyleSheet(f"background:{_DARK_BG};border-radius:14px;")
         self.setCentralWidget(root)
         self._root_layout = QVBoxLayout(root)
         self._root_layout.setContentsMargins(0, 0, 0, 0)
@@ -127,24 +130,91 @@ class MainWindow(QMainWindow):
 
         self._tabs = QTabWidget()
         self._tabs.setStyleSheet(
-            "QTabWidget::pane{border:none;background:#0d0d22;}"
-            "QTabBar::tab{background:#1a1a2e;color:#888;padding:5px 14px;}"
-            "QTabBar::tab:selected{background:#0d0d22;color:#c8c8e8;}"
+            f"QTabWidget::pane{{border:none;background:{_DARK_BG};}}"
+            f"QTabBar::tab{{background:{_TITLE_BG};color:#93a69c;padding:8px 18px;}}"
+            f"QTabBar::tab:selected{{background:{_DARK_BG};color:{_ACCENT};}}"
         )
 
-        tracker_tab = QWidget()
-        tl = QVBoxLayout(tracker_tab)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(0)
-        self._camera_label = QLabel()
-        self._camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._camera_label.setStyleSheet("background:#0a0a0a;")
-        tl.addWidget(self._camera_label)
-        tl.addLayout(self._make_xyz_row())
-        tl.addWidget(self._make_action_button())
-        self._tabs.addTab(tracker_tab, "Tracker")
+        self._tabs.addTab(self._make_runtime_tab(), "Runtime")
         self._tabs.addTab(self._make_advanced_tab(), "Advanced")
         self._root_layout.addWidget(self._tabs)
+
+    def _make_runtime_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setStyleSheet(f"background:{_DARK_BG};")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        self._hero_label = QLabel(
+            "Overlay-first runtime\n"
+            "Camera tracking drives the standalone Windows overlay. ReShade is experimental."
+        )
+        self._hero_label.setStyleSheet(
+            f"color:{_ACCENT};font-size:20px;font-weight:800;line-height:130%;"
+        )
+        layout.addWidget(self._hero_label)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        self._tracker_tile = self._status_tile("Tracker", "Stopped")
+        self._overlay_tile = self._status_tile("Overlay", "Idle")
+        camera_index = self._config.get("camera", {}).get("index", 0)
+        self._camera_tile = self._status_tile("Camera", f"Camera {camera_index}")
+        self._backend_tile = self._status_tile("Backend", self._display_backend_id)
+        for tile in (
+            self._tracker_tile,
+            self._overlay_tile,
+            self._camera_tile,
+            self._backend_tile,
+        ):
+            status_row.addWidget(tile)
+        layout.addLayout(status_row)
+
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(12)
+        self._camera_label = QLabel("Camera preview is available in embedded tracker mode")
+        self._camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._camera_label.setMinimumHeight(210)
+        self._camera_label.setStyleSheet(
+            "background:#020706;color:#7b8f86;border:1px solid #24443b;"
+            "border-radius:10px;font-size:12px;"
+        )
+        mid_row.addWidget(self._camera_label, 3)
+
+        side = QVBoxLayout()
+        side.setSpacing(10)
+        side.addLayout(self._make_xyz_row())
+        side.addWidget(self._make_action_button())
+        side.addWidget(self._operator_button("Run diagnostics", self._run_diagnostics))
+        side.addWidget(self._operator_button("Collect support bundle", self._collect_support_bundle))
+        side.addWidget(self._operator_button("Open quality monitor", self._open_debug_monitor))
+        side.addStretch()
+        mid_row.addLayout(side, 2)
+        layout.addLayout(mid_row)
+
+        layout.addStretch()
+        return tab
+
+    def _status_tile(self, label: str, value: str) -> QLabel:
+        tile = QLabel(f"{label}\n{value}")
+        tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tile.setStyleSheet(
+            f"background:{_CARD_BG};color:#dce8df;border:1px solid #254f45;"
+            "border-radius:10px;padding:10px;font-size:12px;font-weight:700;"
+        )
+        tile.setMinimumHeight(64)
+        return tile
+
+    def _operator_button(self, text: str, slot: object) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setStyleSheet(
+            "QPushButton{background:#1d3b34;color:#e6f0e9;font-weight:700;"
+            "border:1px solid #315c51;border-radius:8px;padding:9px;}"
+            "QPushButton:hover{background:#2a5147;}"
+        )
+        btn.clicked.connect(slot)  # type: ignore[arg-type]
+        return btn
 
     def _make_titlebar(self) -> QWidget:
         bar = QWidget()
@@ -153,7 +223,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 6, 10, 6)
 
         logo = QLabel("● GLASSLESS 3D")
-        logo.setStyleSheet("color:#c8c8e8;font-size:11px;font-weight:bold;")
+        logo.setStyleSheet(f"color:{_ACCENT};font-size:12px;font-weight:bold;")
         self._status_label = QLabel("● STOPPED")
         self._status_label.setStyleSheet("color:#888;font-size:10px;")
         self._toggle_btn = QPushButton("▲")
@@ -193,16 +263,16 @@ class MainWindow(QMainWindow):
         tile = QLabel(f"{axis}\n0.0")
         tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tile.setStyleSheet(
-            "background:#111128;color:#3ecfcf;font-family:monospace;"
-            "font-size:13px;font-weight:bold;border-radius:3px;padding:4px;"
+            f"background:{_CARD_BG};color:#9fe6c4;font-family:monospace;"
+            "font-size:16px;font-weight:bold;border-radius:8px;padding:10px;"
         )
         return tile
 
     def _make_action_button(self) -> QPushButton:
         self._action_btn = QPushButton("▶ START TRACKING")
         self._action_btn.setStyleSheet(
-            "background:#28c840;color:#111;font-weight:bold;"
-            "font-size:11px;padding:8px;border:none;"
+            f"background:{_ACCENT};color:#111;font-weight:900;"
+            "font-size:13px;padding:12px;border:none;border-radius:8px;"
         )
         self._action_btn.clicked.connect(self._toggle_tracking)
         return self._action_btn
@@ -217,11 +287,11 @@ class MainWindow(QMainWindow):
     def _apply_mode(self) -> None:
         if self._compact:
             self.setFixedSize(_COMPACT_W, _COMPACT_H)
-            self._camera_label.setFixedHeight(72)
+            self._tabs.setVisible(False)
             self._toggle_btn.setText("▼")
         else:
             self.setFixedSize(_EXPANDED_W, _EXPANDED_H)
-            self._camera_label.setFixedHeight(150)
+            self._tabs.setVisible(True)
             self._toggle_btn.setText("▲")
 
     def _save_compact_pref(self) -> None:
@@ -250,7 +320,7 @@ class MainWindow(QMainWindow):
         self._action_btn.setText("■ STOP TRACKING")
         self._action_btn.setStyleSheet(
             "background:#e84040;color:#fff;font-weight:bold;"
-            "font-size:11px;padding:8px;border:none;"
+            "font-size:13px;padding:12px;border:none;border-radius:8px;"
         )
         self._overlay_started = False
 
@@ -265,8 +335,8 @@ class MainWindow(QMainWindow):
             self._on_status("error")
             self._action_btn.setText("▶ START TRACKING")
             self._action_btn.setStyleSheet(
-                "background:#28c840;color:#111;font-weight:bold;"
-                "font-size:11px;padding:8px;border:none;"
+                f"background:{_ACCENT};color:#111;font-weight:900;"
+                "font-size:13px;padding:12px;border:none;border-radius:8px;"
             )
             return
         self._thread = tracker
@@ -280,9 +350,11 @@ class MainWindow(QMainWindow):
             self._thread.status_changed.disconnect(self._on_tracker_status_for_overlay)
         try:
             self._overlay.start()
+            self._overlay_tile.setText("Overlay\nRunning")
         except OverlayStartError as e:
             self._on_status("error")
             self._status_label.setText("✕ OVERLAY ERROR")
+            self._overlay_tile.setText("Overlay\nError")
             self._status_label.setToolTip(str(e))
             _log.warning("overlay launch failed: %s", e)
 
@@ -294,9 +366,10 @@ class MainWindow(QMainWindow):
         self._on_status("stopped")
         self._action_btn.setText("▶ START TRACKING")
         self._action_btn.setStyleSheet(
-            "background:#28c840;color:#111;font-weight:bold;"
-            "font-size:11px;padding:8px;border:none;"
+            f"background:{_ACCENT};color:#111;font-weight:900;"
+            "font-size:13px;padding:12px;border:none;border-radius:8px;"
         )
+        self._overlay_tile.setText("Overlay\nIdle")
 
     # ── Signal slots ───────────────────────────────────────────────────────────
 
@@ -325,6 +398,8 @@ class MainWindow(QMainWindow):
         )
         if status != "error":
             self._status_label.setToolTip("")
+        if hasattr(self, "_tracker_tile"):
+            self._tracker_tile.setText(f"Tracker\n{text.replace('● ', '').replace('⟳ ', '').replace('✕ ', '')}")
 
     # ── Drag to move ───────────────────────────────────────────────────────────
 
@@ -705,6 +780,33 @@ class MainWindow(QMainWindow):
         except OSError as e:
             self._on_status("error")
             self._status_label.setToolTip(f"Could not launch debug monitor: {e}")
+
+    def _run_diagnostics(self) -> None:
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "launcher.diagnostics", "--config", self._config_path],
+                cwd=str(Path(__file__).resolve().parent.parent),
+            )
+        except OSError as e:
+            self._on_status("error")
+            self._status_label.setToolTip(f"Could not launch diagnostics: {e}")
+
+    def _collect_support_bundle(self) -> None:
+        try:
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "scripts/collect_support.py",
+                    "--output-dir",
+                    "support_bundle",
+                    "--config",
+                    self._config_path,
+                ],
+                cwd=str(Path(__file__).resolve().parent.parent),
+            )
+        except OSError as e:
+            self._on_status("error")
+            self._status_label.setToolTip(f"Could not collect support bundle: {e}")
 
     def closeEvent(self, event: object) -> None:
         if self._thread and self._thread.isRunning():

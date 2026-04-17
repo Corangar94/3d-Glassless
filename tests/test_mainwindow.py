@@ -1,4 +1,5 @@
 # tests/test_mainwindow.py
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,16 +37,15 @@ def window(qapp, tmp_path):
 
 def test_mainwindow_starts_in_expanded_mode(window):
     assert not window._compact
-    # Both modes share width=430; expanded is taller than compact
-    assert window.width() == 430
-    assert window.height() > 200
+    assert window.width() >= 700
+    assert window.height() >= 520
 
 
 def test_mainwindow_toggle_switches_to_compact(window):
     window._toggle_mode()
     assert window._compact
-    assert window.width() == 430
-    assert window.height() == 100
+    assert window.width() >= 700
+    assert window.height() <= 140
 
 
 def test_mainwindow_toggle_back_to_expanded(window):
@@ -53,8 +53,24 @@ def test_mainwindow_toggle_back_to_expanded(window):
     window._apply_mode()
     window._toggle_mode()
     assert not window._compact
-    assert window.width() == 430
-    assert window.height() > 200
+    assert window.width() >= 700
+    assert window.height() >= 520
+
+
+def test_mainwindow_shows_overlay_first_runtime_cockpit(window):
+    assert window._tabs.tabText(0) == "Runtime"
+    assert "Overlay-first runtime" in window._hero_label.text()
+    assert "Backend" in window._backend_tile.text()
+    assert "Camera 0" in window._camera_tile.text()
+    assert "Overlay" in window._overlay_tile.text()
+
+
+def test_mainwindow_exposes_operator_action_buttons(window):
+    buttons = {button.text() for button in window.findChildren(type(window._action_btn))}
+
+    assert "Run diagnostics" in buttons
+    assert "Collect support bundle" in buttons
+    assert "Open quality monitor" in buttons
 
 
 def test_mainwindow_xyz_labels_update_on_signal(window):
@@ -144,6 +160,38 @@ def test_open_debug_monitor_starts_diagnostics_module(qapp, tmp_path):
     assert args[1:] == ["-m", "tracker.debug_monitor"]
     assert popen.call_args.kwargs["cwd"].endswith("Glassless 3d")
     assert win._debug_monitor_proc is fake_proc
+
+
+def test_run_diagnostics_starts_diagnostics_command(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.subprocess.Popen") as popen,
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._run_diagnostics()
+
+    args = popen.call_args.args[0]
+    assert args[:3] == [sys.executable, "-m", "launcher.diagnostics"]
+    assert args[-1] == cfg_path
+
+
+def test_collect_support_bundle_starts_support_command(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.subprocess.Popen") as popen,
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._collect_support_bundle()
+
+    args = popen.call_args.args[0]
+    assert args[:2] == [sys.executable, "scripts/collect_support.py"]
+    assert "--output-dir" in args
+    assert "support_bundle" in args
+    assert args[-1] == cfg_path
 
 
 def test_open_debug_monitor_is_idempotent_when_already_running(qapp, tmp_path):
