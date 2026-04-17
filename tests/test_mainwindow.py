@@ -73,6 +73,52 @@ def test_mainwindow_exposes_operator_action_buttons(window):
     assert "Open quality monitor" in buttons
 
 
+def test_mainwindow_exposes_builtin_comfort_presets(window):
+    buttons = {button.text() for button in window.findChildren(type(window._action_btn))}
+
+    assert "Safe comfort" in buttons
+    assert "Balanced depth" in buttons
+    assert "Strong depth" in buttons
+
+
+def test_safe_comfort_preset_reduces_vertical_parallax_and_persists(qapp, tmp_path):
+    import yaml
+
+    cfg_path = str(tmp_path / "config.yaml")
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+
+    win._apply_comfort_preset("safe")
+
+    assert win._settings.strength_x == pytest.approx(0.75)
+    assert win._settings.strength_y == pytest.approx(0.30)
+    assert win._settings.virtual_depth_cm == pytest.approx(24.0)
+    assert "Safe" in win._comfort_status.text()
+    with open(cfg_path, encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["strength_y"] == pytest.approx(0.30)
+
+
+def test_balanced_depth_preset_keeps_vertical_parallax_conservative(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+
+    win._apply_comfort_preset("balanced")
+
+    assert win._settings.strength_x == pytest.approx(1.00)
+    assert win._settings.strength_y == pytest.approx(0.40)
+    assert win._settings.virtual_depth_cm == pytest.approx(30.0)
+
+
+def test_unknown_comfort_preset_is_ignored(window):
+    before = window._settings
+
+    window._apply_comfort_preset("missing")
+
+    assert window._settings == before
+
+
 def test_mainwindow_xyz_labels_update_on_signal(window):
     window._on_position(2.5, -1.0, 57.3)
     assert "2.5" in window._label_x.text()

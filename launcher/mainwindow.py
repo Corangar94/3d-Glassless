@@ -61,6 +61,36 @@ _TITLE_BG = "#10231f"
 _CARD_BG = "#132b25"
 _ACCENT = "#f0c15a"
 
+_COMFORT_PRESETS = {
+    "safe": {
+        "label": "Safe",
+        "strength_x": 0.75,
+        "strength_y": 0.30,
+        "virtual_depth_cm": 24.0,
+        "focus_radius": 0.12,
+        "smoothing_alpha": 0.16,
+        "deadzone_mm": 6.0,
+    },
+    "balanced": {
+        "label": "Balanced",
+        "strength_x": 1.00,
+        "strength_y": 0.40,
+        "virtual_depth_cm": 30.0,
+        "focus_radius": 0.10,
+        "smoothing_alpha": 0.12,
+        "deadzone_mm": 5.0,
+    },
+    "strong": {
+        "label": "Strong",
+        "strength_x": 1.25,
+        "strength_y": 0.65,
+        "virtual_depth_cm": 42.0,
+        "focus_radius": 0.08,
+        "smoothing_alpha": 0.10,
+        "deadzone_mm": 4.0,
+    },
+}
+
 
 
 class MainWindow(QMainWindow):
@@ -185,6 +215,7 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout()
         side.setSpacing(10)
         side.addLayout(self._make_xyz_row())
+        side.addWidget(self._make_comfort_presets_panel())
         side.addWidget(self._make_action_button())
         side.addWidget(self._operator_button("Run diagnostics", self._run_diagnostics))
         side.addWidget(self._operator_button("Collect support bundle", self._collect_support_bundle))
@@ -215,6 +246,41 @@ class MainWindow(QMainWindow):
         )
         btn.clicked.connect(slot)  # type: ignore[arg-type]
         return btn
+
+    def _make_comfort_presets_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setStyleSheet(
+            f"background:{_CARD_BG};border:1px solid #254f45;border-radius:10px;"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+
+        title = QLabel("Comfort presets")
+        title.setStyleSheet(f"color:{_ACCENT};font-size:12px;font-weight:900;")
+        layout.addWidget(title)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for key, text in (
+            ("safe", "Safe comfort"),
+            ("balanced", "Balanced depth"),
+            ("strong", "Strong depth"),
+        ):
+            btn = QPushButton(text)
+            btn.setStyleSheet(
+                "QPushButton{background:#18342e;color:#dce8df;font-weight:700;"
+                "border:1px solid #315c51;border-radius:7px;padding:7px;}"
+                "QPushButton:hover{background:#285247;}"
+            )
+            btn.clicked.connect(lambda _checked=False, preset=key: self._apply_comfort_preset(preset))
+            row.addWidget(btn)
+        layout.addLayout(row)
+
+        self._comfort_status = QLabel("Balanced reduces vertical parallax for comfort")
+        self._comfort_status.setStyleSheet("color:#8ea69b;font-size:10px;")
+        layout.addWidget(self._comfort_status)
+        return panel
 
     def _make_titlebar(self) -> QWidget:
         bar = QWidget()
@@ -630,6 +696,37 @@ class MainWindow(QMainWindow):
     def _on_settings_change(self, *_: object) -> None:
         self._settings = self._snapshot_settings()
         self._settings_writer.write(self._settings)
+
+    def _apply_comfort_preset(self, preset_id: str) -> None:
+        preset = _COMFORT_PRESETS.get(preset_id)
+        if preset is None:
+            return
+        widgets = [
+            self._strength_x_slider,
+            self._strength_y_slider,
+            self._virtual_depth_slider,
+            self._focus_radius_slider,
+            self._smoothing_slider,
+            self._deadzone_slider,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self._set_slider_value(self._strength_x_slider, float(preset["strength_x"]))
+            self._set_slider_value(self._strength_y_slider, float(preset["strength_y"]))
+            self._set_slider_value(self._virtual_depth_slider, float(preset["virtual_depth_cm"]))
+            self._set_slider_value(self._focus_radius_slider, float(preset["focus_radius"]))
+            self._set_slider_value(self._smoothing_slider, float(preset["smoothing_alpha"]))
+            self._set_slider_value(self._deadzone_slider, float(preset["deadzone_mm"]))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self._on_settings_change()
+        self._on_save_config()
+        label = str(preset["label"])
+        self._comfort_status.setText(
+            f"{label} preset applied: Y strength {self._settings.strength_y:.2f}"
+        )
 
     def _on_camera_tilt_change(self, value: float) -> None:
         self._camera_tilt_deg = float(value)
