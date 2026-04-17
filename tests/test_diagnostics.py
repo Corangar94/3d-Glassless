@@ -17,6 +17,11 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
 
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: exe)
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: model)
+    monkeypatch.setattr(
+        diagnostics,
+        "_probe_camera",
+        lambda index: diagnostics.CameraProbe(index=index, opened=True, frame_ok=True, width=640, height=480),
+    )
 
     report = diagnostics.collect_diagnostics(config_path=cfg)
 
@@ -28,6 +33,52 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
     assert report.problems == []
     assert report.default_backend_id == "desktop_overlay"
     assert "stereo_autostereo" in report.experimental_backend_ids
+
+
+def test_collect_diagnostics_reports_camera_stream_status(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    model = tmp_path / "models" / "depth_anything_v2_small_fp16.onnx"
+    model.parent.mkdir()
+    exe.write_bytes(b"exe")
+    model.write_bytes(b"model")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("camera:\n  index: 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: exe)
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: model)
+    monkeypatch.setattr(
+        diagnostics,
+        "_probe_camera",
+        lambda index: diagnostics.CameraProbe(index=index, opened=True, frame_ok=True, width=640, height=480),
+    )
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.camera == diagnostics.CameraProbe(
+        index=2,
+        opened=True,
+        frame_ok=True,
+        width=640,
+        height=480,
+    )
+    assert report.ready is True
+
+
+def test_collect_diagnostics_marks_unstreamable_camera_not_ready(tmp_path, monkeypatch):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("camera:\n  index: 4\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+    monkeypatch.setattr(
+        diagnostics,
+        "_probe_camera",
+        lambda index: diagnostics.CameraProbe(index=index, opened=True, frame_ok=False),
+    )
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.ready is False
+    assert "camera 4 opened but returned no frames" in report.problems
 
 
 def test_collect_diagnostics_reports_configured_display_backend_layout(tmp_path, monkeypatch):
@@ -100,6 +151,7 @@ def test_format_diagnostics_report_includes_actionable_commands(tmp_path):
     assert "python scripts/bootstrap.py" in text
     assert "python -m tracker.debug_monitor" in text
     assert "Display backend: desktop_overlay" in text
+    assert "Camera: not checked" in text
 
 
 def test_collect_diagnostics_marks_invalid_config(tmp_path, monkeypatch):
@@ -179,6 +231,31 @@ def test_format_diagnostics_json_is_machine_readable(tmp_path):
         "columns": 1,
         "rows": 1,
         "view_count": 1,
+    }
+    assert data["camera"] is None
+
+
+def test_format_diagnostics_json_includes_camera_probe(tmp_path):
+    report = diagnostics.DiagnosticsReport(
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        overlay_exe=tmp_path / "overlay.exe",
+        depth_model=tmp_path / "model.onnx",
+        config_path=tmp_path / "config.yaml",
+        config_loaded=True,
+        ready=True,
+        problems=[],
+        camera=diagnostics.CameraProbe(index=0, opened=True, frame_ok=True, width=640, height=480),
+    )
+
+    data = json.loads(diagnostics.format_diagnostics_json(report))
+
+    assert data["camera"] == {
+        "index": 0,
+        "opened": True,
+        "frame_ok": True,
+        "width": 640,
+        "height": 480,
     }
 
 

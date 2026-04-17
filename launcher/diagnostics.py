@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+import cv2
 import yaml
 
 from launcher.overlay_process import _project_root, find_depth_model, find_overlay_exe
@@ -33,6 +34,15 @@ class OverlayRuntimeSummary:
 
 
 @dataclass(frozen=True)
+class CameraProbe:
+    index: int
+    opened: bool
+    frame_ok: bool
+    width: int | None = None
+    height: int | None = None
+
+
+@dataclass(frozen=True)
 class DiagnosticsReport:
     project_root: Path
     python_executable: Path
@@ -52,6 +62,7 @@ class DiagnosticsReport:
         default_factory=lambda: {"columns": 1, "rows": 1, "view_count": 1}
     )
     display_calibration: dict[str, float] = field(default_factory=dict)
+    camera: CameraProbe | None = None
 
 
 _SUMMARY_RE = re.compile(
@@ -93,6 +104,11 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     configured_backend_id = _configured_backend_id(config, default_backend_id)
     configured_backend_layout = _backend_layout_dict(configured_backend_id, problems)
     display_calibration = _display_calibration(config)
+    camera = _probe_camera(_configured_camera_index(config))
+    if not camera.opened:
+        problems.append(f"camera {camera.index} could not open")
+    elif not camera.frame_ok:
+        problems.append(f"camera {camera.index} opened but returned no frames")
     if overlay_summary is not None:
         if not overlay_summary.shm_status.startswith("LIVE"):
             warnings.append("overlay log reports stale tracker shared memory")
@@ -119,6 +135,7 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
         configured_backend_id=configured_backend_id,
         configured_backend_layout=configured_backend_layout,
         display_calibration=display_calibration,
+        camera=camera,
     )
 
 
@@ -133,6 +150,7 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
         f"Config: {report.config_path} ({'loaded' if report.config_loaded else 'not loaded'})",
         f"Overlay executable: {report.overlay_exe or 'missing'}",
         f"Depth model: {report.depth_model or 'missing'}",
+        f"Camera: {_format_camera(report.camera)}",
         f"Overlay log: {report.overlay_log or 'not found'}",
         f"Display backend: {report.default_backend_id}",
         f"Configured backend: {report.configured_backend_id}",
@@ -202,6 +220,7 @@ def format_diagnostics_json(report: DiagnosticsReport) -> str:
         "configured_backend_id": report.configured_backend_id,
         "configured_backend_layout": report.configured_backend_layout,
         "display_calibration": report.display_calibration,
+        "camera": _camera_to_dict(report.camera),
         "overlay_summary": _summary_to_dict(report.overlay_summary),
     }
     return json.dumps(data, indent=2, sort_keys=True)
@@ -279,6 +298,58 @@ def _display_calibration(config: dict[str, object] | None) -> dict[str, float]:
         if key in calibration:
             result[key] = float(calibration[key])
     return result
+
+
+def _configured_camera_index(config: dict[str, object] | None) -> int:
+    camera = config.get("camera", {}) if config is not None else {}
+    if not isinstance(camera, dict):
+        return 0
+    try:
+        return int(camera.get("index", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _probe_camera(index: int) -> CameraProbe:
+    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    try:
+        if not cap.isOpened():
+            return CameraProbe(index=index, opened=False, frame_ok=False)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return CameraProbe(index=index, opened=True, frame_ok=False)
+        height, width = frame.shape[:2]
+        return CameraProbe(
+            index=index,
+            opened=True,
+            frame_ok=True,
+            width=int(width),
+            height=int(height),
+        )
+    finally:
+        cap.release()
+
+
+def _format_camera(camera: CameraProbe | None) -> str:
+    if camera is None:
+        return "not checked"
+    if not camera.opened:
+        return f"{camera.index} (could not open)"
+    if not camera.frame_ok:
+        return f"{camera.index} (opened, no frames)"
+    return f"{camera.index} ({camera.width}x{camera.height})"
+
+
+def _camera_to_dict(camera: CameraProbe | None) -> dict[str, object] | None:
+    if camera is None:
+        return None
+    return {
+        "index": camera.index,
+        "opened": camera.opened,
+        "frame_ok": camera.frame_ok,
+        "width": camera.width,
+        "height": camera.height,
+    }
 
 
 def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object] | None:
