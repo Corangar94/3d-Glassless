@@ -151,3 +151,10 @@ Check:
 World of Warcraft and protected multiplayer titles remain a later feasibility
 gate. Do not use process injection or game-depth hooks as default validation for
 the overlay runtime.
+
+For explicitly approved offline/friendly titles, compare an external depth
+capture against the monocular baseline without injecting into a protected game:
+
+```powershell
+python scripts/run_friendly_depth_experiment.py --title "Friendly Offline Title" --external-depth-dir path\to\external_depth --monocular-depth-dir path\to\monocular_depth --policy-approved --offline-title
+```

@@ -30,7 +30,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | Performance hardening | Overlay logs render/acquisition/depth cadence plus D3D11 timestamp-query GPU draw timing, diagnostics parses the latest summary, reusable frame-pacing metrics cover average/p95/max frame time plus budget overruns, `tracker.performance_capture` writes compatible timing CSVs, exports approximate overlay-log cadence samples, support bundles include `overlay_timings.csv` when available, and `tracker.performance_benchmark` classifies captured CSV timing data. | Add deeper present/vsync latency instrumentation if needed after live testing. |
 | Depth-image-based reprojection | Current overlay performs depth-dependent inverse-warp parallax for a single desktop view, `tracker.depth_reprojection` provides a tested CPU reference synthesizer for stereo/quilt view stacks, and `tracker.view_renderer` renders offline stereo/quilt PNG artifacts from RGB+depth inputs. | Move the reference synthesis into a real-time renderer path. |
 | Display abstraction layer | Product docs separate core overlay from experimental integrations, and `tracker.display_backends` defines stable backend IDs/status plus concrete 1x1, 2x1 stereo, and 9x5 quilt layout contracts used by offline rendering. | Add real-time stereo/quilt renderer implementations behind the registered backend IDs. |
-| Hooked game depth on friendly titles | ReShade path remains in the repo as experimental. | Build a policy-safe friendly-title depth capture prototype and compare it against monocular fallback. |
+| Hooked game depth on friendly titles | ReShade path remains in the repo as experimental, and `tracker.friendly_depth_experiment` provides a policy-safe offline comparator for approved friendly-title external depth captures against monocular fallback. | Build a live friendly-title capture prototype only after explicit policy and technical approval. |
 
 ## Deferred By Design
 
@@ -49,7 +49,5 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
    after live validation.
 2. Implement real-time stereo or quilt output behind the `tracker.display_backends`
    IDs.
-3. Add a friendly-title hooked-depth experiment only after the overlay
-   diagnostics remain stable.
-4. Run the WoW feasibility gate as a separate policy and technical review, not
+3. Run the WoW feasibility gate as a separate policy and technical review, not
    as an implementation task.
