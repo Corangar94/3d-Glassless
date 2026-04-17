@@ -16,6 +16,11 @@ reads head pose and tuning data from shared memory each frame:
 The ReShade addon and `FT_SharedMem` path remain in the repository as
 experimental integrations. They are not the default onboarding or support path.
 
+Display backend status is represented in code by `tracker.display_backends`.
+The current primary backend is `desktop_overlay`. `stereo_autostereo` and
+`lightfield_quilt` are registered as experimental capability targets so future
+work has stable IDs, but they are not rendering implementations yet.
+
 Three processes collaborate via Windows Named Shared Memory in the primary flow:
 
 ```
