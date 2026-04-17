@@ -138,7 +138,7 @@ cbuffer CB : register(b0) {
     // Render-rate depth interpolation: blend_t advances 0→1 over kBlendFrames
     // render frames after each new inference, hiding the 10 Hz update rate.
     float depthBlend;      // 0=prev inference, 1=latest inference
-    float _pad0;
+    float displayBackend;  // 0=desktop_overlay, 1=stereo_autostereo, 2=lightfield_quilt
 };
 Texture2D    SceneTex     : register(t0);
 Texture2D    DepthTex     : register(t1);  // latest inference
@@ -169,15 +169,35 @@ float SampleDepthScreen(float2 screenUV, float dCropW) {
 // the predicted head displacement from rest (cm).  f = oz/(hz+oz), the
 // fraction of head offset that a pixel at virtual depth oz=vd*d sees as UV
 // shift on a pinhole-through-window model.
-float2 ParallaxShift(float d, float hz, float sw, float sh, float vd) {
+float2 ParallaxShift(float d, float hz, float sw, float sh, float vd, float eyeX, float eyeY) {
     float oz = vd * d;
     float f  = oz / (hz + oz);
-    return float2( (headX / sw) * f * strengthX,
-                  -(headY / sh) * f * strengthY);
+    return float2( (eyeX / sw) * f * strengthX,
+                  -(eyeY / sh) * f * strengthY);
 }
 
 float4 main(PS_IN i) : SV_Target {
     float dCropW = max(depthCropW, 0.01);
+    float2 localUV = i.uv;
+    float viewOffset = 0.0;
+
+    // Experimental real-time display backend layouts. These mirror
+    // tracker.display_backends:
+    //   stereo_autostereo: 2x1 side-by-side views, offsets -0.5/+0.5
+    //   lightfield_quilt: 9x5 quilt, 45 views, normalized offsets -1..+1
+    if (displayBackend > 0.5 && displayBackend < 1.5) {
+        float rightView = step(0.5, i.uv.x);
+        localUV = float2(frac(i.uv.x * 2.0), i.uv.y);
+        viewOffset = lerp(-0.5, 0.5, rightView);
+    } else if (displayBackend > 1.5 && displayBackend < 2.5) {
+        float2 quiltGrid = float2(9.0, 5.0);
+        float2 cell = floor(i.uv * quiltGrid);
+        localUV = frac(i.uv * quiltGrid);
+        float viewIndex = cell.y * 9.0 + cell.x;
+        viewOffset = -1.0 + (viewIndex / 44.0) * 2.0;
+    }
+    float eyeX = headX + viewOffset * 6.4; // 6.4 cm nominal IPD spread
+    float eyeY = headY;
 
     // Capture SceneTex mip derivatives from the UNSHIFTED UV *before* the
     // ray-march does any dependent sampling.  HLSL's hardware derivative
@@ -187,12 +207,12 @@ float4 main(PS_IN i) : SV_Target {
     // mip levels as the head moves, which reads as edge shimmer ≈ swim.
     //   — Ben Golus, "Distinctive Derivative Differences"
     //     https://bgolus.medium.com/distinctive-derivative-differences-cce38d36797b
-    float2 sceneDdx = ddx(i.uv);
-    float2 sceneDdy = ddy(i.uv);
+    float2 sceneDdx = ddx(localUV);
+    float2 sceneDdy = ddy(localUV);
 
     // ── Debug view: raw depth at this screen pixel, skip parallax. ──
     if (debugDepth > 0.5) {
-        float rawD = SampleDepthScreen(i.uv, dCropW);
+        float rawD = SampleDepthScreen(localUV, dCropW);
         float v    = 1.0 - rawD;              // near=bright, far=dark
         return float4(v, v, v, 1.0);
     }
@@ -206,8 +226,8 @@ float4 main(PS_IN i) : SV_Target {
     // shifted UVs never leave [0,1] except from round-off.  Also used to
     // scale down the ray-march range near edges (cheap occlusion-free zone).
     const float kFade = 0.08;
-    float fadeX = saturate(min(i.uv.x, 1.0 - i.uv.x) / kFade);
-    float fadeY = saturate(min(i.uv.y, 1.0 - i.uv.y) / kFade);
+    float fadeX = saturate(min(localUV.x, 1.0 - localUV.x) / kFade);
+    float fadeY = saturate(min(localUV.y, 1.0 - localUV.y) / kFade);
     float fade  = min(fadeX, fadeY);
 
     // ── Classical inverse-warp parallax ─────────────────────────────────
@@ -226,15 +246,15 @@ float4 main(PS_IN i) : SV_Target {
     // which is the essential 3D cue here. The residual swim at sharp depth
     // discontinuities is handled by the temporal EMA + wide smoothstep
     // blend in the depth pipeline, not by ray-marching in the shader.
-    float d_final = SampleDepthScreen(i.uv, dCropW);
-    float2 uv_final = i.uv + ParallaxShift(d_final, hz, sw, sh, vd) * fade;
+    float d_final = SampleDepthScreen(localUV, dCropW);
+    float2 uv_final = localUV + ParallaxShift(d_final, hz, sw, sh, vd, eyeX, eyeY) * fade;
 
     // OOB safety (fade should have already prevented it — this is belt &
     // suspenders). saturate() would stretch the edge pixel and cause image
     // doubling, so fall back to the unshifted pixel instead.
     if (uv_final.x < 0.0 || uv_final.x > 1.0 ||
         uv_final.y < 0.0 || uv_final.y > 1.0) {
-        uv_final = i.uv;
+        uv_final = localUV;
     }
     // SampleGrad with the pre-branch base-UV derivatives: proper mip
     // selection on the shifted UV, matching the on-screen pixel rate.
@@ -246,7 +266,7 @@ struct CBuf {
     float headX, headY, headZ, strengthX, strengthY;
     float screenW, screenH, virtualDepth, debugDepth;
     float depthGamma, focusRadius, depthCurve;
-    float depthCropX0, depthCropW, depthBlend, _pad0;
+    float depthCropX0, depthCropW, depthBlend, displayBackend;
 };
 
 // ── Globals ───────────────────────────────────────────────────────────────
@@ -1167,7 +1187,7 @@ static void Frame() {
         g_strengthX, g_strengthY, g_screenW, g_screenH, g_virtualDepth,
         g_debugDepth ? 1.0f : 0.0f,
         g_depthGamma, g_focusRadius, (float)g_depthCurve,
-        cropX0, cropW, depthBlend, 0.0f,
+        cropX0, cropW, depthBlend, (float)g_displayBackend,
     };
     memcpy(mapped.pData, &cb, sizeof(cb));
     g_ctx->Unmap(g_cb, 0);

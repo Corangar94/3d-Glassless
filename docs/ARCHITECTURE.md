@@ -22,7 +22,9 @@ The current primary backend is `desktop_overlay`. `stereo_autostereo` and
 work has stable IDs. The same module defines tested output layout contracts:
 `desktop_overlay` is a 1x1 single-view output, `stereo_autostereo` is a 2x1
 two-view output, and `lightfield_quilt` is a 9x5 45-view quilt with normalized
-view offsets. Renderer implementations still land behind those contracts.
+view offsets. The overlay shader reads the live backend code from
+`G3D_Settings` and applies the desktop, side-by-side stereo, or quilt UV layout
+before depth reprojection.
 `overlay.display_backend` in `config.yaml` selects the intended backend for
 diagnostics/support artifacts; unknown IDs make diagnostics `NOT READY`.
 
