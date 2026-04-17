@@ -23,7 +23,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 
 | Recommendation | Current implementation | Remaining work |
 |---|---|---|
-| Temporal depth stabilization | Overlay already has asynchronous inference, previous/current depth textures, render-rate blend, EMA-style postprocess, crop handling, debug depth view, reusable depth-stability metrics, and a `.npy` sequence benchmark CLI. | Add captured-sequence fixtures and compare against known-depth synthetic scenes. |
+| Temporal depth stabilization | Overlay already has asynchronous inference, previous/current depth textures, render-rate blend, EMA-style postprocess, crop handling, debug depth view, reusable depth-stability metrics, a `.npy` sequence benchmark CLI, and synthetic static/breathing depth fixture generation. | Add real captured-sequence fixtures and compare them against the synthetic baseline. |
 | Performance hardening | Overlay logs render/acquisition/depth cadence, diagnostics parses the latest summary, reusable frame-pacing metrics cover average/p95/max frame time plus budget overruns, `tracker.performance_capture` writes compatible timing CSVs, and `tracker.performance_benchmark` classifies captured CSV timing data. | Add GPU timing queries and wire live overlay frame-time samples into the CSV writer/export path. |
 | Depth-image-based reprojection | Current overlay performs depth-dependent inverse-warp parallax for a single desktop view. | Build a true stereo/two-view output path and later multiview/quilt synthesis. |
 | Display abstraction layer | Product docs separate core overlay from experimental integrations, and `tracker.display_backends` defines stable backend IDs/status for desktop overlay, stereo autostereo, and light-field quilt targets. | Add real stereo/quilt renderer implementations behind the registered backend IDs. |
@@ -42,8 +42,8 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 
 ## Next Engineering Slices
 
-1. Add captured-frame fixtures for `tracker.depth_benchmark` and known-depth
-   synthetic scenes.
+1. Add real captured-frame fixtures for `tracker.depth_benchmark` and compare
+   them against `tracker.depth_synthetic` baselines.
 2. Add overlay frame-time and GPU timing instrumentation that can export CSV for
    `tracker.performance_benchmark`.
 3. Implement real stereo or quilt output behind the `tracker.display_backends`
