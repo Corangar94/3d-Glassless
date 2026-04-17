@@ -3,8 +3,7 @@ import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PySide6.QtCore import QCoreApplication
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import QApplication
 
 from launcher.tracker_thread import TrackerThread
 
@@ -22,7 +21,7 @@ CONFIG = {
 
 @pytest.fixture(scope="module")
 def qapp():
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication([])
     return app
 
 
@@ -37,11 +36,6 @@ def _make_mock_cap(frames=3):
     return cap
 
 
-def _spy_list(spy: QSignalSpy) -> list:
-    """Convert QSignalSpy to a plain list (handles PySide6 6.x API)."""
-    return [spy.at(i) for i in range(spy.count())]
-
-
 def _mock_settings_reader():
     """Return a MagicMock that works both as a plain instance and context manager."""
     m = MagicMock()
@@ -49,6 +43,11 @@ def _mock_settings_reader():
     m.return_value.__enter__ = MagicMock(return_value=m.return_value)
     m.return_value.__exit__ = MagicMock(return_value=False)
     return m
+
+
+def _run_and_flush_events(thread: TrackerThread, qapp: QApplication) -> None:
+    thread.run()
+    qapp.processEvents()
 
 
 def test_tracker_thread_emits_position_updated(qapp):
@@ -73,11 +72,10 @@ def test_tracker_thread_emits_position_updated(qapp):
         hs_instance.update.return_value = (1.0, 0.0, 60.0)
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.position_updated)
-        thread.start()
-        thread.wait(2000)
+        emissions = []
+        thread.position_updated.connect(lambda *args: emissions.append(args))
+        _run_and_flush_events(thread, qapp)
 
-    emissions = _spy_list(spy)
     assert len(emissions) >= 1
     first = emissions[0]
     assert first[0] == pytest.approx(1.0)
@@ -103,11 +101,10 @@ def test_tracker_thread_emits_status_changed_tracking(qapp):
         MockHS.return_value.update.return_value = (0.0, 0.0, 60.0)
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.status_changed)
-        thread.start()
-        thread.wait(2000)
+        statuses = []
+        thread.status_changed.connect(statuses.append)
+        _run_and_flush_events(thread, qapp)
 
-    statuses = [s[0] for s in _spy_list(spy)]
     assert "tracking" in statuses
 
 
@@ -151,11 +148,10 @@ def test_tracker_thread_emits_error_status_on_camera_failure(qapp):
         MockFW.return_value.__enter__.return_value = MagicMock()
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.status_changed)
-        thread.start()
-        thread.wait(2000)
+        statuses = []
+        thread.status_changed.connect(statuses.append)
+        _run_and_flush_events(thread, qapp)
 
-    statuses = [s[0] for s in _spy_list(spy)]
     assert "error" in statuses
 
 
@@ -175,11 +171,10 @@ def test_tracker_thread_emits_error_when_camera_returns_no_frames(qapp):
         MockFW.return_value.__enter__.return_value = MagicMock()
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.status_changed)
-        thread.start()
-        thread.wait(3000)
+        statuses = []
+        thread.status_changed.connect(statuses.append)
+        _run_and_flush_events(thread, qapp)
 
-    statuses = [s[0] for s in _spy_list(spy)]
     assert "error" in statuses
 
 
@@ -205,11 +200,10 @@ def test_tracker_thread_emits_hold_status(qapp):
         MockHS.return_value.update.return_value = (1.0, 0.0, 60.0)
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.status_changed)
-        thread.start()
-        thread.wait(2000)
+        statuses = []
+        thread.status_changed.connect(statuses.append)
+        _run_and_flush_events(thread, qapp)
 
-    statuses = [s[0] for s in _spy_list(spy)]
     assert "hold" in statuses
 
 
@@ -230,11 +224,10 @@ def test_tracker_thread_emits_paused_status(qapp):
         MockHS.return_value.update.return_value = (0.0, 0.0, 60.0)
 
         thread = TrackerThread(camera_index=0, config=CONFIG)
-        spy = QSignalSpy(thread.status_changed)
-        thread.start()
-        thread.wait(2000)
+        statuses = []
+        thread.status_changed.connect(statuses.append)
+        _run_and_flush_events(thread, qapp)
 
-    statuses = [s[0] for s in _spy_list(spy)]
     assert "paused" in statuses
 
 

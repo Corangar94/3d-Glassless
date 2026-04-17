@@ -92,6 +92,21 @@ def test_mainwindow_toggle_saves_compact_pref_when_config_absent(qapp, tmp_path)
     assert saved["gui"]["compact_mode"] is True
 
 
+def test_start_tracking_rolls_back_when_tracker_process_fails(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    fake_tracker = MagicMock()
+    fake_tracker.start.return_value = False
+    fake_tracker.isRunning.return_value = False
+
+    with patch("launcher.mainwindow.TrackerProcess", return_value=fake_tracker):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._start_tracking()
+
+    assert win._thread is None
+    assert "START TRACKING" in win._action_btn.text()
+    assert "ERROR" in win._status_label.text().upper()
+
+
 def test_detect_screen_persists_overlay_screen_size(qapp, tmp_path):
     import yaml
     cfg_path = str(tmp_path / "config.yaml")

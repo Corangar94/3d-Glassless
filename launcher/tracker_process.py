@@ -50,18 +50,28 @@ class TrackerProcess(QObject):
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
+    def start(self) -> bool:
         """Launch the tracker subprocess and begin polling shared memory."""
-        self._proc = subprocess.Popen(
-            [sys.executable, "-m", "tracker", "--config", self._config_path],
-            cwd=str(_project_root()),
-        )
+        if self.isRunning():
+            return True
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "tracker", "--config", self._config_path],
+                cwd=str(_project_root()),
+            )
+        except OSError:
+            self.status_changed.emit("error")
+            return False
+
+        self._proc = proc
         self._shm = SharedMemoryReader("G3D")
         self._last_ts = None
         self._start_time = time.monotonic()
         self._last_ts_time = self._start_time
         self._timer.start()
         self.status_changed.emit("initializing")
+        return True
 
     def isRunning(self) -> bool:
         """API-compat with QThread.isRunning()."""

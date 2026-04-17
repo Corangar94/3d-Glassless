@@ -253,7 +253,16 @@ class MainWindow(QMainWindow):
         tracker.frame_ready.connect(self._on_frame)
         tracker.status_changed.connect(self._on_status)
         tracker.status_changed.connect(self._on_tracker_status_for_overlay)
-        tracker.start()
+        if not tracker.start():
+            self._overlay_started = False
+            self._thread = None
+            self._on_status("error")
+            self._action_btn.setText("▶ START TRACKING")
+            self._action_btn.setStyleSheet(
+                "background:#28c840;color:#111;font-weight:bold;"
+                "font-size:11px;padding:8px;border:none;"
+            )
+            return
         self._thread = tracker
 
     def _on_tracker_status_for_overlay(self, status: str) -> None:
