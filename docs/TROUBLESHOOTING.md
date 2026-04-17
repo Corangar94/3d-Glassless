@@ -11,6 +11,7 @@ The report checks:
 - overlay executable discovery
 - depth model discovery
 - config file readability
+- latest `overlay.log` runtime summary, when available
 - project root and Python executable
 - useful recovery commands
 
@@ -63,6 +64,19 @@ python scripts/bootstrap.py
 
 If the launcher status shows `OVERLAY ERROR`, hover the status label for the
 actionable startup message.
+
+## Overlay Log Warnings
+
+When `overlay.log` is present, `python -m launcher.diagnostics` parses the
+latest once-per-second summary and warns about:
+
+- stale tracker shared memory
+- no active depth inference
+- no captured desktop frame
+
+These warnings are runtime health signals. They do not replace the live tracking
+quality monitor, but they make support reports useful even after the overlay has
+been closed.
 
 ## ReShade And Protected Games
 

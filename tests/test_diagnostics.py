@@ -89,3 +89,44 @@ def test_main_returns_nonzero_when_report_not_ready(tmp_path, monkeypatch, capsy
 
     assert code == 1
     assert "NOT READY" in capsys.readouterr().out
+
+
+def test_parse_overlay_summary_line_extracts_runtime_health():
+    line = (
+        "[15:26:00.371] Frame#3249300 acq[ok=3247868 timeout=1432 lost=0 other=0] "
+        "shm[LIVE reads=3249300 changes=369 (2/s) ts=80350123] "
+        "depth[total=116440 8Hz] head=(-1.09,0.97,58.62) rest=(0.63,-0.38) "
+        "rel=(-1.72,1.35) wobble=0.00 strength=1.00 depth=30.00 hasFrame=1"
+    )
+
+    summary = diagnostics.parse_overlay_summary_line(line)
+
+    assert summary is not None
+    assert summary.frame_count == 3_249_300
+    assert summary.shm_status == "LIVE"
+    assert summary.shm_changes_per_sec == 2
+    assert summary.depth_hz == 8
+    assert summary.head_z_cm == pytest.approx(58.62)
+    assert summary.has_frame is True
+
+
+def test_collect_diagnostics_includes_overlay_log_warnings(tmp_path, monkeypatch):
+    log_path = tmp_path / "overlay.log"
+    log_path.write_text(
+        "[15:25:55.013] Frame#120 acq[ok=118 timeout=2 lost=0 other=0] "
+        "shm[STALE (tracker running but not writing?) reads=120 changes=3 (0/s) ts=10] "
+        "depth[total=0 0Hz] head=(0.00,0.00,60.00) rest=(0.00,0.00) "
+        "rel=(0.00,0.00) wobble=0.00 strength=1.00 depth=30.00 hasFrame=0\n"
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("{}")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: log_path)
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.overlay_summary is not None
+    assert report.overlay_summary.shm_status.startswith("STALE")
+    assert "overlay log reports stale tracker shared memory" in report.warnings
+    assert "overlay log reports no captured frame" in report.warnings
