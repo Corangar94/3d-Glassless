@@ -24,7 +24,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | Recommendation | Current implementation | Remaining work |
 |---|---|---|
 | Temporal depth stabilization | Overlay already has asynchronous inference, previous/current depth textures, render-rate blend, EMA-style postprocess, crop handling, debug depth view, reusable depth-stability metrics, and a `.npy` sequence benchmark CLI. | Add captured-sequence fixtures and compare against known-depth synthetic scenes. |
-| Performance hardening | Overlay logs render/acquisition/depth cadence and diagnostics parses the latest summary. | Add frame-time percentiles, GPU timing queries, and explicit pass/fail performance thresholds. |
+| Performance hardening | Overlay logs render/acquisition/depth cadence, diagnostics parses the latest summary, and reusable frame-pacing metrics cover average/p95/max frame time plus budget overruns. | Add GPU timing queries and wire live overlay frame-time samples into the metrics layer. |
 | Depth-image-based reprojection | Current overlay performs depth-dependent inverse-warp parallax for a single desktop view. | Build a true stereo/two-view output path and later multiview/quilt synthesis. |
 | Display abstraction layer | Product docs now separate core overlay from experimental integrations. | Add code-level backend interfaces for stereo autostereo, quilt/light-field, and future vendor SDKs. |
 | Hooked game depth on friendly titles | ReShade path remains in the repo as experimental. | Build a policy-safe friendly-title depth capture prototype and compare it against monocular fallback. |
@@ -44,8 +44,8 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 
 1. Add captured-frame fixtures for `tracker.depth_benchmark` and known-depth
    synthetic scenes.
-2. Add overlay frame-time and GPU timing instrumentation beyond the current
-   once-per-second summary log.
+2. Add overlay frame-time and GPU timing instrumentation that feeds
+   `tracker.performance_evaluation`.
 3. Define a code-level display backend interface before implementing stereo or
    quilt output.
 4. Add a friendly-title hooked-depth experiment only after the overlay

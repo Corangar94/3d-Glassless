@@ -58,6 +58,13 @@ Use `overlay.log` as the first pass. The overlay writes a once-per-second
 summary containing render frames, depth inference cadence, head pose, relative
 head motion, wobble, strength, depth, and frame availability.
 
+For frame-time captures, use `tracker.performance_evaluation`:
+
+- `compute_frame_timing_metrics(samples, target_fps=60.0)` reports average,
+  p95, max frame time, average FPS, and over-budget rate
+- `classify_frame_pacing(metrics)` classifies pacing as `GOOD`, `WARN`, or
+  `DANGER`
+
 Targets:
 
 - render loop should match the display refresh when possible
