@@ -76,6 +76,27 @@ def test_create_support_bundle_includes_display_quality_input(tmp_path):
     assert manifest.evaluation_path == out_dir / "evaluation.json"
 
 
+def test_create_support_bundle_includes_latency_input(tmp_path):
+    latency = tmp_path / "latency.csv"
+    latency.write_text(
+        "timestamp_ms,tracking_to_display_ms\n"
+        "0,10\n"
+        "16,12\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        latency_csv=latency,
+        latency_target_ms=20.0,
+    )
+
+    data = json.loads((out_dir / "evaluation.json").read_text(encoding="utf-8"))
+    assert data["latency"]["quality"] == "GOOD"
+    assert manifest.evaluation_path == out_dir / "evaluation.json"
+
+
 def test_create_support_bundle_includes_overlay_timings_when_log_has_samples(tmp_path, monkeypatch):
     overlay_log = tmp_path / "overlay.log"
     overlay_log.write_text(

@@ -16,6 +16,7 @@ from tracker.display_quality import (
     DisplayQualityBenchmarkResult,
     run_benchmark as run_display_quality_benchmark,
 )
+from tracker.latency_evaluation import LatencyBenchmarkResult, run_benchmark as run_latency_benchmark
 from tracker.performance_benchmark import (
     FramePacingBenchmarkResult,
     run_benchmark as run_performance_benchmark,
@@ -30,6 +31,7 @@ class EvaluationSuiteResult:
     performance: FramePacingBenchmarkResult | None
     comfort: ComfortBenchmarkResult | None
     display_quality: DisplayQualityBenchmarkResult | None
+    latency: LatencyBenchmarkResult | None
     overall_quality: str
 
 
@@ -38,7 +40,9 @@ def run_suite(
     timing_csv: str | Path | None = None,
     comfort_csv: str | Path | None = None,
     display_quality_csv: str | Path | None = None,
+    latency_csv: str | Path | None = None,
     target_fps: float = 60.0,
+    latency_target_ms: float = 20.0,
 ) -> EvaluationSuiteResult:
     depth = run_depth_benchmark(depth_dir) if depth_dir is not None else None
     performance = (
@@ -52,9 +56,14 @@ def run_suite(
         if display_quality_csv is not None
         else None
     )
+    latency = (
+        run_latency_benchmark(latency_csv, target_ms=latency_target_ms)
+        if latency_csv is not None
+        else None
+    )
     qualities = [
         result.quality
-        for result in (depth, performance, comfort, display_quality)
+        for result in (depth, performance, comfort, display_quality, latency)
         if result is not None
     ]
     overall = max(qualities, key=lambda q: _QUALITY_RANK[q]) if qualities else "WARN"
@@ -63,6 +72,7 @@ def run_suite(
         performance=performance,
         comfort=comfort,
         display_quality=display_quality,
+        latency=latency,
         overall_quality=overall,
     )
 
@@ -113,6 +123,16 @@ def format_suite_result(result: EvaluationSuiteResult) -> str:
                 f"- avg_crosstalk_percent={result.display_quality.metrics.avg_crosstalk_percent:.2f}",
             ]
         )
+    if result.latency is not None:
+        lines.extend(
+            [
+                "",
+                "Latency:",
+                f"- quality={result.latency.quality}",
+                f"- p95_latency_ms={result.latency.metrics.p95_latency_ms:.2f}",
+                f"- over_target_rate={result.latency.metrics.over_target_rate:.4f}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -123,6 +143,7 @@ def format_suite_json(result: EvaluationSuiteResult) -> str:
         "performance": _performance_to_dict(result.performance),
         "comfort": _comfort_to_dict(result.comfort),
         "display_quality": _display_quality_to_dict(result.display_quality),
+        "latency": _latency_to_dict(result.latency),
     }
     return json.dumps(data, indent=2, sort_keys=True)
 
@@ -133,7 +154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timing-csv", help="CSV with timestamp_ms,frame_time_ms columns")
     parser.add_argument("--comfort-csv", help="CSV with 1-5 comfort/display survey scores")
     parser.add_argument("--display-quality-csv", help="CSV with measured viewing-zone/crosstalk samples")
+    parser.add_argument("--latency-csv", help="CSV with timestamp_ms,tracking_to_display_ms columns")
     parser.add_argument("--target-fps", type=float, default=60.0)
+    parser.add_argument("--latency-target-ms", type=float, default=20.0)
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument("--output", help="Optional path to write the suite report")
     args = parser.parse_args(argv)
@@ -143,7 +166,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         timing_csv=args.timing_csv,
         comfort_csv=args.comfort_csv,
         display_quality_csv=args.display_quality_csv,
+        latency_csv=args.latency_csv,
         target_fps=args.target_fps,
+        latency_target_ms=args.latency_target_ms,
     )
     text = format_suite_json(result) if args.format == "json" else format_suite_result(result)
     if args.output:
@@ -219,6 +244,22 @@ def _display_quality_to_dict(
         "usable_width_cm": m.usable_width_cm,
         "avg_crosstalk_percent": m.avg_crosstalk_percent,
         "max_crosstalk_percent": m.max_crosstalk_percent,
+    }
+
+
+def _latency_to_dict(result: LatencyBenchmarkResult | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    m = result.metrics
+    return {
+        "source_path": str(result.source_path),
+        "quality": result.quality,
+        "sample_count": m.sample_count,
+        "target_ms": m.target_ms,
+        "avg_latency_ms": m.avg_latency_ms,
+        "p95_latency_ms": m.p95_latency_ms,
+        "max_latency_ms": m.max_latency_ms,
+        "over_target_rate": m.over_target_rate,
     }
 
 

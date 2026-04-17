@@ -55,6 +55,22 @@ def test_run_suite_includes_display_quality_when_csv_is_provided(tmp_path):
     assert result.overall_quality == "GOOD"
 
 
+def test_run_suite_includes_latency_when_csv_is_provided(tmp_path):
+    latency = tmp_path / "latency.csv"
+    latency.write_text(
+        "timestamp_ms,tracking_to_display_ms\n"
+        "0,10\n"
+        "16,12\n",
+        encoding="utf-8",
+    )
+
+    result = evaluation_suite.run_suite(latency_csv=latency, latency_target_ms=20.0)
+
+    assert result.latency is not None
+    assert result.latency.quality == "GOOD"
+    assert result.overall_quality == "GOOD"
+
+
 def test_run_suite_overall_quality_uses_worst_result(tmp_path):
     depth_dir = tmp_path / "depth"
     depth_dir.mkdir()
@@ -101,6 +117,7 @@ def test_format_suite_json_is_machine_readable(tmp_path):
     assert data["performance"] is None
     assert data["comfort"] is None
     assert data["display_quality"] is None
+    assert data["latency"] is None
 
 
 def test_main_accepts_comfort_csv(tmp_path):
@@ -125,6 +142,19 @@ def test_main_accepts_display_quality_csv(tmp_path):
     )
 
     code = evaluation_suite.main(["--display-quality-csv", str(display_quality)])
+
+    assert code == 1
+
+
+def test_main_accepts_latency_csv(tmp_path):
+    latency = tmp_path / "latency.csv"
+    latency.write_text(
+        "timestamp_ms,tracking_to_display_ms\n"
+        "0,50\n",
+        encoding="utf-8",
+    )
+
+    code = evaluation_suite.main(["--latency-csv", str(latency), "--latency-target-ms", "20"])
 
     assert code == 1
 

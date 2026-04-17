@@ -149,6 +149,22 @@ Targets:
 - tracking-to-display latency should remain low enough that head-coupled motion
   feels attached to the display rather than lagging behind it
 
+For measured tracking-to-display latency captures, write:
+
+```csv
+timestamp_ms,tracking_to_display_ms
+0,10
+16,12
+```
+
+Run:
+
+```powershell
+python scripts/run_latency_evaluation.py path\to\latency.csv --target-ms 20
+python scripts/run_evaluation.py --latency-csv path\to\latency.csv --latency-target-ms 20
+python scripts/collect_support.py --output-dir support_bundle --latency-csv path\to\latency.csv --latency-target-ms 20
+```
+
 ## Comfort And Display Checks
 
 Use conservative depth strength for longer sessions. Increase depth only after

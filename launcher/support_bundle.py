@@ -30,7 +30,9 @@ def create_support_bundle(
     timing_csv: str | Path | None = None,
     comfort_csv: str | Path | None = None,
     display_quality_csv: str | Path | None = None,
+    latency_csv: str | Path | None = None,
     target_fps: float = 60.0,
+    latency_target_ms: float = 20.0,
 ) -> SupportBundleManifest:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -55,6 +57,7 @@ def create_support_bundle(
         or timing_csv is not None
         or comfort_csv is not None
         or display_quality_csv is not None
+        or latency_csv is not None
     ):
         evaluation_path = out / "evaluation.json"
         evaluation = run_suite(
@@ -62,7 +65,9 @@ def create_support_bundle(
             timing_csv=timing_csv,
             comfort_csv=comfort_csv,
             display_quality_csv=display_quality_csv,
+            latency_csv=latency_csv,
             target_fps=target_fps,
+            latency_target_ms=latency_target_ms,
         )
         evaluation_path.write_text(format_suite_json(evaluation) + "\n", encoding="utf-8")
 
@@ -93,7 +98,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timing-csv")
     parser.add_argument("--comfort-csv")
     parser.add_argument("--display-quality-csv")
+    parser.add_argument("--latency-csv")
     parser.add_argument("--target-fps", type=float, default=60.0)
+    parser.add_argument("--latency-target-ms", type=float, default=20.0)
     args = parser.parse_args(argv)
 
     manifest = create_support_bundle(
@@ -103,7 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         timing_csv=args.timing_csv,
         comfort_csv=args.comfort_csv,
         display_quality_csv=args.display_quality_csv,
+        latency_csv=args.latency_csv,
         target_fps=args.target_fps,
+        latency_target_ms=args.latency_target_ms,
     )
     print(f"wrote support bundle to {manifest.output_dir}")
     return 0
