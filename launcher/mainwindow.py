@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
 from launcher.presets import list_presets, save_preset, load_preset, delete_preset
-from launcher.calibration import detect_screen_cm, measure_head_distance
+from launcher.calibration import detect_screen_cm, measure_head_distance_or_none
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
 from launcher.tracker_process import TrackerProcess
@@ -554,8 +554,16 @@ class MainWindow(QMainWindow):
         self._calib_status.setText("Detecting\u2026")
         w, h = detect_screen_cm()
         if w > 0 and h > 0:
-            self._screen_w_spin.setValue(w)
-            self._screen_h_spin.setValue(h)
+            self._screen_w_spin.blockSignals(True)
+            self._screen_h_spin.blockSignals(True)
+            try:
+                self._screen_w_spin.setValue(w)
+                self._screen_h_spin.setValue(h)
+            finally:
+                self._screen_w_spin.blockSignals(False)
+                self._screen_h_spin.blockSignals(False)
+            self._on_settings_change()
+            self._on_save_config()
             self._calib_status.setText(f"Detected: {w:.1f} \u00d7 {h:.1f} cm")
         else:
             self._calib_status.setText("Detection failed \u2014 enter manually")
@@ -565,10 +573,18 @@ class MainWindow(QMainWindow):
         self._measure_btn.setEnabled(False)
         self._calib_status.setText("Measuring (hold still 3 s)\u2026")
         try:
-            dist = measure_head_distance(ipd_mm=self._ipd_spin.value())
+            dist = measure_head_distance_or_none(ipd_mm=self._ipd_spin.value())
+            if dist is None:
+                self._calib_status.setText("Measurement failed \u2014 keeping current value")
+                return
+            self._head_dist_spin.blockSignals(True)
             self._head_dist_spin.setValue(dist)
+            self._head_dist_spin.blockSignals(False)
+            self._on_settings_change()
+            self._on_save_config()
             self._calib_status.setText(f"Measured: {dist:.1f} cm")
         finally:
+            self._head_dist_spin.blockSignals(False)
             self._measure_btn.setEnabled(True)
 
     def _refresh_presets(self) -> None:

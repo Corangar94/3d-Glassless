@@ -2,7 +2,12 @@
 import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
-from launcher.calibration import detect_screen_cm, measure_head_distance, _detect_face_distance
+from launcher.calibration import (
+    detect_screen_cm,
+    measure_head_distance,
+    measure_head_distance_or_none,
+    _detect_face_distance,
+)
 
 
 def test_detect_screen_cm_returns_floats():
@@ -33,6 +38,15 @@ def test_measure_head_distance_no_camera():
     mock_cv2 = _make_mock_cv2(mock_cap)
     with patch.dict("sys.modules", {"cv2": mock_cv2}):
         assert measure_head_distance(ipd_mm=64.0) == 60.0
+
+
+def test_measure_head_distance_or_none_releases_unopened_camera():
+    mock_cap = MagicMock()
+    mock_cap.isOpened.return_value = False
+    mock_cv2 = _make_mock_cv2(mock_cap)
+    with patch.dict("sys.modules", {"cv2": mock_cv2}):
+        assert measure_head_distance_or_none(ipd_mm=64.0) is None
+    mock_cap.release.assert_called_once()
 
 
 def test_measure_head_distance_no_face():

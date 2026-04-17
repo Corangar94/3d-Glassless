@@ -87,20 +87,25 @@ def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | Non
     return (focal_px * (ipd_mm / 10.0)) / ipd_px
 
 
-def measure_head_distance(ipd_mm: float = 64.0) -> float:
-    """Return estimated head distance in cm (60.0 fallback on any failure)."""
+def measure_head_distance_or_none(ipd_mm: float = 64.0) -> float | None:
+    """Return estimated head distance in cm, or None when measurement fails."""
     import cv2
     cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        return 60.0
     try:
+        if not cap.isOpened():
+            return None
         ok, frame = cap.read()
         if not ok:
-            return 60.0
-        result = _detect_face_distance(frame, ipd_mm)
-        return result if result is not None else 60.0
+            return None
+        return _detect_face_distance(frame, ipd_mm)
     except Exception:  # noqa: BLE001
-        _log.warning("measure_head_distance failed", exc_info=True)
-        return 60.0
+        _log.warning("measure_head_distance_or_none failed", exc_info=True)
+        return None
     finally:
         cap.release()
+
+
+def measure_head_distance(ipd_mm: float = 64.0) -> float:
+    """Return estimated head distance in cm (60.0 fallback on any failure)."""
+    result = measure_head_distance_or_none(ipd_mm)
+    return result if result is not None else 60.0

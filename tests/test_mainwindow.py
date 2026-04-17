@@ -1,5 +1,5 @@
 # tests/test_mainwindow.py
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import Qt
@@ -90,3 +90,68 @@ def test_mainwindow_toggle_saves_compact_pref_when_config_absent(qapp, tmp_path)
     with open(cfg_path) as f:
         saved = yaml.safe_load(f)
     assert saved["gui"]["compact_mode"] is True
+
+
+def test_detect_screen_persists_overlay_screen_size(qapp, tmp_path):
+    import yaml
+    cfg_path = str(tmp_path / "config.yaml")
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.detect_screen_cm", return_value=(70.0, 40.0)),
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._on_detect_screen()
+
+    with open(cfg_path) as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["screen_w_cm"] == pytest.approx(70.0)
+    assert saved["overlay"]["screen_h_cm"] == pytest.approx(40.0)
+
+
+def test_detect_screen_publishes_paired_size_once(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.detect_screen_cm", return_value=(70.0, 40.0)),
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        writer = win._settings_writer = MagicMock()
+        win._on_detect_screen()
+
+    assert writer.write.call_count == 1
+    settings = writer.write.call_args.args[0]
+    assert settings.screen_w_cm == pytest.approx(70.0)
+    assert settings.screen_h_cm == pytest.approx(40.0)
+
+
+def test_measure_head_persists_overlay_head_distance(qapp, tmp_path):
+    import yaml
+    cfg_path = str(tmp_path / "config.yaml")
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.measure_head_distance_or_none", return_value=72.5),
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._on_measure_head()
+
+    with open(cfg_path) as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["head_dist_cm"] == pytest.approx(72.5)
+
+
+def test_measure_head_failure_does_not_persist_fallback(qapp, tmp_path):
+    import yaml
+    cfg_path = str(tmp_path / "config.yaml")
+    with open(cfg_path, "w") as f:
+        yaml.safe_dump({"overlay": {"head_dist_cm": 81.0}}, f)
+
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.measure_head_distance_or_none", return_value=None),
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._on_measure_head()
+
+    with open(cfg_path) as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["head_dist_cm"] == pytest.approx(81.0)
