@@ -52,7 +52,7 @@ The command exits non-zero when the sequence classifies as `DANGER`.
 To generate controlled synthetic fixtures first:
 
 ```powershell
-python -m tracker.depth_synthetic path\to\depth_frames --mode breathing --frames 60
+python scripts/generate_depth_fixture.py path\to\depth_frames --mode breathing --frames 60
 ```
 
 These metrics are not a replacement for visual inspection, but they make
