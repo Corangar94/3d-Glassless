@@ -58,6 +58,10 @@ python scripts/generate_depth_fixture.py path\to\depth_frames --mode breathing -
 These metrics are not a replacement for visual inspection, but they make
 “watery depth” regressions measurable across repeated captures.
 
+For renderer experiments, `tracker.depth_reprojection.synthesize_views` provides
+a tested CPU reference path for generating mono, stereo, or quilt view stacks
+from an RGB image and normalized depth map.
+
 ## Performance
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second
