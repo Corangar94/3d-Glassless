@@ -51,6 +51,7 @@ class DiagnosticsReport:
     configured_backend_layout: dict[str, int] = field(
         default_factory=lambda: {"columns": 1, "rows": 1, "view_count": 1}
     )
+    display_calibration: dict[str, float] = field(default_factory=dict)
 
 
 _SUMMARY_RE = re.compile(
@@ -91,6 +92,7 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     experimental_backend_ids = [backend.id for backend in registry.by_status("experimental")]
     configured_backend_id = _configured_backend_id(config, default_backend_id)
     configured_backend_layout = _backend_layout_dict(configured_backend_id, problems)
+    display_calibration = _display_calibration(config)
     if overlay_summary is not None:
         if not overlay_summary.shm_status.startswith("LIVE"):
             warnings.append("overlay log reports stale tracker shared memory")
@@ -116,6 +118,7 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
         warnings=warnings,
         configured_backend_id=configured_backend_id,
         configured_backend_layout=configured_backend_layout,
+        display_calibration=display_calibration,
     )
 
 
@@ -138,6 +141,7 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
             f"{report.configured_backend_layout['columns']}x{report.configured_backend_layout['rows']} "
             f"({report.configured_backend_layout['view_count']} views)"
         ),
+        f"Display calibration: {report.display_calibration or 'none'}",
         f"Experimental backends: {', '.join(report.experimental_backend_ids) or 'none'}",
         "",
         "Problems:",
@@ -197,6 +201,7 @@ def format_diagnostics_json(report: DiagnosticsReport) -> str:
         "experimental_backend_ids": report.experimental_backend_ids,
         "configured_backend_id": report.configured_backend_id,
         "configured_backend_layout": report.configured_backend_layout,
+        "display_calibration": report.display_calibration,
         "overlay_summary": _summary_to_dict(report.overlay_summary),
     }
     return json.dumps(data, indent=2, sort_keys=True)
@@ -260,6 +265,20 @@ def _backend_layout_dict(backend_id: str, problems: list[str]) -> dict[str, int]
         "rows": layout.rows,
         "view_count": layout.view_count,
     }
+
+
+def _display_calibration(config: dict[str, object] | None) -> dict[str, float]:
+    overlay = config.get("overlay", {}) if config is not None else {}
+    if not isinstance(overlay, dict):
+        return {}
+    calibration = overlay.get("display_calibration", {})
+    if not isinstance(calibration, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key in ("viewer_distance_cm", "view_cone_deg"):
+        if key in calibration:
+            result[key] = float(calibration[key])
+    return result
 
 
 def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object] | None:

@@ -92,6 +92,13 @@ python scripts/set_display_backend.py stereo_autostereo
 python scripts/set_display_backend.py lightfield_quilt
 ```
 
+To record backend-specific calibration metadata for diagnostics/support bundles:
+
+```powershell
+python scripts/calibrate_display_backend.py stereo_autostereo --viewer-distance-cm 65 --view-cone-deg 35
+python scripts/calibrate_display_backend.py lightfield_quilt --viewer-distance-cm 65 --view-cone-deg 40
+```
+
 ## Performance
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second

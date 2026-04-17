@@ -32,7 +32,14 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
 
 def test_collect_diagnostics_reports_configured_display_backend_layout(tmp_path, monkeypatch):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("overlay:\n  display_backend: stereo_autostereo\n", encoding="utf-8")
+    cfg.write_text(
+        "overlay:\n"
+        "  display_backend: stereo_autostereo\n"
+        "  display_calibration:\n"
+        "    viewer_distance_cm: 65.0\n"
+        "    view_cone_deg: 35.0\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
 
@@ -43,6 +50,10 @@ def test_collect_diagnostics_reports_configured_display_backend_layout(tmp_path,
         "columns": 2,
         "rows": 1,
         "view_count": 2,
+    }
+    assert report.display_calibration == {
+        "viewer_distance_cm": 65.0,
+        "view_cone_deg": 35.0,
     }
 
 
