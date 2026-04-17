@@ -119,7 +119,7 @@ def test_collect_diagnostics_marks_unstreamable_camera_not_ready(tmp_path, monke
     assert "camera 4 opened but returned no frames" in report.problems
 
 
-def test_collect_diagnostics_allows_camera_contention_when_tracker_shm_is_live(tmp_path, monkeypatch):
+def test_collect_diagnostics_uses_live_tracker_instead_of_camera_probe(tmp_path, monkeypatch):
     log_path = tmp_path / "overlay.log"
     log_path.write_text(
         "[15:25:55.013] Frame#120 acq[ok=118 timeout=2 lost=0 other=0] "
@@ -143,7 +143,42 @@ def test_collect_diagnostics_allows_camera_contention_when_tracker_shm_is_live(t
 
     assert report.ready is True
     assert "camera 0 opened but returned no frames" not in report.problems
-    assert "camera probe returned no frames while tracker shared memory is live" in report.warnings
+    assert "camera probe returned no frames while tracker shared memory is live" not in report.warnings
+    assert report.camera is not None
+    assert report.camera.inferred_from_tracker is True
+
+
+def test_collect_diagnostics_skips_camera_probe_when_tracker_shm_is_live(tmp_path, monkeypatch):
+    log_path = tmp_path / "overlay.log"
+    log_path.write_text(
+        "[15:25:55.013] Frame#120 acq[ok=118 timeout=2 lost=0 other=0] "
+        "shm[LIVE reads=120 changes=9 (3/s) ts=10] "
+        "depth[total=18 6Hz] head=(0.00,0.00,54.28) rest=(0.00,0.00) "
+        "rel=(0.00,0.00) wobble=0.00 strength=1.00 depth=30.00 hasFrame=1\n",
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("camera:\n  index: 0\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: log_path)
+
+    def fail_probe(index):
+        raise AssertionError(f"camera probe should be skipped while tracker is live: {index}")
+
+    monkeypatch.setattr(diagnostics, "_probe_camera", fail_probe)
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+    text = diagnostics.format_diagnostics_report(report)
+
+    assert report.ready is True
+    assert report.camera == diagnostics.CameraProbe(
+        index=0,
+        opened=True,
+        frame_ok=True,
+        inferred_from_tracker=True,
+    )
+    assert "Camera: 0 (live tracker)" in text
 
 
 def test_collect_diagnostics_reports_configured_display_backend_layout(tmp_path, monkeypatch):
@@ -321,6 +356,7 @@ def test_format_diagnostics_json_includes_camera_probe(tmp_path):
         "frame_ok": True,
         "width": 640,
         "height": 480,
+        "inferred_from_tracker": False,
     }
 
 

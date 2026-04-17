@@ -40,6 +40,7 @@ class CameraProbe:
     frame_ok: bool
     width: int | None = None
     height: int | None = None
+    inferred_from_tracker: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,12 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     configured_backend_id = _configured_backend_id(config, default_backend_id)
     configured_backend_layout = _backend_layout_dict(configured_backend_id, problems)
     display_calibration = _display_calibration(config)
-    camera = _probe_camera(_configured_camera_index(config))
+    camera_index = _configured_camera_index(config)
+    camera = (
+        CameraProbe(index=camera_index, opened=True, frame_ok=True, inferred_from_tracker=True)
+        if _tracker_shm_is_live(overlay_summary)
+        else _probe_camera(camera_index)
+    )
     if not camera.opened:
         if _tracker_shm_is_live(overlay_summary):
             warnings.append("camera probe could not open while tracker shared memory is live")
@@ -351,6 +357,8 @@ def _probe_camera(index: int) -> CameraProbe:
 def _format_camera(camera: CameraProbe | None) -> str:
     if camera is None:
         return "not checked"
+    if camera.inferred_from_tracker:
+        return f"{camera.index} (live tracker)"
     if not camera.opened:
         return f"{camera.index} (could not open)"
     if not camera.frame_ok:
@@ -367,6 +375,7 @@ def _camera_to_dict(camera: CameraProbe | None) -> dict[str, object] | None:
         "frame_ok": camera.frame_ok,
         "width": camera.width,
         "height": camera.height,
+        "inferred_from_tracker": camera.inferred_from_tracker,
     }
 
 
