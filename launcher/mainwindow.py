@@ -1,6 +1,9 @@
 """Always-on-top two-mode tracker window."""
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from typing import Optional
 
 import dataclasses
@@ -70,6 +73,7 @@ class MainWindow(QMainWindow):
         self._compact: bool = config.get("gui", {}).get("compact_mode", False)
         self._thread: Optional[TrackerThread] = None
         self._overlay = OverlayProcess()
+        self._debug_monitor_proc: Optional[subprocess.Popen[bytes]] = None
         self._drag_pos: Optional[QPoint] = None
 
         self._settings_writer = SharedSettingsWriter()
@@ -385,6 +389,18 @@ class MainWindow(QMainWindow):
         pl.insertWidget(0, self._preset_combo)
         lay.addWidget(pg)
 
+        # Diagnostics
+        dg = QGroupBox("Diagnostics")
+        dg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        dl = QVBoxLayout(dg)
+        debug_btn = QPushButton("Open tracking quality monitor")
+        debug_btn.setToolTip(
+            "Shows live jitter, loss rate, reacquisition time, and parallax shift"
+        )
+        debug_btn.clicked.connect(self._open_debug_monitor)
+        dl.addWidget(debug_btn)
+        lay.addWidget(dg)
+
         # Shader
         sg = QGroupBox("Shader Tuning")
         sg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
@@ -673,9 +689,26 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _open_debug_monitor(self) -> None:
+        proc = self._debug_monitor_proc
+        if proc is not None and proc.poll() is None:
+            return
+
+        try:
+            self._debug_monitor_proc = subprocess.Popen(
+                [sys.executable, "-m", "tracker.debug_monitor"],
+                cwd=str(Path(__file__).resolve().parent.parent),
+            )
+        except OSError as e:
+            self._on_status("error")
+            self._status_label.setToolTip(f"Could not launch debug monitor: {e}")
+
     def closeEvent(self, event: object) -> None:
         if self._thread and self._thread.isRunning():
             self._thread.stop()
         self._overlay.stop()
+        proc = self._debug_monitor_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
         self._settings_writer.close()
         event.accept()  # type: ignore[attr-defined]

@@ -107,6 +107,55 @@ def test_start_tracking_rolls_back_when_tracker_process_fails(qapp, tmp_path):
     assert "ERROR" in win._status_label.text().upper()
 
 
+def test_open_debug_monitor_starts_diagnostics_module(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.subprocess.Popen", return_value=fake_proc) as popen,
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._open_debug_monitor()
+
+    args = popen.call_args.args[0]
+    assert args[1:] == ["-m", "tracker.debug_monitor"]
+    assert popen.call_args.kwargs["cwd"].endswith("Glassless 3d")
+    assert win._debug_monitor_proc is fake_proc
+
+
+def test_open_debug_monitor_is_idempotent_when_already_running(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.subprocess.Popen") as popen,
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._debug_monitor_proc = fake_proc
+        win._open_debug_monitor()
+
+    popen.assert_not_called()
+
+
+def test_close_event_terminates_running_debug_monitor(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_event = MagicMock()
+
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._debug_monitor_proc = fake_proc
+        win.closeEvent(fake_event)
+
+    fake_proc.terminate.assert_called_once()
+    fake_event.accept.assert_called_once()
+
+
 def test_detect_screen_persists_overlay_screen_size(qapp, tmp_path):
     import yaml
     cfg_path = str(tmp_path / "config.yaml")
