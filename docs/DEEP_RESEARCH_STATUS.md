@@ -18,6 +18,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | Measure tracking jitter, loss, and reacquisition | `tracker.evaluation` computes metrics; `tracker.debug_monitor` shows rolling quality status. |
 | Provide operator diagnostics | Launcher Advanced tab opens the tracking quality monitor; troubleshooting docs describe diagnostics and overlay-log warnings. |
 | Add repeatable evaluation guidance | `docs/EVALUATION.md` defines tracking, depth, performance, comfort, and policy checks. |
+| Keep WoW gated until explicit review | `tracker.feasibility_gate` provides a default closed WoW gate and CLI report. |
 
 ## Partially Implemented
 
@@ -37,7 +38,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | RGB-D / stereo camera fusion | Useful research bench path, but not required before the overlay-first prototype is stable. |
 | Phone-based tracking | Additional latency/calibration complexity; kept as an experimental future option. |
 | Looking Glass / multiview backend | Requires display hardware and a separate quilt/multiview synthesis path. |
-| WoW-specific runtime | Policy risk must be reviewed before any implementation beyond documentation and feasibility gating. |
+| WoW-specific runtime | Policy risk must be reviewed before any implementation beyond documentation and the closed-by-default `tracker.feasibility_gate` report. |
 | Holographic display support | Research-level hardware/compute path, not a near-term implementation target. |
 
 ## Next Engineering Slices

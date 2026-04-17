@@ -91,3 +91,9 @@ ReShade and game-injected integrations are experimental. Do not use them as the
 default troubleshooting path for the standalone overlay. World of Warcraft and
 protected multiplayer titles remain policy-gated feasibility work, not the
 primary runtime target.
+
+To print the current WoW feasibility gate:
+
+```powershell
+python -m tracker.feasibility_gate wow
+```
