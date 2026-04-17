@@ -81,6 +81,13 @@ The command exits non-zero when frame pacing classifies as `DANGER`.
 Use `tracker.performance_capture.FrameTimingCsvWriter` for tools that need to
 write compatible captures.
 
+To export approximate live overlay cadence from `overlay.log` into the same CSV
+format:
+
+```powershell
+python scripts/export_overlay_timings.py overlay.log timings.csv
+```
+
 To combine depth and frame-pacing checks in one report:
 
 ```powershell
