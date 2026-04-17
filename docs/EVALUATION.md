@@ -34,6 +34,16 @@ Check:
 - fallback flat depth should be obvious in logs and should not be mistaken for
   a working depth model
 
+For offline depth-frame sequences, use `tracker.depth_evaluation`:
+
+- `compute_depth_stability(frames)` returns mean, 95th percentile, and max
+  frame-to-frame absolute depth deltas
+- `classify_depth_stability(metrics)` classifies normalized temporal stability
+  as `GOOD`, `WARN`, or `DANGER`
+
+These metrics are not a replacement for visual inspection, but they make
+“watery depth” regressions measurable across repeated captures.
+
 ## Performance
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second
