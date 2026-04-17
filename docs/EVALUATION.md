@@ -84,6 +84,14 @@ python scripts/render_views.py image.png depth.npy stereo.png --backend stereo_a
 python scripts/render_views.py image.png depth.npy quilt.png --backend lightfield_quilt
 ```
 
+To select the intended backend in `config.yaml` for diagnostics and support
+artifacts:
+
+```powershell
+python scripts/set_display_backend.py stereo_autostereo
+python scripts/set_display_backend.py lightfield_quilt
+```
+
 ## Performance
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second
