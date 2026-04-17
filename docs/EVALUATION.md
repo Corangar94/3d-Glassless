@@ -68,6 +68,14 @@ For renderer experiments, `tracker.depth_reprojection.synthesize_views` provides
 a tested CPU reference path for generating mono, stereo, or quilt view stacks
 from an RGB image and normalized depth map.
 
+To render a concrete stereo strip or quilt PNG from one RGB frame plus a `.npy`
+depth map:
+
+```powershell
+python scripts/render_views.py image.png depth.npy stereo.png --backend stereo_autostereo
+python scripts/render_views.py image.png depth.npy quilt.png --backend lightfield_quilt
+```
+
 ## Performance
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second
