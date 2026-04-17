@@ -796,7 +796,8 @@ class MainWindow(QMainWindow):
             subprocess.Popen(
                 [
                     sys.executable,
-                    "scripts/collect_support.py",
+                    "-m",
+                    "scripts.collect_support",
                     "--output-dir",
                     "support_bundle",
                     "--config",

@@ -106,9 +106,15 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     display_calibration = _display_calibration(config)
     camera = _probe_camera(_configured_camera_index(config))
     if not camera.opened:
-        problems.append(f"camera {camera.index} could not open")
+        if _tracker_shm_is_live(overlay_summary):
+            warnings.append("camera probe could not open while tracker shared memory is live")
+        else:
+            problems.append(f"camera {camera.index} could not open")
     elif not camera.frame_ok:
-        problems.append(f"camera {camera.index} opened but returned no frames")
+        if _tracker_shm_is_live(overlay_summary):
+            warnings.append("camera probe returned no frames while tracker shared memory is live")
+        else:
+            problems.append(f"camera {camera.index} opened but returned no frames")
     if overlay_summary is not None:
         if not overlay_summary.shm_status.startswith("LIVE"):
             warnings.append("overlay log reports stale tracker shared memory")
@@ -308,6 +314,14 @@ def _configured_camera_index(config: dict[str, object] | None) -> int:
         return int(camera.get("index", 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _tracker_shm_is_live(summary: OverlayRuntimeSummary | None) -> bool:
+    return (
+        summary is not None
+        and summary.shm_status.startswith("LIVE")
+        and summary.shm_changes_per_sec > 0
+    )
 
 
 def _probe_camera(index: int) -> CameraProbe:

@@ -188,7 +188,7 @@ def test_collect_support_bundle_starts_support_command(qapp, tmp_path):
         win._collect_support_bundle()
 
     args = popen.call_args.args[0]
-    assert args[:2] == [sys.executable, "scripts/collect_support.py"]
+    assert args[:3] == [sys.executable, "-m", "scripts.collect_support"]
     assert "--output-dir" in args
     assert "support_bundle" in args
     assert args[-1] == cfg_path
