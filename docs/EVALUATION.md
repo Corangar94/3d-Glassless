@@ -179,6 +179,23 @@ python scripts/run_evaluation.py --comfort-csv path\to\comfort.csv --format json
 python scripts/collect_support.py --output-dir support_bundle --comfort-csv path\to\comfort.csv
 ```
 
+For objective display-zone and crosstalk measurements, record a workspace grid:
+
+```csv
+x_cm,z_cm,crosstalk_percent,view_locked
+-10,60,8,true
+0,60,6,true
+10,60,12,false
+```
+
+Run:
+
+```powershell
+python scripts/run_display_quality.py path\to\display_quality.csv
+python scripts/run_evaluation.py --display-quality-csv path\to\display_quality.csv --format json --output evaluation.json
+python scripts/collect_support.py --output-dir support_bundle --display-quality-csv path\to\display_quality.csv
+```
+
 ## Policy Boundary
 
 World of Warcraft and protected multiplayer titles remain a later feasibility

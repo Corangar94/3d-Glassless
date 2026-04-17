@@ -56,6 +56,26 @@ def test_create_support_bundle_includes_comfort_evaluation_input(tmp_path):
     assert manifest.evaluation_path == out_dir / "evaluation.json"
 
 
+def test_create_support_bundle_includes_display_quality_input(tmp_path):
+    display_quality = tmp_path / "display_quality.csv"
+    display_quality.write_text(
+        "x_cm,z_cm,crosstalk_percent,view_locked\n"
+        "-10,60,8,true\n"
+        "10,60,7,true\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        display_quality_csv=display_quality,
+    )
+
+    data = json.loads((out_dir / "evaluation.json").read_text(encoding="utf-8"))
+    assert data["display_quality"]["quality"] == "GOOD"
+    assert manifest.evaluation_path == out_dir / "evaluation.json"
+
+
 def test_create_support_bundle_includes_overlay_timings_when_log_has_samples(tmp_path, monkeypatch):
     overlay_log = tmp_path / "overlay.log"
     overlay_log.write_text(

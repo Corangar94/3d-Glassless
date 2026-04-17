@@ -39,6 +39,22 @@ def test_run_suite_includes_comfort_result_when_csv_is_provided(tmp_path):
     assert result.overall_quality == "GOOD"
 
 
+def test_run_suite_includes_display_quality_when_csv_is_provided(tmp_path):
+    display_quality = tmp_path / "display_quality.csv"
+    display_quality.write_text(
+        "x_cm,z_cm,crosstalk_percent,view_locked\n"
+        "-10,60,8,true\n"
+        "10,60,7,true\n",
+        encoding="utf-8",
+    )
+
+    result = evaluation_suite.run_suite(display_quality_csv=display_quality)
+
+    assert result.display_quality is not None
+    assert result.display_quality.quality == "GOOD"
+    assert result.overall_quality == "GOOD"
+
+
 def test_run_suite_overall_quality_uses_worst_result(tmp_path):
     depth_dir = tmp_path / "depth"
     depth_dir.mkdir()
@@ -84,6 +100,7 @@ def test_format_suite_json_is_machine_readable(tmp_path):
     assert data["depth"]["quality"] == "GOOD"
     assert data["performance"] is None
     assert data["comfort"] is None
+    assert data["display_quality"] is None
 
 
 def test_main_accepts_comfort_csv(tmp_path):
@@ -95,6 +112,19 @@ def test_main_accepts_comfort_csv(tmp_path):
     )
 
     code = evaluation_suite.main(["--comfort-csv", str(comfort)])
+
+    assert code == 1
+
+
+def test_main_accepts_display_quality_csv(tmp_path):
+    display_quality = tmp_path / "display_quality.csv"
+    display_quality.write_text(
+        "x_cm,z_cm,crosstalk_percent,view_locked\n"
+        "0,60,25,false\n",
+        encoding="utf-8",
+    )
+
+    code = evaluation_suite.main(["--display-quality-csv", str(display_quality)])
 
     assert code == 1
 

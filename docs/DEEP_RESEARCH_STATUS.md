@@ -17,9 +17,9 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | Persist verified calibration updates | Screen-size detection and head-distance measurement save only known-good values; failed measurement keeps existing config. |
 | Measure tracking jitter, loss, and reacquisition | `tracker.evaluation` computes metrics; `tracker.debug_monitor` shows rolling quality status. |
 | Provide operator diagnostics | Launcher Advanced tab opens the tracking quality monitor; troubleshooting docs describe diagnostics and overlay-log warnings. |
-| Add repeatable evaluation guidance | `docs/EVALUATION.md` defines tracking, depth, performance, comfort, crosstalk, UI readability, and policy checks. |
-| Provide combined benchmark entry point | `tracker.evaluation_suite` runs depth, frame-pacing, and optional comfort/display survey benchmarks together and returns a worst-case quality result. |
-| Provide shareable support artifacts | `launcher.support_bundle` writes diagnostics JSON, optional evaluation JSON including comfort/display survey data, and policy gate artifacts into one support directory. |
+| Add repeatable evaluation guidance | `docs/EVALUATION.md` defines tracking, depth, performance, comfort, crosstalk, view-zone width, UI readability, and policy checks. |
+| Provide combined benchmark entry point | `tracker.evaluation_suite` runs depth, frame-pacing, optional comfort/display survey, and optional objective display-zone benchmarks together and returns a worst-case quality result. |
+| Provide shareable support artifacts | `launcher.support_bundle` writes diagnostics JSON, optional evaluation JSON including comfort/display survey and display-zone data, and policy gate artifacts into one support directory. |
 | Keep WoW gated until explicit review | `tracker.feasibility_gate` provides a default closed WoW gate and CLI report. |
 
 ## Partially Implemented

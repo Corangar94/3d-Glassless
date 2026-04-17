@@ -12,6 +12,10 @@ from tracker.comfort_evaluation import (
     run_benchmark as run_comfort_benchmark,
 )
 from tracker.depth_benchmark import DepthBenchmarkResult, run_benchmark as run_depth_benchmark
+from tracker.display_quality import (
+    DisplayQualityBenchmarkResult,
+    run_benchmark as run_display_quality_benchmark,
+)
 from tracker.performance_benchmark import (
     FramePacingBenchmarkResult,
     run_benchmark as run_performance_benchmark,
@@ -25,6 +29,7 @@ class EvaluationSuiteResult:
     depth: DepthBenchmarkResult | None
     performance: FramePacingBenchmarkResult | None
     comfort: ComfortBenchmarkResult | None
+    display_quality: DisplayQualityBenchmarkResult | None
     overall_quality: str
 
 
@@ -32,6 +37,7 @@ def run_suite(
     depth_dir: str | Path | None = None,
     timing_csv: str | Path | None = None,
     comfort_csv: str | Path | None = None,
+    display_quality_csv: str | Path | None = None,
     target_fps: float = 60.0,
 ) -> EvaluationSuiteResult:
     depth = run_depth_benchmark(depth_dir) if depth_dir is not None else None
@@ -41,9 +47,14 @@ def run_suite(
         else None
     )
     comfort = run_comfort_benchmark(comfort_csv) if comfort_csv is not None else None
+    display_quality = (
+        run_display_quality_benchmark(display_quality_csv)
+        if display_quality_csv is not None
+        else None
+    )
     qualities = [
         result.quality
-        for result in (depth, performance, comfort)
+        for result in (depth, performance, comfort, display_quality)
         if result is not None
     ]
     overall = max(qualities, key=lambda q: _QUALITY_RANK[q]) if qualities else "WARN"
@@ -51,6 +62,7 @@ def run_suite(
         depth=depth,
         performance=performance,
         comfort=comfort,
+        display_quality=display_quality,
         overall_quality=overall,
     )
 
@@ -91,6 +103,16 @@ def format_suite_result(result: EvaluationSuiteResult) -> str:
                 f"- avg_crosstalk={result.comfort.metrics.avg_crosstalk:.2f}",
             ]
         )
+    if result.display_quality is not None:
+        lines.extend(
+            [
+                "",
+                "Display Quality:",
+                f"- quality={result.display_quality.quality}",
+                f"- usable_width_cm={result.display_quality.metrics.usable_width_cm:.2f}",
+                f"- avg_crosstalk_percent={result.display_quality.metrics.avg_crosstalk_percent:.2f}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -100,6 +122,7 @@ def format_suite_json(result: EvaluationSuiteResult) -> str:
         "depth": _depth_to_dict(result.depth),
         "performance": _performance_to_dict(result.performance),
         "comfort": _comfort_to_dict(result.comfort),
+        "display_quality": _display_quality_to_dict(result.display_quality),
     }
     return json.dumps(data, indent=2, sort_keys=True)
 
@@ -109,6 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--depth-dir", help="Directory containing .npy depth frames")
     parser.add_argument("--timing-csv", help="CSV with timestamp_ms,frame_time_ms columns")
     parser.add_argument("--comfort-csv", help="CSV with 1-5 comfort/display survey scores")
+    parser.add_argument("--display-quality-csv", help="CSV with measured viewing-zone/crosstalk samples")
     parser.add_argument("--target-fps", type=float, default=60.0)
     parser.add_argument("--format", choices=["text", "json"], default="text")
     parser.add_argument("--output", help="Optional path to write the suite report")
@@ -118,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         depth_dir=args.depth_dir,
         timing_csv=args.timing_csv,
         comfort_csv=args.comfort_csv,
+        display_quality_csv=args.display_quality_csv,
         target_fps=args.target_fps,
     )
     text = format_suite_json(result) if args.format == "json" else format_suite_result(result)
@@ -177,6 +202,23 @@ def _comfort_to_dict(result: ComfortBenchmarkResult | None) -> dict[str, object]
         "avg_depth_realism": m.avg_depth_realism,
         "avg_ui_readability": m.avg_ui_readability,
         "avg_crosstalk": m.avg_crosstalk,
+    }
+
+
+def _display_quality_to_dict(
+    result: DisplayQualityBenchmarkResult | None,
+) -> dict[str, object] | None:
+    if result is None:
+        return None
+    m = result.metrics
+    return {
+        "source_path": str(result.source_path),
+        "quality": result.quality,
+        "sample_count": m.sample_count,
+        "usable_sample_count": m.usable_sample_count,
+        "usable_width_cm": m.usable_width_cm,
+        "avg_crosstalk_percent": m.avg_crosstalk_percent,
+        "max_crosstalk_percent": m.max_crosstalk_percent,
     }
 
 
