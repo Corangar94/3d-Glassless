@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -159,14 +160,38 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
     return "\n".join(lines)
 
 
+def format_diagnostics_json(report: DiagnosticsReport) -> str:
+    data = {
+        "project_root": str(report.project_root),
+        "python_executable": str(report.python_executable),
+        "overlay_exe": str(report.overlay_exe) if report.overlay_exe else None,
+        "depth_model": str(report.depth_model) if report.depth_model else None,
+        "overlay_log": str(report.overlay_log) if report.overlay_log else None,
+        "config_path": str(report.config_path),
+        "config_loaded": report.config_loaded,
+        "ready": report.ready,
+        "problems": report.problems,
+        "warnings": report.warnings,
+        "default_backend_id": report.default_backend_id,
+        "experimental_backend_ids": report.experimental_backend_ids,
+        "overlay_summary": _summary_to_dict(report.overlay_summary),
+    }
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print Glassless3D diagnostics")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--output", help="Optional path to write the diagnostics report")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
     args = parser.parse_args(argv)
 
     report = collect_diagnostics(args.config)
-    text = format_diagnostics_report(report)
+    text = (
+        format_diagnostics_json(report)
+        if args.format == "json"
+        else format_diagnostics_report(report)
+    )
     if args.output:
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -188,6 +213,24 @@ def _can_load_config(path: Path, problems: list[str]) -> bool:
         problems.append(f"config unreadable: {e}")
         return False
     return True
+
+
+def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object] | None:
+    if summary is None:
+        return None
+    return {
+        "frame_count": summary.frame_count,
+        "acq_ok": summary.acq_ok,
+        "acq_timeout": summary.acq_timeout,
+        "acq_lost": summary.acq_lost,
+        "acq_other": summary.acq_other,
+        "shm_status": summary.shm_status,
+        "shm_changes_per_sec": summary.shm_changes_per_sec,
+        "depth_total": summary.depth_total,
+        "depth_hz": summary.depth_hz,
+        "head_z_cm": summary.head_z_cm,
+        "has_frame": summary.has_frame,
+    }
 
 
 def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:

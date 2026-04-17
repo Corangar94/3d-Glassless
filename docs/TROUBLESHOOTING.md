@@ -12,6 +12,12 @@ To save a shareable support report:
 python -m launcher.diagnostics --output diagnostics.txt
 ```
 
+For scripts or issue templates:
+
+```powershell
+python -m launcher.diagnostics --format json --output diagnostics.json
+```
+
 The report checks:
 
 - overlay executable discovery

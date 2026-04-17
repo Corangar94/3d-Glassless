@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -112,6 +113,55 @@ def test_main_writes_report_to_output_file(tmp_path, monkeypatch, capsys):
 
     assert code == 0
     assert "READY" in output.read_text(encoding="utf-8")
+    assert "wrote diagnostics report" in capsys.readouterr().out
+
+
+def test_format_diagnostics_json_is_machine_readable(tmp_path):
+    report = diagnostics.DiagnosticsReport(
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        overlay_exe=tmp_path / "overlay.exe",
+        depth_model=tmp_path / "model.onnx",
+        config_path=tmp_path / "config.yaml",
+        config_loaded=True,
+        ready=True,
+        problems=[],
+        experimental_backend_ids=["stereo_autostereo"],
+    )
+
+    data = json.loads(diagnostics.format_diagnostics_json(report))
+
+    assert data["ready"] is True
+    assert data["overlay_exe"].endswith("overlay.exe")
+    assert data["default_backend_id"] == "desktop_overlay"
+    assert data["experimental_backend_ids"] == ["stereo_autostereo"]
+
+
+def test_main_writes_json_report_when_requested(tmp_path, monkeypatch, capsys):
+    report = diagnostics.DiagnosticsReport(
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        overlay_exe=tmp_path / "overlay.exe",
+        depth_model=tmp_path / "model.onnx",
+        config_path=tmp_path / "config.yaml",
+        config_loaded=True,
+        ready=True,
+        problems=[],
+    )
+    output = tmp_path / "diagnostics.json"
+    monkeypatch.setattr(diagnostics, "collect_diagnostics", lambda _config: report)
+
+    code = diagnostics.main([
+        "--config",
+        str(tmp_path / "config.yaml"),
+        "--format",
+        "json",
+        "--output",
+        str(output),
+    ])
+
+    assert code == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["ready"] is True
     assert "wrote diagnostics report" in capsys.readouterr().out
 
 
