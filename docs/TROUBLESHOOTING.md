@@ -18,6 +18,18 @@ For scripts or issue templates:
 python -m launcher.diagnostics --format json --output diagnostics.json
 ```
 
+To collect a support directory with diagnostics and optional evaluation data:
+
+```powershell
+python -m launcher.support_bundle --output-dir support_bundle
+```
+
+With benchmark inputs:
+
+```powershell
+python -m launcher.support_bundle --output-dir support_bundle --depth-dir path\to\depth_frames --timing-csv path\to\timings.csv
+```
+
 The report checks:
 
 - overlay executable discovery
