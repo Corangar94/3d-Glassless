@@ -12,6 +12,7 @@ The report checks:
 - depth model discovery
 - config file readability
 - latest `overlay.log` runtime summary, when available
+- primary and experimental display backend status
 - project root and Python executable
 - useful recovery commands
 

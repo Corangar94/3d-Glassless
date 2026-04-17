@@ -25,6 +25,8 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
     assert report.config_loaded is True
     assert report.ready is True
     assert report.problems == []
+    assert report.default_backend_id == "desktop_overlay"
+    assert "stereo_autostereo" in report.experimental_backend_ids
 
 
 def test_collect_diagnostics_reports_missing_overlay_requirements(tmp_path, monkeypatch):
@@ -57,6 +59,7 @@ def test_format_diagnostics_report_includes_actionable_commands(tmp_path):
     assert "overlay executable missing" in text
     assert "python scripts/bootstrap.py" in text
     assert "python -m tracker.debug_monitor" in text
+    assert "Display backend: desktop_overlay" in text
 
 
 def test_collect_diagnostics_marks_invalid_config(tmp_path, monkeypatch):

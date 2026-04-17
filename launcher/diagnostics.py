@@ -11,6 +11,7 @@ from typing import Sequence
 import yaml
 
 from launcher.overlay_process import _project_root, find_depth_model, find_overlay_exe
+from tracker.display_backends import DisplayBackendRegistry, built_in_backends
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class DiagnosticsReport:
     config_loaded: bool
     ready: bool
     problems: list[str]
+    default_backend_id: str = "desktop_overlay"
+    experimental_backend_ids: list[str] = field(default_factory=list)
     overlay_log: Path | None = None
     overlay_summary: OverlayRuntimeSummary | None = None
     warnings: list[str] = field(default_factory=list)
@@ -73,6 +76,9 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
     config_loaded = _can_load_config(cfg_path, problems)
     overlay_log = _find_overlay_log(overlay_exe)
     overlay_summary = _latest_overlay_summary(overlay_log) if overlay_log else None
+    registry = DisplayBackendRegistry(built_in_backends())
+    default_backend_id = registry.default().id
+    experimental_backend_ids = [backend.id for backend in registry.by_status("experimental")]
     if overlay_summary is not None:
         if not overlay_summary.shm_status.startswith("LIVE"):
             warnings.append("overlay log reports stale tracker shared memory")
@@ -93,6 +99,8 @@ def collect_diagnostics(config_path: str | Path = "config.yaml") -> DiagnosticsR
         config_loaded=config_loaded,
         ready=ready,
         problems=problems,
+        default_backend_id=default_backend_id,
+        experimental_backend_ids=experimental_backend_ids,
         warnings=warnings,
     )
 
@@ -109,6 +117,8 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
         f"Overlay executable: {report.overlay_exe or 'missing'}",
         f"Depth model: {report.depth_model or 'missing'}",
         f"Overlay log: {report.overlay_log or 'not found'}",
+        f"Display backend: {report.default_backend_id}",
+        f"Experimental backends: {', '.join(report.experimental_backend_ids) or 'none'}",
         "",
         "Problems:",
     ]
