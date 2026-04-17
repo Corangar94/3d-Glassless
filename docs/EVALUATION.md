@@ -64,6 +64,14 @@ To compare a captured sequence against a synthetic or known-good baseline:
 python scripts/compare_depth_fixture.py path\to\captured_depth path\to\baseline_depth --max-ratio 2.0
 ```
 
+To create a captured sequence from overlay depth-debug screenshots, press
+`Ctrl+D` to enable depth view, use `Ctrl+Shift+S` to save several depth PNGs,
+then import them:
+
+```powershell
+python scripts/import_depth_capture.py path\to\depth_screenshots path\to\captured_depth
+```
+
 For renderer experiments, `tracker.depth_reprojection.synthesize_views` provides
 a tested CPU reference path for generating mono, stereo, or quilt view stacks
 from an RGB image and normalized depth map.
