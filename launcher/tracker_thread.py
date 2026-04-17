@@ -95,7 +95,7 @@ class _SignallingLoop:
 
     def run(self, camera_index: int = 0) -> None:
         """Run the tracking loop. Raises RuntimeError if camera cannot open."""
-        cap = cv2.VideoCapture(camera_index)
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             available = [i for i in range(6) if cv2.VideoCapture(i).isOpened()]
             raise RuntimeError(

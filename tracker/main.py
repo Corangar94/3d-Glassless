@@ -47,7 +47,7 @@ class TrackingLoop:
 
     def run(self, camera_index: int = 0, max_frames: Optional[int] = None) -> None:
         """Run the tracking loop. Blocks until max_frames reached or Ctrl+C."""
-        cap = cv2.VideoCapture(camera_index)
+        cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera {camera_index}")
         frame_count = 0

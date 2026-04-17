@@ -3,6 +3,7 @@ import math
 import pytest
 from unittest.mock import MagicMock, patch
 
+import tracker.main as tracker_main
 from tracker.main import TrackingLoop, _apply_camera_tilt, _calibrate_tilt
 from tracker.face_tracker import HeadPosition
 
@@ -74,6 +75,22 @@ def test_tracking_loop_terminates_after_max_frames():
         loop.run(camera_index=0, max_frames=5)
 
     assert mock_tracker.process_frame.call_count == 5
+
+
+def test_tracking_loop_opens_camera_with_directshow_backend_on_windows():
+    mock_tracker = MagicMock()
+    mock_tracker.process_frame.return_value = None
+    loop = TrackingLoop(
+        tracker=mock_tracker,
+        writer=MagicMock(),
+        smoother=MagicMock(),
+    )
+    mock_cap = _make_mock_cap()
+
+    with patch("tracker.main.cv2.VideoCapture", return_value=mock_cap) as video_capture:
+        loop.run(camera_index=0, max_frames=1)
+
+    video_capture.assert_called_once_with(0, tracker_main.cv2.CAP_DSHOW)
 
 
 def test_tracking_loop_writes_default_when_no_face_and_hold_expired():

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtWidgets import QApplication
 
+import launcher.tracker_thread as tracker_thread_module
 from launcher.tracker_thread import TrackerThread
 
 CONFIG = {
@@ -79,6 +80,26 @@ def test_tracker_thread_emits_position_updated(qapp):
     assert len(emissions) >= 1
     first = emissions[0]
     assert first[0] == pytest.approx(1.0)
+
+
+def test_tracker_thread_opens_camera_with_directshow_backend(qapp):
+    mock_cap = _make_mock_cap(frames=1)
+    with (
+        patch("launcher.tracker_thread.cv2.VideoCapture", return_value=mock_cap) as video_capture,
+        patch("tracker.face_tracker.FaceTracker") as MockFT,
+        patch("launcher.tracker_thread.FreetracWriter") as MockFW,
+        patch("launcher.tracker_thread.SharedMemoryWriter") as MockSW,
+        patch("launcher.tracker_thread.HeadSmoother") as MockHS,
+        patch("launcher.tracker_thread.SharedSettingsReader", _mock_settings_reader()),
+    ):
+        MockFT.return_value.__enter__.return_value.process_frame.return_value = None
+        MockFW.return_value.__enter__.return_value = MagicMock()
+        MockHS.return_value.update.return_value = (0.0, 0.0, 60.0)
+
+        thread = TrackerThread(camera_index=0, config=CONFIG)
+        _run_and_flush_events(thread, qapp)
+
+    video_capture.assert_called_with(0, tracker_thread_module.cv2.CAP_DSHOW)
 
 
 def test_tracker_thread_emits_status_changed_tracking(qapp):
