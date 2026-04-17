@@ -41,6 +41,14 @@ For offline depth-frame sequences, use `tracker.depth_evaluation`:
 - `classify_depth_stability(metrics)` classifies normalized temporal stability
   as `GOOD`, `WARN`, or `DANGER`
 
+For a directory of `.npy` depth frames, run:
+
+```powershell
+python -m tracker.depth_benchmark path\to\depth_frames
+```
+
+The command exits non-zero when the sequence classifies as `DANGER`.
+
 These metrics are not a replacement for visual inspection, but they make
 “watery depth” regressions measurable across repeated captures.
 
