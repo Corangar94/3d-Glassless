@@ -13,6 +13,7 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - Launcher starts tracker and overlay
 - Overlay captures the desktop and runs monocular depth inference
 - ReShade tooling still exists in the repo, but it should no longer define the main product story
+- Deep research implementation status is tracked in `docs/DEEP_RESEARCH_STATUS.md`
 
 ## Milestone 1: Calibration And Tracking Reliability
 
