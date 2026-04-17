@@ -87,6 +87,12 @@ To combine depth and frame-pacing checks in one report:
 python -m tracker.evaluation_suite --depth-dir path\to\depth_frames --timing-csv path\to\timings.csv
 ```
 
+For scripts or CI:
+
+```powershell
+python -m tracker.evaluation_suite --depth-dir path\to\depth_frames --timing-csv path\to\timings.csv --format json --output evaluation.json
+```
+
 Targets:
 
 - render loop should match the display refresh when possible

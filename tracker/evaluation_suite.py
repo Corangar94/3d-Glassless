@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -74,11 +75,22 @@ def format_suite_result(result: EvaluationSuiteResult) -> str:
     return "\n".join(lines)
 
 
+def format_suite_json(result: EvaluationSuiteResult) -> str:
+    data = {
+        "overall_quality": result.overall_quality,
+        "depth": _depth_to_dict(result.depth),
+        "performance": _performance_to_dict(result.performance),
+    }
+    return json.dumps(data, indent=2, sort_keys=True)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Glassless3D benchmark suite")
     parser.add_argument("--depth-dir", help="Directory containing .npy depth frames")
     parser.add_argument("--timing-csv", help="CSV with timestamp_ms,frame_time_ms columns")
     parser.add_argument("--target-fps", type=float, default=60.0)
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--output", help="Optional path to write the suite report")
     args = parser.parse_args(argv)
 
     result = run_suite(
@@ -86,8 +98,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         timing_csv=args.timing_csv,
         target_fps=args.target_fps,
     )
-    print(format_suite_result(result))
+    text = format_suite_json(result) if args.format == "json" else format_suite_result(result)
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text + "\n", encoding="utf-8")
+        print(f"wrote evaluation report to {output}")
+    else:
+        print(text)
     return 1 if result.overall_quality == "DANGER" else 0
+
+
+def _depth_to_dict(result: DepthBenchmarkResult | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    m = result.metrics
+    return {
+        "source_dir": str(result.source_dir),
+        "quality": result.quality,
+        "frame_count": m.frame_count,
+        "mean_abs_delta": m.mean_abs_delta,
+        "p95_abs_delta": m.p95_abs_delta,
+        "max_abs_delta": m.max_abs_delta,
+    }
+
+
+def _performance_to_dict(
+    result: FramePacingBenchmarkResult | None,
+) -> dict[str, object] | None:
+    if result is None:
+        return None
+    m = result.metrics
+    return {
+        "source_path": str(result.source_path),
+        "target_fps": result.target_fps,
+        "quality": result.quality,
+        "sample_count": m.sample_count,
+        "avg_fps": m.avg_fps,
+        "avg_frame_time_ms": m.avg_frame_time_ms,
+        "p95_frame_time_ms": m.p95_frame_time_ms,
+        "max_frame_time_ms": m.max_frame_time_ms,
+        "over_budget_rate": m.over_budget_rate,
+    }
 
 
 if __name__ == "__main__":
