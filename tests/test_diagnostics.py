@@ -94,6 +94,27 @@ def test_main_returns_nonzero_when_report_not_ready(tmp_path, monkeypatch, capsy
     assert "NOT READY" in capsys.readouterr().out
 
 
+def test_main_writes_report_to_output_file(tmp_path, monkeypatch, capsys):
+    report = diagnostics.DiagnosticsReport(
+        project_root=tmp_path,
+        python_executable=Path("python"),
+        overlay_exe=tmp_path / "overlay.exe",
+        depth_model=tmp_path / "model.onnx",
+        config_path=tmp_path / "config.yaml",
+        config_loaded=True,
+        ready=True,
+        problems=[],
+    )
+    output = tmp_path / "diagnostics.txt"
+    monkeypatch.setattr(diagnostics, "collect_diagnostics", lambda _config: report)
+
+    code = diagnostics.main(["--config", str(tmp_path / "config.yaml"), "--output", str(output)])
+
+    assert code == 0
+    assert "READY" in output.read_text(encoding="utf-8")
+    assert "wrote diagnostics report" in capsys.readouterr().out
+
+
 def test_parse_overlay_summary_line_extracts_runtime_health():
     line = (
         "[15:26:00.371] Frame#3249300 acq[ok=3247868 timeout=1432 lost=0 other=0] "

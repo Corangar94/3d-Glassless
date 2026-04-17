@@ -6,6 +6,12 @@ Start with the overlay-first diagnostics report:
 python -m launcher.diagnostics
 ```
 
+To save a shareable support report:
+
+```powershell
+python -m launcher.diagnostics --output diagnostics.txt
+```
+
 The report checks:
 
 - overlay executable discovery

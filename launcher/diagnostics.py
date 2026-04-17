@@ -162,10 +162,18 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print Glassless3D diagnostics")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--output", help="Optional path to write the diagnostics report")
     args = parser.parse_args(argv)
 
     report = collect_diagnostics(args.config)
-    print(format_diagnostics_report(report))
+    text = format_diagnostics_report(report)
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text + "\n", encoding="utf-8")
+        print(f"wrote diagnostics report to {output}")
+    else:
+        print(text)
     return 0 if report.ready else 1
 
 
