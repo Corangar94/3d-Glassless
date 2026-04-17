@@ -130,6 +130,7 @@ _DEFAULT_TRACKING = {
 }
 
 _DEFAULT_OVERLAY = {
+    "display_backend": "desktop_overlay",
     "strength_x": 1.0,
     "strength_y": 1.0,
     "virtual_depth_cm": 30.0,
