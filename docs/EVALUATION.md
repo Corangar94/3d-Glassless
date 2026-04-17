@@ -84,6 +84,7 @@ depth map:
 ```powershell
 python scripts/render_views.py image.png depth.npy stereo.png --backend stereo_autostereo
 python scripts/render_views.py image.png depth.npy quilt.png --backend lightfield_quilt
+python scripts/render_views.py image.png depth.npy masked.png --backend stereo_autostereo --confidence-mask confidence.npy --fill-value 0
 ```
 
 To select the intended backend in `config.yaml` for diagnostics and support

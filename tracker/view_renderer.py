@@ -17,6 +17,8 @@ def render_backend_views(
     depth: np.ndarray,
     backend_id: str,
     max_parallax_px: float = 8.0,
+    confidence_mask: np.ndarray | None = None,
+    fill_value: float | int = 0,
 ) -> list[np.ndarray]:
     layout = build_display_layout(backend_id)
     return synthesize_views(
@@ -24,6 +26,8 @@ def render_backend_views(
         depth,
         layout.view_offsets,
         max_parallax_px=max_parallax_px,
+        confidence_mask=confidence_mask,
+        fill_value=fill_value,
     )
 
 
@@ -56,6 +60,8 @@ def render_backend_grid(
     depth: np.ndarray,
     backend_id: str,
     max_parallax_px: float = 8.0,
+    confidence_mask: np.ndarray | None = None,
+    fill_value: float | int = 0,
 ) -> np.ndarray:
     layout = build_display_layout(backend_id)
     views = render_backend_views(
@@ -63,6 +69,8 @@ def render_backend_grid(
         depth,
         backend_id,
         max_parallax_px=max_parallax_px,
+        confidence_mask=confidence_mask,
+        fill_value=fill_value,
     )
     return compose_view_grid(views, columns=layout.columns, rows=layout.rows)
 
@@ -74,15 +82,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("output_path", help="PNG output path")
     parser.add_argument("--backend", default="stereo_autostereo")
     parser.add_argument("--max-parallax-px", type=float, default=8.0)
+    parser.add_argument("--confidence-mask", help=".npy boolean confidence mask")
+    parser.add_argument("--fill-value", type=float, default=0.0)
     args = parser.parse_args(argv)
 
     image = np.asarray(Image.open(args.image_path).convert("RGB"))
     depth = np.load(args.depth_path).astype(np.float32, copy=False)
+    confidence = (
+        np.load(args.confidence_mask).astype(bool, copy=False)
+        if args.confidence_mask
+        else None
+    )
     grid = render_backend_grid(
         image,
         depth,
         args.backend,
         max_parallax_px=args.max_parallax_px,
+        confidence_mask=confidence,
+        fill_value=args.fill_value,
     )
     output = Path(args.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
