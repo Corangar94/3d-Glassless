@@ -33,6 +33,7 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - actionable startup errors
 - settings and troubleshooting docs
 - repeatable evaluation guide for tracking, depth, performance, and comfort
+- command-line diagnostics report for support and readiness checks
 
 ## Milestone 4: Performance Hardening
 
