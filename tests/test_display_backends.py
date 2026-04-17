@@ -1,6 +1,7 @@
 from tracker.display_backends import (
     DisplayBackend,
     DisplayBackendRegistry,
+    build_display_layout,
     built_in_backends,
 )
 
@@ -50,3 +51,32 @@ def test_registry_rejects_duplicate_backend_ids():
         assert "duplicate backend id" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_build_display_layout_returns_desktop_single_view_contract():
+    layout = build_display_layout("desktop_overlay")
+
+    assert layout.backend_id == "desktop_overlay"
+    assert layout.columns == 1
+    assert layout.rows == 1
+    assert layout.view_count == 1
+    assert layout.view_offsets == [0.0]
+
+
+def test_build_display_layout_returns_stereo_two_view_contract():
+    layout = build_display_layout("stereo_autostereo")
+
+    assert layout.columns == 2
+    assert layout.rows == 1
+    assert layout.view_count == 2
+    assert layout.view_offsets == [-0.5, 0.5]
+
+
+def test_build_display_layout_returns_quilt_grid_contract():
+    layout = build_display_layout("lightfield_quilt")
+
+    assert layout.columns == 9
+    assert layout.rows == 5
+    assert layout.view_count == 45
+    assert layout.view_offsets[0] == -1.0
+    assert layout.view_offsets[-1] == 1.0

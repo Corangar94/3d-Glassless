@@ -19,7 +19,10 @@ experimental integrations. They are not the default onboarding or support path.
 Display backend status is represented in code by `tracker.display_backends`.
 The current primary backend is `desktop_overlay`. `stereo_autostereo` and
 `lightfield_quilt` are registered as experimental capability targets so future
-work has stable IDs, but they are not rendering implementations yet.
+work has stable IDs. The same module defines tested output layout contracts:
+`desktop_overlay` is a 1x1 single-view output, `stereo_autostereo` is a 2x1
+two-view output, and `lightfield_quilt` is a 9x5 45-view quilt with normalized
+view offsets. Renderer implementations still land behind those contracts.
 
 Three processes collaborate via Windows Named Shared Memory in the primary flow:
 

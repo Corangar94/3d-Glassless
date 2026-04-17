@@ -21,6 +21,18 @@ class DisplayBackend:
     description: str
 
 
+@dataclass(frozen=True)
+class DisplayLayout:
+    backend_id: str
+    columns: int
+    rows: int
+    view_offsets: list[float]
+
+    @property
+    def view_count(self) -> int:
+        return self.columns * self.rows
+
+
 class DisplayBackendRegistry:
     def __init__(self, backends: Sequence[DisplayBackend]) -> None:
         self._backends = list(backends)
@@ -67,3 +79,37 @@ def built_in_backends() -> list[DisplayBackend]:
             description="Future multiview/quilt output path for light-field displays.",
         ),
     ]
+
+
+def build_display_layout(backend_id: str) -> DisplayLayout:
+    if backend_id == "desktop_overlay":
+        return DisplayLayout(
+            backend_id=backend_id,
+            columns=1,
+            rows=1,
+            view_offsets=[0.0],
+        )
+    if backend_id == "stereo_autostereo":
+        return DisplayLayout(
+            backend_id=backend_id,
+            columns=2,
+            rows=1,
+            view_offsets=[-0.5, 0.5],
+        )
+    if backend_id == "lightfield_quilt":
+        return DisplayLayout(
+            backend_id=backend_id,
+            columns=9,
+            rows=5,
+            view_offsets=_normalized_view_offsets(45),
+        )
+    raise ValueError(f"unknown display backend: {backend_id}")
+
+
+def _normalized_view_offsets(view_count: int) -> list[float]:
+    if view_count <= 0:
+        raise ValueError("view_count must be positive")
+    if view_count == 1:
+        return [0.0]
+    step = 2.0 / (view_count - 1)
+    return [round(-1.0 + step * index, 6) for index in range(view_count)]
