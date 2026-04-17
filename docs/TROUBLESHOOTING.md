@@ -24,6 +24,9 @@ To collect a support directory with diagnostics and optional evaluation data:
 python scripts/collect_support.py --output-dir support_bundle
 ```
 
+When `overlay.log` has multiple runtime summaries, the bundle also includes
+`overlay_timings.csv` for frame-pacing analysis.
+
 With benchmark inputs:
 
 ```powershell
