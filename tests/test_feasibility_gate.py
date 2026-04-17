@@ -3,9 +3,11 @@ from tracker.feasibility_gate import (
     GateCheck,
     decide_gate,
     format_assessment,
+    format_assessment_json,
     main,
     wow_default_checks,
 )
+import json
 
 
 def test_decide_gate_returns_go_when_all_required_checks_pass():
@@ -64,8 +66,30 @@ def test_format_assessment_lists_blockers_and_warnings():
     assert "Warnings:" in text
 
 
+def test_format_assessment_json_is_machine_readable():
+    assessment = decide_gate("World of Warcraft", wow_default_checks())
+
+    data = json.loads(format_assessment_json(assessment))
+
+    assert data["target"] == "World of Warcraft"
+    assert data["decision"] == "NO_GO"
+    assert any("policy_review" in blocker for blocker in data["blockers"])
+
+
 def test_main_returns_nonzero_for_default_wow_gate(capsys):
     code = main(["wow"])
 
     assert code == 1
     assert "decision=NO_GO" in capsys.readouterr().out
+
+
+def test_main_can_write_json_report(tmp_path, capsys):
+    output = tmp_path / "gate.json"
+
+    code = main(["wow", "--format", "json", "--output", str(output)])
+
+    assert code == 1
+    assert capsys.readouterr().out == ""
+    data = json.loads(output.read_text(encoding="utf-8"))
+    assert data["target"] == "World of Warcraft"
+    assert data["decision"] == "NO_GO"

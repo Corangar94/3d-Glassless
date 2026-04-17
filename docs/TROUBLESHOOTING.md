@@ -115,3 +115,9 @@ To print the current WoW feasibility gate:
 ```powershell
 python -m tracker.feasibility_gate wow
 ```
+
+For a machine-readable gate artifact:
+
+```powershell
+python -m tracker.feasibility_gate wow --format json --output feasibility_wow.json
+```

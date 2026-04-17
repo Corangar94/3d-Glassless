@@ -9,6 +9,7 @@ from typing import Sequence
 
 from launcher.diagnostics import collect_diagnostics, format_diagnostics_json
 from tracker.evaluation_suite import format_suite_json, run_suite
+from tracker.feasibility_gate import decide_gate, format_assessment_json, wow_default_checks
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class SupportBundleManifest:
     output_dir: Path
     diagnostics_path: Path
     manifest_path: Path
+    feasibility_wow_path: Path
     evaluation_path: Path | None = None
 
 
@@ -33,6 +35,10 @@ def create_support_bundle(
     diagnostics = collect_diagnostics(config_path)
     diagnostics_path.write_text(format_diagnostics_json(diagnostics) + "\n", encoding="utf-8")
 
+    feasibility_wow_path = out / "feasibility_wow.json"
+    feasibility_wow = decide_gate("World of Warcraft", wow_default_checks())
+    feasibility_wow_path.write_text(format_assessment_json(feasibility_wow) + "\n", encoding="utf-8")
+
     evaluation_path: Path | None = None
     if depth_dir is not None or timing_csv is not None:
         evaluation_path = out / "evaluation.json"
@@ -43,12 +49,14 @@ def create_support_bundle(
     manifest_data = {
         "diagnostics": diagnostics_path.name,
         "evaluation": evaluation_path.name if evaluation_path else None,
+        "feasibility_wow": feasibility_wow_path.name,
     }
     manifest_path.write_text(json.dumps(manifest_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return SupportBundleManifest(
         output_dir=out,
         diagnostics_path=diagnostics_path,
+        feasibility_wow_path=feasibility_wow_path,
         evaluation_path=evaluation_path,
         manifest_path=manifest_path,
     )

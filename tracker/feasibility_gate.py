@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Sequence
 
 GateDecision = Literal["GO", "CONDITIONAL", "NO_GO"]
@@ -82,9 +84,24 @@ def format_assessment(assessment: GateAssessment) -> str:
     return "\n".join(lines)
 
 
+def format_assessment_json(assessment: GateAssessment) -> str:
+    return json.dumps(
+        {
+            "target": assessment.target,
+            "decision": assessment.decision,
+            "blockers": assessment.blockers,
+            "warnings": assessment.warnings,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Evaluate Glassless3D feasibility gates")
     parser.add_argument("target", choices=["wow"], help="Gate target to evaluate")
+    parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--output", help="Optional report output path")
     args = parser.parse_args(argv)
 
     if args.target == "wow":
@@ -92,7 +109,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:  # pragma: no cover - argparse choices prevent this path
         raise ValueError(args.target)
 
-    print(format_assessment(assessment))
+    report = (
+        format_assessment_json(assessment)
+        if args.format == "json"
+        else format_assessment(assessment)
+    )
+    if args.output:
+        Path(args.output).write_text(report + "\n", encoding="utf-8")
+    else:
+        print(report)
     return 0 if assessment.decision == "GO" else 1
 
 

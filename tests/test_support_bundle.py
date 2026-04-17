@@ -10,9 +10,11 @@ def test_create_support_bundle_writes_diagnostics_and_manifest(tmp_path):
     manifest = support_bundle.create_support_bundle(output_dir=out_dir)
 
     assert (out_dir / "diagnostics.json").exists()
+    assert (out_dir / "feasibility_wow.json").exists()
     assert (out_dir / "manifest.json").exists()
     manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_data["diagnostics"] == "diagnostics.json"
+    assert manifest_data["feasibility_wow"] == "feasibility_wow.json"
     assert manifest.output_dir == out_dir
 
 
