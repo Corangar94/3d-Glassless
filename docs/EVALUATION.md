@@ -72,7 +72,8 @@ from an RGB image and normalized depth map.
 
 Use `overlay.log` as the first pass. The overlay writes a once-per-second
 summary containing render frames, depth inference cadence, head pose, relative
-head motion, wobble, strength, depth, and frame availability.
+head motion, GPU draw timing (`gpu_ms`), wobble, strength, depth, and frame
+availability.
 
 For frame-time captures, use `tracker.performance_evaluation`:
 

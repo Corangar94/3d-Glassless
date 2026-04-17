@@ -184,6 +184,20 @@ def test_parse_overlay_summary_line_extracts_runtime_health():
     assert summary.has_frame is True
 
 
+def test_parse_overlay_summary_line_extracts_gpu_timing_when_present():
+    line = (
+        "[15:26:00.371] Frame#3249300 acq[ok=3247868 timeout=1432 lost=0 other=0] "
+        "shm[LIVE reads=3249300 changes=369 (2/s) ts=80350123] "
+        "depth[total=116440 8Hz] gpu_ms=0.42 head=(-1.09,0.97,58.62) rest=(0.63,-0.38) "
+        "rel=(-1.72,1.35) wobble=0.00 strength=1.00 depth=30.00 hasFrame=1"
+    )
+
+    summary = diagnostics.parse_overlay_summary_line(line)
+
+    assert summary is not None
+    assert summary.gpu_ms == pytest.approx(0.42)
+
+
 def test_collect_diagnostics_includes_overlay_log_warnings(tmp_path, monkeypatch):
     log_path = tmp_path / "overlay.log"
     log_path.write_text(

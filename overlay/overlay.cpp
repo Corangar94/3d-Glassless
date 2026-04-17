@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <wincodec.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
@@ -24,6 +25,7 @@
 #include <cstdarg>
 #include <share.h>
 #include <string>
+#include <vector>
 
 #include "depth_infer.h"
 
@@ -58,6 +60,13 @@ static void Log(const char* fmt, ...) {
 
 static void LogHR(const char* what, HRESULT hr) {
     Log("%s -> HRESULT=0x%08X %s", what, (unsigned)hr, SUCCEEDED(hr) ? "OK" : "FAIL");
+}
+
+static void SafeReleaseQuery(ID3D11Query*& query) {
+    if (query) {
+        query->Release();
+        query = nullptr;
+    }
 }
 
 static void LogClose() {
@@ -107,21 +116,32 @@ VS_OUT main(uint id : SV_VertexID) {
 
 static const char PS_SRC[] = R"hlsl(
 cbuffer CB : register(b0) {
-    float headX;        // cm, right = positive
-    float headY;        // cm, up    = positive
-    float headZ;        // cm, distance from screen (~60 typical)
-    float strengthX;    // horizontal parallax amplifier
-    float strengthY;    // vertical parallax amplifier
-    float screenW;      // cm
-    float screenH;      // cm
-    float virtualDepth; // cm — far-plane distance behind the screen
-    float debugDepth;   // >0.5 = greyscale depth map
-    float depthGamma;   // gamma exponent (curve mode 2)
-    float focusRadius;  // (reserved — unused in current parallax model)
-    float depthCurve;   // 0=linear, 1=sqrt, 2=gamma
+    float headX;           // cm, right = positive
+    float headY;           // cm, up    = positive
+    float headZ;           // cm, distance from screen (~60 typical)
+    float strengthX;       // horizontal parallax amplifier
+    float strengthY;       // vertical parallax amplifier
+    float screenW;         // cm
+    float screenH;         // cm
+    float virtualDepth;    // cm — far-plane distance behind the screen
+    float debugDepth;      // >0.5 = greyscale depth map
+    float depthGamma;      // gamma exponent (curve mode 2)
+    float focusRadius;     // (reserved — unused in current parallax model)
+    float depthCurve;      // 0=linear, 1=sqrt, 2=gamma
+    // Depth UV correction: the depth texture covers only the center crop of
+    // the captured frame.  Convert screen UV X → depth texture UV X via:
+    //   depthUV.x = (screenUV.x - depthCropX0) / depthCropW
+    // For 5120×1440: depthCropX0=0.25, depthCropW=0.5 → (x-0.25)*2
+    float depthCropX0;     // left edge of center crop in screen UV
+    float depthCropW;      // width of center crop in screen UV
+    // Render-rate depth interpolation: blend_t advances 0→1 over kBlendFrames
+    // render frames after each new inference, hiding the 10 Hz update rate.
+    float depthBlend;      // 0=prev inference, 1=latest inference
+    float _pad0;
 };
-Texture2D    SceneTex : register(t0);
-Texture2D    DepthTex : register(t1);
+Texture2D    SceneTex     : register(t0);
+Texture2D    DepthTex     : register(t1);  // latest inference
+Texture2D    DepthPrevTex : register(t2);  // previous inference (for lerp)
 SamplerState SceneSmp : register(s0);
 struct PS_IN { float4 pos : SV_Position; float2 uv : TEXCOORD; };
 
@@ -131,16 +151,48 @@ float ApplyCurve(float rawD, float curve, float gamma) {
     return pow(max(rawD, 0.0001), gamma);
 }
 
-float4 main(PS_IN i) : SV_Target {
-    // Depth convention from depth_infer.cpp (Depth Anything V2, percentile-normalised):
-    //   0.0 = near / foreground   (screen surface, HUD)
-    //   1.0 = far  / background   (sky, distant terrain)
-    float rawD = DepthTex.Sample(SceneSmp, i.uv).r;
-    float depth = ApplyCurve(rawD, depthCurve, depthGamma);
+// Sample the (prev⟷current) lerp'd depth at a screen UV, applying the
+// center-crop transform on the X axis and the user-selected depth curve
+// (linear/sqrt/gamma). Ray-march comparisons and ParallaxShift() use the
+// curved depth so tuning via depth_curve / depth_gamma still takes effect.
+float SampleDepthScreen(float2 screenUV, float dCropW) {
+    float2 duv = float2(saturate((screenUV.x - depthCropX0) / dCropW),
+                        saturate(screenUV.y));
+    float a = DepthPrevTex.Sample(SceneSmp, duv).r;
+    float b = DepthTex.Sample(SceneSmp, duv).r;
+    float raw = lerp(a, b, depthBlend);
+    return ApplyCurve(raw, depthCurve, depthGamma);
+}
 
+// Parallax shift for a given depth d, in screen UV units. `headX/headY` are
+// the predicted head displacement from rest (cm).  f = oz/(hz+oz), the
+// fraction of head offset that a pixel at virtual depth oz=vd*d sees as UV
+// shift on a pinhole-through-window model.
+float2 ParallaxShift(float d, float hz, float sw, float sh, float vd) {
+    float oz = vd * d;
+    float f  = oz / (hz + oz);
+    return float2( (headX / sw) * f * strengthX,
+                  -(headY / sh) * f * strengthY);
+}
+
+float4 main(PS_IN i) : SV_Target {
+    float dCropW = max(depthCropW, 0.01);
+
+    // Capture SceneTex mip derivatives from the UNSHIFTED UV *before* the
+    // ray-march does any dependent sampling.  HLSL's hardware derivative
+    // (ddx/ddy) is only valid outside dynamic control flow; using SampleGrad
+    // with these ddx/ddy on the final shifted UV prevents mip popping — on a
+    // 5120-wide output the shifted UV's local derivative would otherwise skip
+    // mip levels as the head moves, which reads as edge shimmer ≈ swim.
+    //   — Ben Golus, "Distinctive Derivative Differences"
+    //     https://bgolus.medium.com/distinctive-derivative-differences-cce38d36797b
+    float2 sceneDdx = ddx(i.uv);
+    float2 sceneDdy = ddy(i.uv);
+
+    // ── Debug view: raw depth at this screen pixel, skip parallax. ──
     if (debugDepth > 0.5) {
-        // near → bright, far → dark  (standard disparity display)
-        float v = 1.0 - depth;
+        float rawD = SampleDepthScreen(i.uv, dCropW);
+        float v    = 1.0 - rawD;              // near=bright, far=dark
         return float4(v, v, v, 1.0);
     }
 
@@ -149,34 +201,43 @@ float4 main(PS_IN i) : SV_Target {
     float sh = max(screenH, 1.0);
     float vd = max(virtualDepth, 0.0);
 
-    // Pinhole-camera-through-window parallax model.
-    //
-    // oz  = virtual distance (cm) of this pixel behind the screen.
-    //       depth=0 (near) → oz=0 (on screen, zero parallax — HUD stays put).
-    //       depth=1 (far)  → oz=vd (far plane, maximum parallax).
-    //
-    // f   = fraction of the head's lateral offset that appears as a UV shift.
-    //       Derived from similar triangles: a point at oz cm behind a window
-    //       observed by an eye at hz cm in front of the window shifts by
-    //       headX * oz / (hz + oz)  in world-cm, or  / sw  in UV units.
-    //
-    // All objects shift in the SAME direction as head movement; far shifts
-    // more than near.  No bipolar artefacts, no doubling at high settings.
-    float oz = vd * depth;
-    float f  = oz / (hz + oz);   // 0 at screen plane, approaches 1 as oz→∞
+    // Screen-edge fade: the shift is tapered to 0 over the outer 8% so
+    // shifted UVs never leave [0,1] except from round-off.  Also used to
+    // scale down the ray-march range near edges (cheap occlusion-free zone).
+    const float kFade = 0.08;
+    float fadeX = saturate(min(i.uv.x, 1.0 - i.uv.x) / kFade);
+    float fadeY = saturate(min(i.uv.y, 1.0 - i.uv.y) / kFade);
+    float fade  = min(fadeX, fadeY);
 
-    float2 sampleUV = float2(
-        i.uv.x + (headX / sw) * f * strengthX,
-        i.uv.y - (headY / sh) * f * strengthY
-    );
-    // If the parallax shift pushes sampling outside the captured frame,
-    // fall back to the unshifted pixel.  This prevents the saturate()-clamp
-    // from stretching the screen edge across dozens/hundreds of pixels
-    // ("doubling" artifact at high head-offset or high virtual-depth).
-    if (sampleUV.x < 0.0 || sampleUV.x > 1.0 ||
-        sampleUV.y < 0.0 || sampleUV.y > 1.0)
-        return SceneTex.Sample(SceneSmp, i.uv);
-    return SceneTex.Sample(SceneSmp, sampleUV);
+    // ── Classical inverse-warp parallax ─────────────────────────────────
+    // Sample depth at the output pixel, shift by the f(d) factor for that
+    // depth, read the shifted source pixel. Each depth layer therefore maps
+    // to its own proportional shift, which is what gives the scene visible
+    // layered parallax.
+    //
+    // A previous revision used steep / POM ray-march to nudge silhouette
+    // shifts to follow the true source geometry. In practice, on open-world
+    // scenes with mostly-far depth maps (sky + distant terrain), the POM
+    // ray rarely intersects the height field before t→1, so every mid/far
+    // pixel ended up with the *same* maximum shift — the scene translated
+    // as one rigid sheet and the user perceived "very little depth". The
+    // inverse-warp formulation below preserves per-pixel shift variation,
+    // which is the essential 3D cue here. The residual swim at sharp depth
+    // discontinuities is handled by the temporal EMA + wide smoothstep
+    // blend in the depth pipeline, not by ray-marching in the shader.
+    float d_final = SampleDepthScreen(i.uv, dCropW);
+    float2 uv_final = i.uv + ParallaxShift(d_final, hz, sw, sh, vd) * fade;
+
+    // OOB safety (fade should have already prevented it — this is belt &
+    // suspenders). saturate() would stretch the edge pixel and cause image
+    // doubling, so fall back to the unshifted pixel instead.
+    if (uv_final.x < 0.0 || uv_final.x > 1.0 ||
+        uv_final.y < 0.0 || uv_final.y > 1.0) {
+        uv_final = i.uv;
+    }
+    // SampleGrad with the pre-branch base-UV derivatives: proper mip
+    // selection on the shifted UV, matching the on-screen pixel rate.
+    return SceneTex.SampleGrad(SceneSmp, uv_final, sceneDdx, sceneDdy);
 }
 )hlsl";
 
@@ -184,6 +245,7 @@ struct CBuf {
     float headX, headY, headZ, strengthX, strengthY;
     float screenW, screenH, virtualDepth, debugDepth;
     float depthGamma, focusRadius, depthCurve;
+    float depthCropX0, depthCropW, depthBlend, _pad0;
 };
 
 // ── Globals ───────────────────────────────────────────────────────────────
@@ -207,6 +269,12 @@ static const void*               g_shmView = nullptr;
 static DepthInferencer*          g_depth       = nullptr;
 static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=0.5 used when g_depth is null
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
+static ID3D11Query*              g_gpuDisjoint = nullptr;
+static ID3D11Query*              g_gpuStart    = nullptr;
+static ID3D11Query*              g_gpuEnd      = nullptr;
+static bool                      g_gpuTimingPending = false;
+static double                    g_lastGpuMs = -1.0;
+static int                       g_gpuTimingSamples = 0;
 // Settings channel (G3D_Settings) — optional; owned by the settings GUI.
 static HANDLE                    g_setH    = nullptr;
 static const void*               g_setView = nullptr;
@@ -224,6 +292,164 @@ static float    g_strengthY   = 1.0f;
 static uint32_t g_depthCurve  = 1;    // sqrt default
 static float    g_depthGamma  = 1.0f;
 static float    g_focusRadius = 0.1f;
+static float    g_deadzoneCm  = 0.5f; // soft deadzone on dx/dy (default 5 mm)
+
+static bool InitGpuTiming() {
+    D3D11_QUERY_DESC q = {};
+    q.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+    HRESULT hr = g_dev->CreateQuery(&q, &g_gpuDisjoint);
+    if (FAILED(hr)) {
+        LogHR("CreateQuery(TIMESTAMP_DISJOINT)", hr);
+        return false;
+    }
+    q.Query = D3D11_QUERY_TIMESTAMP;
+    hr = g_dev->CreateQuery(&q, &g_gpuStart);
+    if (FAILED(hr)) {
+        LogHR("CreateQuery(TIMESTAMP start)", hr);
+        SafeReleaseQuery(g_gpuDisjoint);
+        return false;
+    }
+    hr = g_dev->CreateQuery(&q, &g_gpuEnd);
+    if (FAILED(hr)) {
+        LogHR("CreateQuery(TIMESTAMP end)", hr);
+        SafeReleaseQuery(g_gpuStart);
+        SafeReleaseQuery(g_gpuDisjoint);
+        return false;
+    }
+    Log("GPU timing queries initialized");
+    return true;
+}
+
+static void ResolveGpuTiming() {
+    if (!g_gpuTimingPending || !g_gpuDisjoint || !g_gpuStart || !g_gpuEnd) return;
+
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint = {};
+    HRESULT hr = g_ctx->GetData(g_gpuDisjoint, &disjoint, sizeof(disjoint), 0);
+    if (hr != S_OK) return;
+
+    UINT64 start = 0, end = 0;
+    if (g_ctx->GetData(g_gpuStart, &start, sizeof(start), 0) == S_OK &&
+        g_ctx->GetData(g_gpuEnd, &end, sizeof(end), 0) == S_OK) {
+        if (!disjoint.Disjoint && disjoint.Frequency > 0 && end >= start) {
+            g_lastGpuMs = (double)(end - start) * 1000.0 / (double)disjoint.Frequency;
+            g_gpuTimingSamples++;
+        }
+        g_gpuTimingPending = false;
+    }
+}
+
+static void BeginGpuTiming() {
+    if (g_gpuTimingPending || !g_gpuDisjoint || !g_gpuStart || !g_gpuEnd) return;
+    g_ctx->Begin(g_gpuDisjoint);
+    g_ctx->End(g_gpuStart);
+}
+
+static void EndGpuTiming() {
+    if (g_gpuTimingPending || !g_gpuDisjoint || !g_gpuStart || !g_gpuEnd) return;
+    g_ctx->End(g_gpuEnd);
+    g_ctx->End(g_gpuDisjoint);
+    g_gpuTimingPending = true;
+}
+
+// ── Head-pose smoothing (One-Euro filter) ────────────────────────────────
+// Raw head pose from the webcam tracker has sub-centimeter jitter even
+// after its Kalman stage. The parallax formula multiplies head displacement
+// by depth-dependent shift magnitude, so a ~1 mm jitter on a near-field
+// pixel can translate to multi-pixel shift noise → visible "watery" motion.
+//
+// One-Euro (Casiez/Roussel/Vogel 2012, https://gery.casiez.net/1euro/) is
+// the canonical choice here: two chained EMAs where the signal cutoff
+// adapts with estimated velocity. Sub-millimeter still-held jitter is
+// filtered hard (low cutoff), but fast head motion sees a high cutoff so
+// there is no added latency. Three independent instances — one per axis.
+//
+// Defaults retuned for the MediaPipe tracker that feeds G3D SHM at ~10 Hz
+// (was 1.0/0.007/1.0 — too conservative for a 10 Hz source, whose 5 Hz
+// Nyquist means `min_cutoff=1 Hz` already attenuates legitimate head motion).
+//   min_cutoff = 0.4 Hz   — floor cutoff when the head is still (kills mm jitter)
+//   beta       = 0.02     — opens cutoff aggressively on motion (no added lag)
+//   d_cutoff   = 1.0 Hz   — low-pass for the derivative estimator itself
+// Casiez tuning procedure: hold still → drop min_cutoff until jitter is gone;
+// then move fast → raise β until lag disappears. https://gery.casiez.net/1euro/
+struct OneEuro {
+    float min_cutoff = 0.4f;
+    float beta       = 0.02f;
+    float d_cutoff   = 1.0f;
+    float x_prev     = 0.0f;
+    float dx_prev    = 0.0f;
+    double t_prev    = 0.0;
+    bool   initialized = false;
+};
+
+static inline float OneEuroAlpha(float cutoff_hz, float te_s) {
+    const float kTwoPi = 6.28318530717958647692f;
+    float r = kTwoPi * cutoff_hz * te_s;
+    return r / (r + 1.0f);
+}
+
+static float OneEuroFilter(OneEuro& f, float x, double t_seconds) {
+    if (!f.initialized) {
+        f.x_prev = x; f.dx_prev = 0.0f;
+        f.t_prev = t_seconds; f.initialized = true;
+        return x;
+    }
+    float te = (float)(t_seconds - f.t_prev);
+    if (te <= 0.0f) te = 1e-3f;            // guard: duplicate/clock-skew stamps
+    float dx     = (x - f.x_prev) / te;
+    float ad     = OneEuroAlpha(f.d_cutoff, te);
+    float dx_hat = ad * dx + (1.0f - ad) * f.dx_prev;
+    float mag    = dx_hat < 0.0f ? -dx_hat : dx_hat;
+    float fc     = f.min_cutoff + f.beta * mag;
+    float a      = OneEuroAlpha(fc, te);
+    float x_hat  = a * x + (1.0f - a) * f.x_prev;
+    f.x_prev = x_hat; f.dx_prev = dx_hat; f.t_prev = t_seconds;
+    return x_hat;
+}
+
+// ── Soft hysteretic deadzone ─────────────────────────────────────────────
+// A hard deadzone (`return 0 if |x|<dz else x`) produces a visible snap
+// when crossing the threshold — the parallax would suddenly jump by `dz`
+// worth of shift. A soft deadzone applies a smoothstep weight between dz
+// and 2·dz so the output gradually re-engages. At |x|≤dz output is 0;
+// at |x|≥2·dz output is x; between, output is x·smoothstep(dz, 2dz, |x|).
+static float SoftDeadzone(float x, float dz) {
+    if (dz <= 0.0f) return x;
+    float a = x < 0.0f ? -x : x;
+    if (a <= dz) return 0.0f;
+    float dz_hi = 2.0f * dz;
+    if (a >= dz_hi) return x;
+    float t = (a - dz) / dz;          // 0 at dz, 1 at 2·dz
+    float s = t * t * (3.0f - 2.0f * t);
+    return x * s;
+}
+
+// Three independent One-Euro instances, one per axis (cm).
+static OneEuro g_oeX, g_oeY, g_oeZ;
+
+// ── Head-pose forward prediction ─────────────────────────────────────────
+// Motion-to-photon latency in this pipeline is the sum of webcam exposure
+// (~16 ms at 60 Hz), MediaPipe inference + Kalman (~10-15 ms), SHM write,
+// our overlay frame that reads it (0-16 ms until next render), One-Euro
+// smoothing (~few ms at min_cutoff=1 Hz), render, Present+VSync (0-16 ms).
+// Total roughly 35-50 ms. Extrapolating the filtered pose forward by that
+// horizon puts the parallax shift where the eye actually is when the
+// pixel lights up — without it the scene lazily "sloshes" after the head,
+// which reads as motion wateriness.  Capped to prevent over-extrapolation
+// during rapid motion direction changes.
+static constexpr float kPredictHorizonSec = 0.035f;      // 35 ms default
+static constexpr float kPredictMaxDeltaCm = 2.0f;        // clamp per-axis extrapolation
+
+static inline float OneEuroPredictedVelocity(const OneEuro& f) {
+    // dx_prev is the filtered derivative estimate after the last update.
+    // Units: cm/s. Valid after at least two samples.
+    return f.initialized ? f.dx_prev : 0.0f;
+}
+
+static inline float ClampAbs(float v, float max_abs) {
+    if (v >  max_abs) return  max_abs;
+    if (v < -max_abs) return -max_abs;
+    return v;
+}
 static bool  g_debugDepth   = false;  // Ctrl+D: show depth map as greyscale
 // CLI-provided overrides (0 = not provided → use autodetect / settings GUI)
 static float g_cliScreenW   = 0.0f;
@@ -424,6 +650,7 @@ static void ApplySettings() {
     float sx = 1.0f, sy = 1.0f, dp = 30.0f;
     uint32_t dc = 1;
     float dg = 1.0f, fr = 0.1f;
+    float dz_cm = 0.5f;   // default 5 mm
 
     if (g_setView) {
         Settings s; memcpy(&s, g_setView, sizeof(s));
@@ -435,6 +662,7 @@ static void ApplySettings() {
         dc = s.depthCurve;
         if (s.depthGamma  > 0.0f)    dg = s.depthGamma;
         if (s.focusRadius >= 0.0f)    fr = s.focusRadius;
+        if (s.deadzoneM   >= 0.0f)    dz_cm = s.deadzoneM * 0.1f;  // mm → cm
     }
 
     if (g_cliScreenW  > 0.0f) sw = g_cliScreenW;
@@ -451,6 +679,7 @@ static void ApplySettings() {
     g_depthCurve   = dc;
     g_depthGamma   = dg;
     g_focusRadius  = fr;
+    g_deadzoneCm   = dz_cm;
 }
 
 // Query the primary monitor's physical size via EDID.
@@ -499,17 +728,31 @@ static bool AutodetectScreenSizeCm(float* outW, float* outH) {
     return false;
 }
 
-// Locate depth_anything_v2_small_fp16.onnx. Searches (in order):
-//   1. <exe_dir>/models/depth_anything_v2_small_fp16.onnx
-//   2. <exe_dir>/../models/depth_anything_v2_small_fp16.onnx   (dev layout)
-// Returns empty string if not found.
+// Locate the depth ONNX model. Search order:
+//   1. VDA-Small (preferred — temporally consistent):
+//      <exe_dir>/models/video_depth_anything_vits_518.onnx
+//      <exe_dir>/../models/video_depth_anything_vits_518.onnx  (dev layout)
+//   2. Depth Anything V2 Small (fallback):
+//      <exe_dir>/models/depth_anything_v2_small_fp16.onnx
+//      <exe_dir>/../models/depth_anything_v2_small_fp16.onnx
+//
+// Both models share the same I/O contract:
+//   input:  float32 [1, 3, 518, 518]   (ImageNet-normalized NCHW)
+//   output: float32 [1, 518, 518] or [1, 1, 518, 518]
+//
+// To use VDA: python scripts/export_vda_onnx.py --install --replace
+// Returns empty string if no model found.
 static std::wstring FindDepthModel() {
     wchar_t exePath[MAX_PATH]; GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     wchar_t* slash = wcsrchr(exePath, L'\\');
     if (slash) *(slash + 1) = L'\0';
+
+    // Prefer VDA-Small (better temporal consistency); fall back to DAv2-Small.
     const wchar_t* candidates[] = {
-        L"models\\depth_anything_v2_small_fp16.onnx",
-        L"..\\models\\depth_anything_v2_small_fp16.onnx",
+        L"models\\video_depth_anything_vits_518.onnx",      // VDA near exe
+        L"..\\models\\video_depth_anything_vits_518.onnx",  // VDA dev layout
+        L"models\\depth_anything_v2_small_fp16.onnx",       // DAv2 near exe
+        L"..\\models\\depth_anything_v2_small_fp16.onnx",   // DAv2 dev layout
     };
     for (const wchar_t* rel : candidates) {
         wchar_t full[MAX_PATH];
@@ -727,6 +970,8 @@ static bool Init(HINSTANCE hInst) {
     D3D11_VIEWPORT vp = { 0, 0, (float)sw, (float)sh, 0, 1 };
     g_ctx->RSSetViewports(1, &vp);
 
+    InitGpuTiming();  // best-effort; diagnostics still work without GPU queries
+
     if (!InitDuplication()) return false;
 
     // Bring up depth first as a 1x1 fallback so the pixel shader always has
@@ -745,6 +990,7 @@ static void Frame() {
     static uint32_t lastShmTs = 0;
     static int shmReads = 0, shmChanges = 0;
     frameCount++;
+    ResolveGpuTiming();
 
     // Lazy (re)connect to both shared-memory channels — either side may start late
     TryAttachShm();
@@ -760,6 +1006,70 @@ static void Frame() {
         shmReads++;
         if (ts != lastShmTs) { shmChanges++; lastShmTs = ts; }
     }
+
+    // One-Euro pre-filter on raw head pose (cm). The tracker already runs a
+    // Kalman stage, but residual sub-cm jitter is multiplied by the parallax
+    // shift magnitude and appears as visible "watery" ripple during motion.
+    // One-Euro lets us kill that still-held jitter hard without adding lag
+    // when the user actually moves (cutoff adapts with estimated velocity).
+    if (g_shmView) {
+        double t_sec = (double)GetTickCount() / 1000.0;
+        hx = OneEuroFilter(g_oeX, hx, t_sec);
+        hy = OneEuroFilter(g_oeY, hy, t_sec);
+        hz = OneEuroFilter(g_oeZ, hz, t_sec);
+
+        // Forward-prediction by the measured motion-to-photon latency. The
+        // filter gives us a low-noise velocity estimate (`dx_prev`) — use it
+        // to extrapolate where the head will be when the current frame lights
+        // up on the panel.  Clamped so that rapid direction reversals cannot
+        // over-shoot and create a counter-phase wobble.
+        hx += ClampAbs(OneEuroPredictedVelocity(g_oeX) * kPredictHorizonSec, kPredictMaxDeltaCm);
+        hy += ClampAbs(OneEuroPredictedVelocity(g_oeY) * kPredictHorizonSec, kPredictMaxDeltaCm);
+        hz += ClampAbs(OneEuroPredictedVelocity(g_oeZ) * kPredictHorizonSec, kPredictMaxDeltaCm);
+    }
+
+    // Drift correction: the camera is rarely perfectly centered on the user,
+    // so raw headX/headY can have a large static offset even at rest (10-20 cm
+    // is common).  Feeding that raw offset to the shader permanently shifts the
+    // parallax sample, making the overlay look like a "floating second screen."
+    //
+    // Fix: maintain an EMA of the user's "rest" position.  Parallax is applied
+    // relative to that baseline, so the overlay is transparent when the user is
+    // stationary and depth appears only when they move their head.
+    //
+    // Two-speed alpha:
+    //   • First 300 frames (~5 s at 60 fps): alpha=0.05 → fast convergence, EMA
+    //     reaches >99 % of rest position within ~2 seconds.
+    //   • After 300 frames: alpha=0.001 → very slow long-term drift so the
+    //     baseline adapts if the user repositions without ever restarting.
+    static float g_emaX = 0.0f, g_emaY = 0.0f;
+    static int   g_emaFrames = 0;
+    static bool  g_emaInit = false;
+
+    if (g_shmView) {
+        if (!g_emaInit) {
+            g_emaX = hx; g_emaY = hy;
+            g_emaInit = true;
+        }
+        const float alpha = (g_emaFrames < 300) ? 0.05f : 0.001f;
+        g_emaX = alpha * hx + (1.0f - alpha) * g_emaX;
+        g_emaY = alpha * hy + (1.0f - alpha) * g_emaY;
+        g_emaFrames++;
+
+        if (g_emaFrames == 300)
+            Log("DriftEMA calibrated: restX=%.2f restY=%.2f (will now use relative head position)", g_emaX, g_emaY);
+    }
+
+    // Relative displacement from rest — what the shader actually uses.
+    float dx = g_emaInit ? (hx - g_emaX) : 0.0f;
+    float dy = g_emaInit ? (hy - g_emaY) : 0.0f;
+
+    // Soft hysteretic deadzone: below g_deadzoneCm output is 0, above 2·dz
+    // output is the raw displacement, and between a smoothstep re-engages
+    // parallax gradually. A hard "if < dz then 0" would snap by dz·parallax
+    // at the threshold — visible as a pop when the user shifts slightly.
+    dx = SoftDeadzone(dx, g_deadzoneCm);
+    dy = SoftDeadzone(dy, g_deadzoneCm);
 
     // Test-wobble disabled — rendering pipeline confirmed working.
     // Re-enable by setting TEST_WOBBLE=true to diagnose without tracker.
@@ -825,11 +1135,11 @@ static void Frame() {
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
         else                            shmStatus = "LIVE";
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
-            "depth[total=%llu %dHz] head=(%.2f,%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
+            "depth[total=%llu %dHz] gpu_ms=%.3f head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
             frameCount, acquireOk, acquireTimeout, acquireLost, acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
-            (unsigned long long)infNow, depthHz,
-            hx - wobble, hy, hz, wobble, g_strength, g_virtualDepth, g_hasFrame ? 1 : 0);
+            (unsigned long long)infNow, depthHz, g_lastGpuMs,
+            hx - wobble, hy, hz, g_emaX, g_emaY, dx - wobble, dy, wobble, g_strength, g_virtualDepth, g_hasFrame ? 1 : 0);
     }
 
     // Don't render until we have at least one real frame
@@ -839,35 +1149,48 @@ static void Frame() {
         return;
     }
 
-    // Update constant buffer
+    // Update constant buffer — use relative (dx, dy) so the parallax is zero
+    // at the user's rest position and only responds to head movement.
+    // hz stays absolute: the physics formula needs the real eye-to-screen distance.
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    float cropX0    = g_depth ? g_depth->depth_crop_x0_uv() : 0.0f;
+    float cropW     = g_depth ? g_depth->depth_crop_w_uv()  : 1.0f;
+    float depthBlend = g_depth ? g_depth->depth_blend() : 1.0f;
     CBuf cb = {
-        hx, hy, hz,
+        dx, dy, hz,
         g_strengthX, g_strengthY, g_screenW, g_screenH, g_virtualDepth,
         g_debugDepth ? 1.0f : 0.0f,
         g_depthGamma, g_focusRadius, (float)g_depthCurve,
+        cropX0, cropW, depthBlend, 0.0f,
     };
     memcpy(mapped.pData, &cb, sizeof(cb));
     g_ctx->Unmap(g_cb, 0);
+
+    // Advance depth blend counter once per render frame.
+    // This moves blend_t from 0→1 over kBlendFrames frames after each new
+    // inference, hiding the 10 Hz update rate at render rate.
+    if (g_depth) g_depth->advance_blend();
 
     // Draw fullscreen quad
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
     g_ctx->VSSetShader(g_vs, nullptr, 0);
     g_ctx->PSSetShader(g_ps, nullptr, 0);
     g_ctx->PSSetConstantBuffers(0, 1, &g_cb);
-    // Bind scene (t0) + depth (t1). Depth comes from the real inferencer when
-    // it's online, else the 1x1 zero-depth fallback so the shader sampling at
-    // t1 is always safe.
-    ID3D11ShaderResourceView* depthSrv =
-        (g_depth ? g_depth->depth_srv() : g_fallbackSrv);
-    ID3D11ShaderResourceView* srvs[2] = { g_srv, depthSrv };
-    g_ctx->PSSetShaderResources(0, 2, srvs);
+    // Bind scene (t0) + depth latest (t1) + depth previous (t2).
+    // The shader lerps t1/t2 using depthBlend to hide the 10 Hz inference
+    // rate. Fallback SRV is used at both depth slots when depth is offline.
+    ID3D11ShaderResourceView* depthSrv     = g_depth ? g_depth->depth_srv()      : g_fallbackSrv;
+    ID3D11ShaderResourceView* depthPrevSrv = g_depth ? g_depth->depth_prev_srv() : g_fallbackSrv;
+    ID3D11ShaderResourceView* srvs[3] = { g_srv, depthSrv, depthPrevSrv };
+    g_ctx->PSSetShaderResources(0, 3, srvs);
     g_ctx->PSSetSamplers(0, 1, &g_smp);
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    BeginGpuTiming();
     g_ctx->Draw(4, 0);
+    EndGpuTiming();
 
-    // Screenshot: capture back buffer to BMP before Present() so the texture
+    // Screenshot: capture back buffer to PNG before Present() so the texture
     // is still valid.  Flag is set by Ctrl+Shift+S hotkey.
     if (g_wantScreenshot) {
         g_wantScreenshot = false;
@@ -895,7 +1218,7 @@ static void Frame() {
                     if (sl) *(sl + 1) = L'\0';
                     wchar_t wpath[MAX_PATH];
                     swprintf_s(wpath, MAX_PATH,
-                        L"%sscreenshot_%04d%02d%02d_%02d%02d%02d%s.bmp",
+                        L"%sscreenshot_%04d%02d%02d_%02d%02d%02d%s.png",
                         exeDir,
                         t.wYear, t.wMonth, t.wDay,
                         t.wHour, t.wMinute, t.wSecond,
@@ -904,35 +1227,60 @@ static void Frame() {
                     WideCharToMultiByte(CP_UTF8, 0, wpath, -1, path, MAX_PATH, nullptr, nullptr);
 
                     UINT W = desc.Width, H = desc.Height;
-                    UINT rowBytes  = W * 4;          // BGRA, 4 bytes/px
-                    UINT imgBytes  = rowBytes * H;
 
-                    BITMAPFILEHEADER fh = {};
-                    fh.bfType    = 0x4D42;           // 'BM'
-                    fh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-                    fh.bfSize    = fh.bfOffBits + imgBytes;
-
-                    BITMAPINFOHEADER ih = {};
-                    ih.biSize        = sizeof(BITMAPINFOHEADER);
-                    ih.biWidth       = (LONG)W;
-                    ih.biHeight      = -(LONG)H;     // negative → top-down rows
-                    ih.biPlanes      = 1;
-                    ih.biBitCount    = 32;
-                    ih.biCompression = BI_RGB;
-                    ih.biSizeImage   = imgBytes;
-
-                    FILE* f = fopen(path, "wb");
-                    if (f) {
-                        fwrite(&fh, sizeof(fh), 1, f);
-                        fwrite(&ih, sizeof(ih), 1, f);
-                        const uint8_t* row = (const uint8_t*)sm.pData;
-                        for (UINT r = 0; r < H; ++r, row += sm.RowPitch)
-                            fwrite(row, rowBytes, 1, f);
-                        fclose(f);
-                        Log("Screenshot saved: %s (%ux%u)", path, W, H);
-                    } else {
-                        Log("Screenshot: fopen failed: %s", path);
+                    // Save PNG via WIC (Windows Imaging Component — no extra DLLs needed).
+                    // The back buffer is BGRA which matches GUID_WICPixelFormat32bppBGRA.
+                    bool saved = false;
+                    IWICImagingFactory* wic = nullptr;
+                    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                                   CLSCTX_INPROC_SERVER,
+                                                   IID_IWICImagingFactory, (void**)&wic))) {
+                        IWICStream* wicStream = nullptr;
+                        if (SUCCEEDED(wic->CreateStream(&wicStream)) &&
+                            SUCCEEDED(wicStream->InitializeFromFilename(wpath, GENERIC_WRITE))) {
+                            IWICBitmapEncoder* enc = nullptr;
+                            if (SUCCEEDED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc)) &&
+                                SUCCEEDED(enc->Initialize(wicStream, WICBitmapEncoderNoCache))) {
+                                IWICBitmapFrameEncode* frame = nullptr;
+                                IPropertyBag2* props = nullptr;
+                                if (SUCCEEDED(enc->CreateNewFrame(&frame, &props))) {
+                                    frame->Initialize(props);
+                                    frame->SetSize(W, H);
+                                    WICPixelFormatGUID fmt = GUID_WICPixelFormat32bppBGRA;
+                                    frame->SetPixelFormat(&fmt);
+                                    // WritePixels requires contiguous rows; copy if stride != W*4.
+                                    UINT rowBytes = W * 4;
+                                    if (sm.RowPitch == rowBytes) {
+                                        frame->WritePixels(H, rowBytes,
+                                                           rowBytes * H,
+                                                           (BYTE*)sm.pData);
+                                    } else {
+                                        std::vector<uint8_t> packed(rowBytes * H);
+                                        const uint8_t* src = (const uint8_t*)sm.pData;
+                                        for (UINT r = 0; r < H; ++r)
+                                            memcpy(packed.data() + r * rowBytes,
+                                                   src + r * sm.RowPitch, rowBytes);
+                                        frame->WritePixels(H, rowBytes,
+                                                           rowBytes * H,
+                                                           packed.data());
+                                    }
+                                    if (SUCCEEDED(frame->Commit()) &&
+                                        SUCCEEDED(enc->Commit())) {
+                                        saved = true;
+                                    }
+                                    if (props) props->Release();
+                                    frame->Release();
+                                }
+                                enc->Release();
+                            }
+                            wicStream->Release();
+                        }
+                        wic->Release();
                     }
+                    if (saved)
+                        Log("Screenshot saved: %s (%ux%u)", path, W, H);
+                    else
+                        Log("Screenshot: WIC PNG save failed: %s", path);
 
                     g_ctx->Unmap(stg, 0);
                 }
@@ -962,6 +1310,9 @@ static void Cleanup() {
     if (g_srv)     g_srv->Release();
     if (g_capTex)  g_capTex->Release();
     if (g_dup)     g_dup->Release();
+    SafeReleaseQuery(g_gpuEnd);
+    SafeReleaseQuery(g_gpuStart);
+    SafeReleaseQuery(g_gpuDisjoint);
     if (g_smp)     g_smp->Release();
     if (g_cb)      g_cb->Release();
     if (g_ps)      g_ps->Release();
@@ -976,6 +1327,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
     LogInit();
     Log("=== Glassless3D Overlay starting ===");
     Log("cmdline: '%s'", cmd ? cmd : "");
+
+    // WIC (used for Ctrl+Shift+S PNG screenshots) requires COM on this thread.
+    HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    Log("CoInitializeEx -> HRESULT=0x%08X", (unsigned)hrCo);
 
     // Single-instance guard — DuplicateOutput allows only one holder per output
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Global\\Glassless3DOverlay");
@@ -1024,6 +1379,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
     Cleanup();
     Log("Cleanup done");
     if (mutex) CloseHandle(mutex);
+    if (SUCCEEDED(hrCo)) CoUninitialize();
     LogClose();
     return 0;
 }
