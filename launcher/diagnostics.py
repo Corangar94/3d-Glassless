@@ -311,23 +311,27 @@ def _configured_camera_index(config: dict[str, object] | None) -> int:
 
 
 def _probe_camera(index: int) -> CameraProbe:
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-    try:
-        if not cap.isOpened():
-            return CameraProbe(index=index, opened=False, frame_ok=False)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            return CameraProbe(index=index, opened=True, frame_ok=False)
-        height, width = frame.shape[:2]
-        return CameraProbe(
-            index=index,
-            opened=True,
-            frame_ok=True,
-            width=int(width),
-            height=int(height),
-        )
-    finally:
-        cap.release()
+    opened_without_frame = False
+    for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY):
+        cap = cv2.VideoCapture(index, backend)
+        try:
+            if not cap.isOpened():
+                continue
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                opened_without_frame = True
+                continue
+            height, width = frame.shape[:2]
+            return CameraProbe(
+                index=index,
+                opened=True,
+                frame_ok=True,
+                width=int(width),
+                height=int(height),
+            )
+        finally:
+            cap.release()
+    return CameraProbe(index=index, opened=opened_without_frame, frame_ok=False)
 
 
 def _format_camera(camera: CameraProbe | None) -> str:

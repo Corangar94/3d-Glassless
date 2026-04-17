@@ -64,6 +64,44 @@ def test_collect_diagnostics_reports_camera_stream_status(tmp_path, monkeypatch)
     assert report.ready is True
 
 
+def test_probe_camera_falls_back_when_directshow_cannot_open(monkeypatch):
+    calls = []
+
+    class FakeCapture:
+        def __init__(self, index, backend):
+            self.index = index
+            self.backend = backend
+            calls.append((index, backend))
+
+        def isOpened(self):
+            return self.backend == diagnostics.cv2.CAP_MSMF
+
+        def read(self):
+            class Frame:
+                shape = (480, 640, 3)
+
+            return True, Frame()
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr(diagnostics.cv2, "VideoCapture", FakeCapture)
+
+    probe = diagnostics._probe_camera(3)
+
+    assert calls == [
+        (3, diagnostics.cv2.CAP_DSHOW),
+        (3, diagnostics.cv2.CAP_MSMF),
+    ]
+    assert probe == diagnostics.CameraProbe(
+        index=3,
+        opened=True,
+        frame_ok=True,
+        width=640,
+        height=480,
+    )
+
+
 def test_collect_diagnostics_marks_unstreamable_camera_not_ready(tmp_path, monkeypatch):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("camera:\n  index: 4\n", encoding="utf-8")
