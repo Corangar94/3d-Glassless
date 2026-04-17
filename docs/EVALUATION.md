@@ -65,6 +65,14 @@ For frame-time captures, use `tracker.performance_evaluation`:
 - `classify_frame_pacing(metrics)` classifies pacing as `GOOD`, `WARN`, or
   `DANGER`
 
+For a CSV capture with `timestamp_ms,frame_time_ms` columns, run:
+
+```powershell
+python -m tracker.performance_benchmark path\to\timings.csv --target-fps 60
+```
+
+The command exits non-zero when frame pacing classifies as `DANGER`.
+
 Targets:
 
 - render loop should match the display refresh when possible
