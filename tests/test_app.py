@@ -3,7 +3,7 @@ import os
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from launcher.app import CONFIG_PATH, _is_first_run, _load_config
+from launcher.app import CONFIG_PATH, _is_first_run, _load_config, _parse_args
 
 
 @pytest.fixture(scope="module")
@@ -40,3 +40,16 @@ def test_config_path_uses_appdata():
     appdata = os.environ.get("APPDATA", ".")
     assert CONFIG_PATH.startswith(appdata)
     assert CONFIG_PATH.endswith("config.yaml")
+
+
+def test_parse_args_accepts_explicit_config_path():
+    args, qt_args = _parse_args(["--config", "config.yaml", "-platform", "offscreen"])
+
+    assert args.config == "config.yaml"
+    assert qt_args == ["-platform", "offscreen"]
+
+
+def test_parse_args_defaults_to_appdata_config():
+    args, _ = _parse_args([])
+
+    assert args.config == CONFIG_PATH
