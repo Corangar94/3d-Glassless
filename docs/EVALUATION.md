@@ -74,7 +74,9 @@ python scripts/import_depth_capture.py path\to\depth_screenshots path\to\capture
 
 For renderer experiments, `tracker.depth_reprojection.synthesize_views` provides
 a tested CPU reference path for generating mono, stereo, or quilt view stacks
-from an RGB image and normalized depth map.
+from an RGB image and normalized depth map. Pass `confidence_mask` when a depth
+source can identify low-confidence or disoccluded pixels; invalid samples are
+filled rather than reprojected as false geometry.
 
 To render a concrete stereo strip or quilt PNG from one RGB frame plus a `.npy`
 depth map:
