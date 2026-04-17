@@ -81,6 +81,12 @@ The command exits non-zero when frame pacing classifies as `DANGER`.
 Use `tracker.performance_capture.FrameTimingCsvWriter` for tools that need to
 write compatible captures.
 
+To combine depth and frame-pacing checks in one report:
+
+```powershell
+python -m tracker.evaluation_suite --depth-dir path\to\depth_frames --timing-csv path\to\timings.csv
+```
+
 Targets:
 
 - render loop should match the display refresh when possible

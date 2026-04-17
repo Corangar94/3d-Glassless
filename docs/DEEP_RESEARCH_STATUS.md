@@ -18,6 +18,7 @@ roadmap does not imply that hardware-dependent or policy-gated items are done.
 | Measure tracking jitter, loss, and reacquisition | `tracker.evaluation` computes metrics; `tracker.debug_monitor` shows rolling quality status. |
 | Provide operator diagnostics | Launcher Advanced tab opens the tracking quality monitor; troubleshooting docs describe diagnostics and overlay-log warnings. |
 | Add repeatable evaluation guidance | `docs/EVALUATION.md` defines tracking, depth, performance, comfort, and policy checks. |
+| Provide combined benchmark entry point | `tracker.evaluation_suite` runs depth and frame-pacing benchmarks together and returns a worst-case quality result. |
 | Keep WoW gated until explicit review | `tracker.feasibility_gate` provides a default closed WoW gate and CLI report. |
 
 ## Partially Implemented
