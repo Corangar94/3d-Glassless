@@ -57,7 +57,7 @@ Three processes collaborate via Windows Named Shared Memory in the primary flow:
 | Name | Size | Direction | Contents |
 |------|------|-----------|---------|
 | `G3D` | 16 bytes | Tracker → Overlay | `float x, y, z` (cm) + `uint32 timestamp_ms` |
-| `G3D_Settings` | 56 bytes | Launcher GUI → Overlay | All tuning parameters (see Section 5) |
+| `G3D_Settings` | 64 bytes | Launcher GUI -> Overlay | All tuning parameters (see Section 5) |
 | `FT_SharedMem` | 92 bytes | Tracker → ReShade addon / FreeTrack readers | Compatibility channel for experimental integrations |
 
 The overlay opens both `G3D` and `G3D_Settings` lazily on every frame — neither the tracker nor the GUI need to be running first. The overlay falls back gracefully to default values when either segment is absent.
@@ -93,10 +93,12 @@ z_cm     = focal_px * real_ipd_cm / ipd_px
 ```
 Where `ipd_px` is the pixel distance between iris centers.
 
-**XY estimation (offset from screen center):**
+**XY estimation (physical offset from camera optical axis):**
 ```
-x_cm = (nose_x_norm - 0.5) * screen_width_cm
-y_cm = -((nose_y_norm - 0.5) * screen_height_cm)   # Y flipped: up is positive
+phys_half_w = z_cm * tan(camera_fov_deg / 2)
+phys_half_h = phys_half_w / (image_width / image_height)
+x_cm = -((nose_x_norm - 0.5) * 2 * phys_half_w)    # webcam X is mirrored
+y_cm = -((nose_y_norm - 0.5) * 2 * phys_half_h)    # Y flipped: up is positive
 ```
 
 ### Coordinate System
@@ -255,21 +257,26 @@ Near objects appear **bright**, far objects appear **dark**. This is standard di
 - **Output shape:** `[1, 518, 518]` or `[1, 1, 518, 518]` — both handled
 - **Backend:** ONNX Runtime + DirectML execution provider (GPU, device 0)
 
-### Letterbox Preprocessing (Critical for Ultrawide Monitors)
+### Center-Crop Letterbox Preprocessing (Critical for Ultrawide Monitors)
 
-Naively squashing the full desktop to 518×518 would distort a 5120×1440 (32:9) monitor by a 3.56× horizontal-vs-vertical factor, destroying depth map quality.
+Naively squashing the full desktop to 518x518 would distort a 5120x1440
+(32:9) monitor by a 3.56x horizontal-vs-vertical factor. Pure letterboxing
+without cropping also feeds the model a thin 518x145 content strip, which
+produces weak/flat depth.
 
-Instead, the capture is scaled uniformly so the **larger dimension** fits exactly within 518 pixels, then centered in the 518×518 frame. The bars are filled with `0.0f` — which equals the ImageNet-normalized mean grey, a neutral value for the model.
+Instead, the capture is first center-cropped to at most 16:9, then scaled
+uniformly into the 518x518 model input. The bars are filled with `0.0f`, which
+equals ImageNet-normalized mean grey, a neutral value for the model.
 
 ```
-Ultrawide example (5120×1440):
-  scale   = min(518/5120, 518/1440) = 0.3597
-  lb_w    = round(5120 * 0.3597) = 518   (full width, no bars)
-  lb_h    = round(1440 * 0.3597) = 145
+Ultrawide example (5120x1440):
+  crop_w  = min(5120, 1440 * 16/9) = 2560
+  crop_x0 = (5120 - 2560) / 2 = 1280
+  scale   = min(518/2560, 518/1440) = 0.2023
+  lb_w    = round(2560 * 0.2023) = 518
+  lb_h    = round(1440 * 0.2023) = 291
   lb_off_x = (518 - 518) / 2 = 0
-  lb_off_y = (518 - 145) / 2 = 186
-  → content occupies rows 186..330 of the 518×518 frame
-  → rows 0..185 and 331..517 are padding (0.0f)
+  lb_off_y = (518 - 291) / 2 = 113
 ```
 
 `preprocess()` performs nearest-neighbor downsampling from the captured full-res `BGRA8` staging texture directly into the NCHW float32 tensor, applying ImageNet normalization per channel:
@@ -284,11 +291,13 @@ b_norm = (b/255 - 0.406) / 0.225
 The ORT inference call (`session->Run(...)`) takes roughly 100 ms on a mid-range GPU. Blocking `Present()` for 100 ms would cap the overlay at 10 fps.
 
 Architecture:
-- `run()` (called from the main render thread) does the fast `GPU→CPU` staging map + `preprocess()`, then hands the `float32` tensor to the worker thread via a mutex-guarded swap and returns immediately.
-- The **worker thread** runs `session->Run()`, then `postprocess()`, and publishes the result back.
-- The main thread drains any finished result (an fp16 upload buffer) from the worker on the **next** call to `run()` and issues `UpdateSubresource` to the depth texture.
+- `run()` first drains any finished worker result and uploads it to the current depth texture.
+- If the worker is still busy, `run()` skips the expensive desktop readback/map entirely and returns.
+- If the worker is idle, `run()` performs `GPU -> CPU` staging map, preprocesses the latest frame, hands the tensor to the worker via a mutex-guarded swap, and returns immediately.
+- The worker thread runs `session->Run()`, then `postprocess()`, and publishes the result back.
+- The overlay keeps previous/current depth textures and interpolates between them at render rate with `depth_blend()`.
 
-**Frame-drop policy:** If the worker is still busy when a new frame arrives, the new preprocessed input **overwrites** the pending input. The worker always processes the freshest available input. This prevents a growing backlog and keeps latency bounded at ~100 ms (one inference cycle), never more.
+**Frame-skip policy:** Do not queue depth inputs and do not read back frames while the worker is busy. This avoids a 60 Hz `D3D11_MAP_READ` stall when inference is only completing at a much lower cadence.
 
 ### Postprocessing Pipeline (Worker Thread)
 
@@ -301,16 +310,10 @@ After `session->Run()` returns a raw float32 depth map:
 
 Previous approach (per-frame min/max) caused visible "pulsing": a single bright or dark outlier pixel shifted the entire scene's depth.
 
-**Step 2 — EMA temporal smoothing:**
-```cpp
-constexpr float kAlpha = 0.2f;
-new_norm[i] = kAlpha * new_norm[i] + (1.0f - kAlpha) * prev_norm[i];
-```
-New frame weighted at 20%, prior history at 80%. This trades ~400 ms lag (4 inference cycles at 10 Hz) for substantially reduced "watery shimmer" from frame-to-frame depth flicker at object edges.
+**Step 2 — Edge-aware temporal smoothing:**
+Per-pixel EMA is applied in disparity space with higher update weight near real motion/depth changes and lower update weight for still pixels. This suppresses "watery shimmer" without locking moving edges for multiple inference cycles.
 
-`prev_norm` is saved **before** the spatial filter below, so blur does not compound across frames into an increasingly smeared map.
-
-**Step 3 — 3×3 median filter:**
+**Step 3 — 3x3 median filter:**
 Applied to remove salt-and-pepper outliers from the model's raw predictions.
 
 Why median rather than Gaussian blur:
@@ -318,7 +321,10 @@ Why median rather than Gaussian blur:
 - A max/dilation filter pushes foreground depth onto adjacent background pixels; those pixels then get warped with foreground parallax, producing a ghost copy of each foreground edge (the "doubling" artifact).
 - Median preserves edge positions exactly: the median of a 3×3 patch straddling an edge is determined by whichever side has 5+ pixels, leaving the edge where the model placed it.
 
-**Step 4 — Pack to fp16:**
+**Step 4 — Optional adaptive contrast:**
+Quality and balanced modes expand low-contrast depth maps toward a target standard deviation. Fast mode skips this CPU pass.
+
+**Step 5 — Pack to fp16:**
 The normalized float32 values are packed to `uint16_t` (IEEE 754 half-precision) for upload to the `R16F` GPU texture via a custom software `float_to_half()` (round-to-nearest-even). The GPU-side texture is updated with `UpdateSubresource`.
 
 ---
@@ -343,11 +349,11 @@ Python format string: `"<fffI"` (16 bytes)
 ### G3D_Settings (Live Tuning)
 
 **Named object:** `G3D_Settings`  
-**Size:** 60 bytes  
+**Size:** 64 bytes  
 **Owner:** Launcher `SharedSettingsWriter` (one writer, created when `MainWindow` opens)  
 **Readers:** Overlay `overlay.cpp` (reads every frame), `TrackerThread` (reads per frame for `smoothing_alpha` and `deadzone_mm`)
 
-Python format string: `"<fffffIfffffffII"` (60 bytes)
+Python format string: `"<fffffIfffffffIII"` (64 bytes)
 
 | Offset | Type | Field | Default | Notes |
 |--------|------|-------|---------|-------|
@@ -365,7 +371,8 @@ Python format string: `"<fffffIfffffffII"` (60 bytes)
 | 44 | float32 | smoothing_alpha | 0.1 | Kalman measurement noise r |
 | 48 | float32 | deadzone_mm | 5.0 | XY deadzone radius in mm |
 | 52 | uint32 | display_backend | 0 | 0=desktop, 1=stereo, 2=quilt |
-| 56 | uint32 | version | monotonic | Incremented on every write |
+| 56 | uint32 | depth_mode | 1 | 0=quality, 1=balanced, 2=fast |
+| 60 | uint32 | version | monotonic | Incremented on every write |
 
 The overlay's `Settings` struct in `overlay.cpp` must stay byte-for-byte identical to this layout. The `#pragma pack(push, 1)` directive is required.
 

@@ -12,7 +12,9 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - Tracker writes `G3D` and `FT_SharedMem`
 - Launcher starts tracker and overlay
 - Overlay captures the desktop and runs monocular depth inference
+- Overlay depth inference has quality/balanced/fast modes, async worker inference, render-rate depth blending, and center-crop handling for ultrawide displays
 - ReShade tooling still exists in the repo, but it should no longer define the main product story
+- Video-Depth-Anything export is available as an optional offline/quality-benchmark tool, not the default low-latency runtime
 - Deep research implementation status is tracked in `docs/DEEP_RESEARCH_STATUS.md`
 
 ## Milestone 1: Calibration And Tracking Reliability
@@ -39,6 +41,7 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 ## Milestone 4: Performance Hardening
 
 - inference cadence
+- selectable depth performance mode
 - frame pacing
 - GPU/CPU pipeline profiling
 
