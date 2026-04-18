@@ -6,6 +6,7 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from launcher import diagnostics
 from launcher.mainwindow import MainWindow
 
 CONFIG = {
@@ -63,6 +64,9 @@ def test_mainwindow_shows_overlay_first_runtime_cockpit(window):
     assert "Backend" in window._backend_tile.text()
     assert "Camera 0" in window._camera_tile.text()
     assert "Overlay" in window._overlay_tile.text()
+    assert "SHM" in window._shm_tile.text()
+    assert "Depth" in window._depth_tile.text()
+    assert "Capture" in window._capture_tile.text()
 
 
 def test_mainwindow_exposes_operator_action_buttons(window):
@@ -117,6 +121,116 @@ def test_unknown_comfort_preset_is_ignored(window):
     window._apply_comfort_preset("missing")
 
     assert window._settings == before
+
+
+def test_runtime_health_updates_from_overlay_summary(window):
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=0,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=8,
+        head_z_cm=58.5,
+        has_frame=True,
+    )
+
+    window._apply_runtime_health(summary)
+
+    assert "LIVE 7/s" in window._shm_tile.text()
+    assert "8 Hz" in window._depth_tile.text()
+    assert "Frame OK" in window._capture_tile.text()
+    assert "Depth OK" in window._comfort_status.text()
+
+
+def test_runtime_health_warns_and_applies_safe_when_depth_rate_low(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=0,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=4,
+        head_z_cm=58.5,
+        has_frame=True,
+    )
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+    fake_thread = MagicMock()
+    fake_thread.isRunning.return_value = True
+    win._thread = fake_thread
+
+    win._apply_runtime_health(summary)
+
+    assert "LOW" in win._depth_tile.text()
+    assert win._settings.strength_y == pytest.approx(0.30)
+    assert "Safe preset applied automatically" in win._comfort_status.text()
+
+
+def test_low_depth_safe_fallback_runs_once(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=0,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=4,
+        head_z_cm=58.5,
+        has_frame=True,
+    )
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+    fake_thread = MagicMock()
+    fake_thread.isRunning.return_value = True
+    win._thread = fake_thread
+    win._auto_safe_applied = False
+    with patch.object(win, "_apply_comfort_preset") as apply:
+        win._apply_runtime_health(summary)
+        win._apply_runtime_health(summary)
+
+    apply.assert_called_once_with("safe", reason="low_depth")
+
+
+def test_startup_runtime_health_does_not_auto_persist_safe_from_old_log(qapp, tmp_path):
+    import yaml
+
+    cfg_path = str(tmp_path / "config.yaml")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump({"overlay": {"head_dist_cm": 81.0}}, f)
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+
+    win._apply_runtime_health(
+        diagnostics.OverlayRuntimeSummary(
+            frame_count=120,
+            acq_ok=118,
+            acq_timeout=2,
+            acq_lost=0,
+            acq_other=0,
+            shm_status="LIVE",
+            shm_changes_per_sec=7,
+            depth_total=28,
+            depth_hz=4,
+            head_z_cm=58.5,
+            has_frame=True,
+        )
+    )
+
+    with open(cfg_path, encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["head_dist_cm"] == pytest.approx(81.0)
+    assert win._auto_safe_applied is False
 
 
 def test_mainwindow_xyz_labels_update_on_signal(window):

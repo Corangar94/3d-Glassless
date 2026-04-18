@@ -9,7 +9,7 @@ from typing import Optional
 import dataclasses
 import logging
 import yaml
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QPixmap
 
 _log = logging.getLogger(__name__)
@@ -32,6 +32,11 @@ from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
 from tracker.display_backends import backend_code
 from launcher.presets import list_presets, save_preset, load_preset, delete_preset
 from launcher.calibration import detect_screen_cm, measure_head_distance_or_none
+from launcher.diagnostics import (
+    OverlayRuntimeSummary,
+    _find_overlay_log,
+    _latest_overlay_summary,
+)
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
 from launcher.tracker_process import TrackerProcess
@@ -60,6 +65,7 @@ _DARK_BG = "#08110f"
 _TITLE_BG = "#10231f"
 _CARD_BG = "#132b25"
 _ACCENT = "#f0c15a"
+_DEPTH_HZ_WARN = 6
 
 _COMFORT_PRESETS = {
     "safe": {
@@ -108,6 +114,7 @@ class MainWindow(QMainWindow):
         self._overlay = OverlayProcess()
         self._debug_monitor_proc: Optional[subprocess.Popen[bytes]] = None
         self._drag_pos: Optional[QPoint] = None
+        self._auto_safe_applied = False
 
         self._settings_writer = SharedSettingsWriter()
         trk = config.get("tracking", {})
@@ -145,6 +152,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_mode()
         self._on_status("stopped")
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(2000)
+        self._health_timer.timeout.connect(self._refresh_runtime_health)
+        self._health_timer.start()
+        self._refresh_runtime_health()
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -200,6 +212,15 @@ class MainWindow(QMainWindow):
         ):
             status_row.addWidget(tile)
         layout.addLayout(status_row)
+
+        health_row = QHBoxLayout()
+        health_row.setSpacing(10)
+        self._shm_tile = self._status_tile("SHM", "Waiting")
+        self._depth_tile = self._status_tile("Depth", "Waiting")
+        self._capture_tile = self._status_tile("Capture", "Waiting")
+        for tile in (self._shm_tile, self._depth_tile, self._capture_tile):
+            health_row.addWidget(tile)
+        layout.addLayout(health_row)
 
         mid_row = QHBoxLayout()
         mid_row.setSpacing(12)
@@ -467,6 +488,47 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_tracker_tile"):
             self._tracker_tile.setText(f"Tracker\n{text.replace('● ', '').replace('⟳ ', '').replace('✕ ', '')}")
 
+    def _refresh_runtime_health(self) -> None:
+        summary = self._read_overlay_summary()
+        self._apply_runtime_health(summary)
+
+    def _read_overlay_summary(self) -> OverlayRuntimeSummary | None:
+        overlay_log = _find_overlay_log(None)
+        return _latest_overlay_summary(overlay_log) if overlay_log else None
+
+    def _apply_runtime_health(self, summary: OverlayRuntimeSummary | None) -> None:
+        if summary is None:
+            self._shm_tile.setText("SHM\nWaiting")
+            self._depth_tile.setText("Depth\nWaiting")
+            self._capture_tile.setText("Capture\nWaiting")
+            return
+
+        self._shm_tile.setText(f"SHM\n{summary.shm_status} {summary.shm_changes_per_sec}/s")
+        depth_status = f"{summary.depth_hz} Hz"
+        if summary.depth_hz < _DEPTH_HZ_WARN:
+            depth_status = f"LOW {depth_status}"
+        self._depth_tile.setText(f"Depth\n{depth_status}")
+        self._capture_tile.setText(
+            "Capture\nFrame OK" if summary.has_frame else "Capture\nNo frame"
+        )
+
+        if (
+            summary.depth_hz < _DEPTH_HZ_WARN
+            and not self._auto_safe_applied
+            and self._tracker_is_running()
+        ):
+            self._auto_safe_applied = True
+            self._apply_comfort_preset("safe", reason="low_depth")
+            return
+
+        if summary.depth_hz >= _DEPTH_HZ_WARN and hasattr(self, "_comfort_status"):
+            self._comfort_status.setText(
+                f"Depth OK: {summary.depth_hz} Hz, SHM {summary.shm_changes_per_sec}/s"
+            )
+
+    def _tracker_is_running(self) -> bool:
+        return bool(self._thread is not None and self._thread.isRunning())
+
     # ── Drag to move ───────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event: object) -> None:
@@ -697,7 +759,7 @@ class MainWindow(QMainWindow):
         self._settings = self._snapshot_settings()
         self._settings_writer.write(self._settings)
 
-    def _apply_comfort_preset(self, preset_id: str) -> None:
+    def _apply_comfort_preset(self, preset_id: str, reason: str = "manual") -> None:
         preset = _COMFORT_PRESETS.get(preset_id)
         if preset is None:
             return
@@ -724,9 +786,14 @@ class MainWindow(QMainWindow):
         self._on_settings_change()
         self._on_save_config()
         label = str(preset["label"])
-        self._comfort_status.setText(
-            f"{label} preset applied: Y strength {self._settings.strength_y:.2f}"
-        )
+        if reason == "low_depth":
+            self._comfort_status.setText(
+                f"Safe preset applied automatically: depth < {_DEPTH_HZ_WARN} Hz"
+            )
+        else:
+            self._comfort_status.setText(
+                f"{label} preset applied: Y strength {self._settings.strength_y:.2f}"
+            )
 
     def _on_camera_tilt_change(self, value: float) -> None:
         self._camera_tilt_deg = float(value)

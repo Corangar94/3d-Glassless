@@ -17,6 +17,7 @@ def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
 
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: exe)
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: model)
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: None)
     monkeypatch.setattr(
         diagnostics,
         "_probe_camera",
@@ -46,6 +47,7 @@ def test_collect_diagnostics_reports_camera_stream_status(tmp_path, monkeypatch)
 
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: exe)
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: model)
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: None)
     monkeypatch.setattr(
         diagnostics,
         "_probe_camera",
@@ -107,6 +109,7 @@ def test_collect_diagnostics_marks_unstreamable_camera_not_ready(tmp_path, monke
     cfg.write_text("camera:\n  index: 4\n", encoding="utf-8")
     monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
     monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: None)
     monkeypatch.setattr(
         diagnostics,
         "_probe_camera",
