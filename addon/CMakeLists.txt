@@ -18,5 +18,11 @@ set_target_properties(Glassless3D PROPERTIES
     SUFFIX ".addon"
     PREFIX "")
 
-target_compile_options(Glassless3D PRIVATE $<$<CONFIG:Release>:/O2 /GL>)
-target_link_options(Glassless3D   PRIVATE $<$<CONFIG:Release>:/LTCG>)
+# Optimisation flags — MSVC and GCC/MinGW both supported
+if(MSVC)
+    target_compile_options(Glassless3D PRIVATE $<$<CONFIG:Release>:/O2 /GL>)
+    target_link_options(Glassless3D   PRIVATE $<$<CONFIG:Release>:/LTCG>)
+else()
+    target_compile_options(Glassless3D PRIVATE $<$<CONFIG:Release>:-O2 -flto>)
+    target_link_options(Glassless3D   PRIVATE $<$<CONFIG:Release>:-flto>)
+endif()

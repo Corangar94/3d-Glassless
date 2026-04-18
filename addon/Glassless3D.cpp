@@ -86,10 +86,10 @@ BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID)
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
-        reshade::register_event<reshade::addon_event::begin_effects>(&on_begin_effects);
+        reshade::register_event<reshade::addon_event::reshade_begin_effects>(&on_begin_effects);
         break;
     case DLL_PROCESS_DETACH:
-        reshade::unregister_event<reshade::addon_event::begin_effects>(&on_begin_effects);
+        reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(&on_begin_effects);
         CloseSharedMemory();
         break;
     }

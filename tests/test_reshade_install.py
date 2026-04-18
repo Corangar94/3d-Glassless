@@ -5,7 +5,7 @@ from unittest.mock import patch
 from launcher.reshade_install import install_steps, install, InstallError
 
 
-_ADDON_BUILD_SIZE = 4_155_904  # bytes expected by reshade_install size guard
+_ADDON_BUILD_SIZE = 4_155_904  # bytes expected by the experimental backend size guard
 
 
 def _make_bundle(tmp_path):
@@ -36,7 +36,7 @@ def test_install_steps_copies_reshade_dll(tmp_path):
     os.makedirs(game_dir)
     with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
         list(install_steps(game_dir))
-    # reshade_install copies ReShade64.dll as dxgi.dll (DX12 proxy for WoW)
+    # The experimental backend copies ReShade64.dll as dxgi.dll (DX12 proxy for WoW)
     assert os.path.exists(os.path.join(game_dir, "dxgi.dll"))
 
 

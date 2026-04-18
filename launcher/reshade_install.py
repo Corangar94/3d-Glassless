@@ -1,4 +1,4 @@
-"""Copy bundled ReShade assets into a game directory."""
+"""Install the experimental ReShade backend into a game directory."""
 from __future__ import annotations
 
 import json
@@ -31,15 +31,33 @@ def _bundle_dir() -> str:
 def install_steps(
     game_dir: str, profile_name: str = "wow"
 ) -> Generator[str, None, None]:
-    """Copy bundled assets into game_dir, yielding each step name on success.
+    """Install the experimental backend assets into game_dir.
 
     Raises InstallError if any step fails.
     """
     base = _bundle_dir()
 
-    # Step 1: ReShade DLL
+    # Step 1: Experimental ReShade DLL
     src_dll = os.path.join(base, "ReShade64.dll")
-    dst_dll = os.path.join(game_dir, "d3d11.dll")
+    # Use `dxgi.dll` for this experimental DX12-oriented backend. Other proxy
+    # names can attach to the wrong swapchain or are not supported by ReShade.
+    dst_dll = os.path.join(game_dir, "dxgi.dll")
+    # Guard: the *standard* ReShade 5.9.2 DLL is 3,977,952 bytes and silently
+    # rejects external addons with "limited add-on functionality" in its log.
+    # The *addon* build is 4,155,904 bytes. If we somehow end up with the
+    # wrong DLL bundled, fail loudly here instead of confusing the user later.
+    _ADDON_BUILD_SIZE = 4_155_904
+    try:
+        actual_size = os.path.getsize(src_dll)
+    except OSError as e:
+        raise InstallError("Copying ReShade", f"cannot stat {src_dll}: {e}")
+    if actual_size != _ADDON_BUILD_SIZE:
+        raise InstallError(
+            "Copying ReShade",
+            f"bundled ReShade64.dll is {actual_size} bytes, expected "
+            f"{_ADDON_BUILD_SIZE} (the addon build). Re-run "
+            f"scripts/bootstrap.py after deleting ReShade64.dll.",
+        )
     try:
         shutil.copy2(src_dll, dst_dll)
     except OSError as e:
@@ -59,7 +77,7 @@ def install_steps(
         raise InstallError("Copying shaders", str(e))
     yield "Copying shaders"
 
-    # Step 3: ReShade.ini
+    # Step 3: Experimental ReShade.ini
     try:
         _write_reshade_ini(game_dir, profile_name, base)
     except (OSError, ValueError) as e:
@@ -77,7 +95,7 @@ def install_steps(
 
 
 def install(game_dir: str, profile_name: str = "wow") -> None:
-    """Copy bundled assets into game_dir. Raises InstallError on failure."""
+    """Install the experimental backend into game_dir. Raises InstallError on failure."""
     for _ in install_steps(game_dir, profile_name):
         pass
 
@@ -99,12 +117,37 @@ def _write_reshade_ini(game_dir: str, profile_name: str, base: str) -> None:
         with open(ini_path) as f:
             lines = f.readlines()
 
+    protected_sections = {"[PREPROCESSOR]", "[Glassless3D.fx]", "[RESHADE]"}
     kept = [
         ln for ln in lines
         if ln.split("=", 1)[0].strip() not in all_keys
-        and ln.strip() not in ("[PREPROCESSOR]", "[Glassless3D.fx]")
+        and ln.strip() not in protected_sections
+        and not ln.strip() in ("EffectSearchPaths", "TextureSearchPaths")
     ]
-    block: list[str] = []
+    # Strip any existing EffectSearchPaths / TextureSearchPaths lines too
+    kept = [
+        ln for ln in kept
+        if not ln.startswith("EffectSearchPaths=")
+        and not ln.startswith("TextureSearchPaths=")
+    ]
+    # Force Home (VK_HOME=36) as the overlay key — the launcher UI brands
+    # "press Home" for ReShade. ReShade defaults to F12 (123) which nobody
+    # will guess. Rewrite any existing KeyOverlay=... line in place.
+    rewrote_keyoverlay = False
+    for i, ln in enumerate(kept):
+        if ln.startswith("KeyOverlay="):
+            kept[i] = "KeyOverlay=36,0,0,0\n"
+            rewrote_keyoverlay = True
+            break
+    if not rewrote_keyoverlay:
+        # No existing [INPUT] section — prepend one so ReShade picks it up.
+        kept = ["[INPUT]\n", "KeyOverlay=36,0,0,0\n"] + kept
+
+    block: list[str] = [
+        "[RESHADE]\n",
+        r"EffectSearchPaths=.\reshade-shaders\Shaders" + "\n",
+        r"TextureSearchPaths=.\reshade-shaders\Textures" + "\n",
+    ]
     if depth_settings:
         block += ["[PREPROCESSOR]\n"] + [f"{k}={v}\n" for k, v in depth_settings.items()]
     if shader_defaults:

@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 addon/build/
+addon/build_mingw/
 vendor/
 *.addon
 *.dll
