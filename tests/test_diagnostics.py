@@ -438,6 +438,20 @@ def test_parse_overlay_summary_line_extracts_backend_when_present():
     assert summary.backend == 1
 
 
+def test_parse_overlay_summary_line_extracts_depth_mode_when_present():
+    line = (
+        "[15:26:00.371] Frame#3249300 acq[ok=3247868 timeout=1432 lost=0 other=0] "
+        "shm[LIVE reads=3249300 changes=369 (2/s) ts=80350123] "
+        "depth[total=116440 8Hz mode=fast] gpu_ms=0.42 backend=1 head=(-1.09,0.97,58.62) rest=(0.63,-0.38) "
+        "rel=(-1.72,1.35) wobble=0.00 strength=1.00 depth=30.00 hasFrame=1"
+    )
+
+    summary = diagnostics.parse_overlay_summary_line(line)
+
+    assert summary is not None
+    assert summary.depth_mode == "fast"
+
+
 def test_collect_diagnostics_includes_overlay_log_warnings(tmp_path, monkeypatch):
     log_path = tmp_path / "overlay.log"
     log_path.write_text(

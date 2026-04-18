@@ -115,6 +115,32 @@ def test_balanced_depth_preset_keeps_vertical_parallax_conservative(qapp, tmp_pa
     assert win._settings.virtual_depth_cm == pytest.approx(30.0)
 
 
+def test_mainwindow_publishes_configured_depth_performance_mode(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    config = {**CONFIG, "overlay": {"depth_performance_mode": "fast"}}
+
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=config, config_path=cfg_path)
+
+    assert win._settings.depth_mode == 2
+    assert win._depth_mode_combo.currentText() == "Fast depth"
+
+
+def test_depth_performance_mode_change_persists_name(qapp, tmp_path):
+    import yaml
+
+    cfg_path = str(tmp_path / "config.yaml")
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+
+    win._depth_mode_combo.setCurrentIndex(win._depth_mode_combo.findData(2))
+
+    assert win._settings.depth_mode == 2
+    with open(cfg_path, encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["depth_performance_mode"] == "fast"
+
+
 def test_unknown_comfort_preset_is_ignored(window):
     before = window._settings
 

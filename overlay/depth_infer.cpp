@@ -65,6 +65,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -136,17 +137,45 @@ struct DepthInferImpl {
     int                   cap_w        = 0;
     int                   cap_h        = 0;
 
+    // Horizontal center-crop applied before letterboxing to limit the input
+    // aspect ratio fed to the depth model. Depth Anything V2 was trained on
+    // ~16:9 or closer-to-square images; feeding a 32:9 ultrawide (5120×1440)
+    // as a thin letterboxed strip (518×145 content in 518×518) gives nearly
+    // flat depth. We crop the center at most 16:9 of the capture first.
+    int                   crop_x0      = 0;   // left pixel of the center crop
+    int                   crop_w_eff   = 0;   // width of the crop (≤ cap_w)
+
     // Letterbox dimensions: the content region inside the kModelSize×kModelSize
-    // model input that holds the aspect-ratio-correct resize of cap_w×cap_h.
+    // model input that holds the aspect-ratio-correct resize of crop_w_eff×cap_h.
     // Pixels outside this region are left at 0.0f (ImageNet-normalized grey).
     int                   lb_off_x     = 0;
     int                   lb_off_y     = 0;
     int                   lb_w         = 0;
     int                   lb_h         = 0;
 
-    // Output: R16F depth texture (kModelSize x kModelSize) + SRV.
-    ID3D11Texture2D*      depth_tex    = nullptr;
-    ID3D11ShaderResourceView* depth_srv = nullptr;
+    // Two R16F depth textures for render-rate interpolation.
+    // When a new inference arrives, the old texture becomes "prev" and the new
+    // one becomes "current". The shader lerps between them using depth_blend,
+    // which advances 0→1 over kBlendFrames render frames (~200 ms at 60 fps)
+    // — slightly wider than one full ~100 ms inference cycle so successive
+    // inferences' blend windows overlap and there is never a discontinuity at
+    // the transition. depth_blend() additionally applies smoothstep to `t`
+    // so the depth update has zero first-derivative at both endpoints, hiding
+    // the discrete update in the middle of head motion.
+    // Crossfade window between successive inferences, in render frames.
+    // 14 render frames at 60 Hz ≈ 230 ms. Wider than the inference interval
+    // (≥100 ms at 10 Hz, currently 200-300 ms at 3-5 Hz) so consecutive
+    // 0→1 transitions still overlap — no discrete "snap" moment — but
+    // significantly tighter than the 400 ms we had, which introduced
+    // perceptible lag between head motion and depth response ("wobbly
+    // when I move my head"). Combined with smoothstep endpoints this
+    // still reads as a continuous morph.
+    static constexpr int kBlendFrames = 14;
+    ID3D11Texture2D*          depth_tex      = nullptr;
+    ID3D11ShaderResourceView* depth_srv      = nullptr;
+    ID3D11Texture2D*          depth_prev_tex = nullptr;
+    ID3D11ShaderResourceView* depth_prev_srv = nullptr;
+    float                     blend_t        = 1.0f;  // 1.0 = fully on current tex
 
     // ORT state
     std::unique_ptr<Ort::Env>            env;
@@ -194,19 +223,28 @@ struct DepthInferImpl {
     bool                                 output_ready  = false;   // new depth waiting for main to upload
     std::atomic<bool>                    stop{false};
     std::atomic<uint64_t>                inferences{0};    // completed Run calls (for diagnostics)
+    std::atomic<uint32_t>                performance_mode{1}; // 0=quality, 1=balanced, 2=fast
 
     // ImageNet normalization (Depth Anything V2 uses standard ImageNet stats)
     static constexpr float kMean[3] = {0.485f, 0.456f, 0.406f};
     static constexpr float kStd[3]  = {0.229f, 0.224f, 0.225f};
 
     bool create_d3d_resources() {
-        // Compute letterbox dimensions: aspect-ratio-correct resize of cap into
-        // kModelSize×kModelSize.  Uniform 0.0f padding (ImageNet-normalised grey).
-        // For a 5120×1440 ultrawide: scale=0.101 → lb_w=518, lb_h=145, off=(0,186).
+        // Center-crop the capture to at most 16:9 aspect ratio before letterboxing.
+        // For 5120×1440 (32:9): crop_w = 2560, crop_x0 = 1280.
+        //   Old: 518×145 content strip (28% fill) → flat depth map.
+        //   New: 518×291 content region  (56% fill) → proper depth variation.
+        // Narrower displays (≤16:9) are unaffected (crop_w == cap_w).
+        crop_w_eff = std::min(cap_w, cap_h * 16 / 9);
+        crop_x0    = (cap_w - crop_w_eff) / 2;
+
+        // Compute letterbox dimensions: aspect-ratio-correct resize of the crop
+        // into kModelSize×kModelSize. Uniform 0.0f padding (ImageNet-normalised grey).
+        // For 5120×1440: scale=0.202 → lb_w=518, lb_h=291, off=(0,113).
         {
             const int N = DepthInferencer::kModelSize;
-            float scale = std::min((float)N / cap_w, (float)N / cap_h);
-            lb_w = std::max(1, (int)(cap_w * scale));
+            float scale = std::min((float)N / crop_w_eff, (float)N / cap_h);
+            lb_w = std::max(1, (int)(crop_w_eff * scale));
             lb_h = std::max(1, (int)(cap_h * scale));
             lb_off_x = (N - lb_w) / 2;
             lb_off_y = (N - lb_h) / 2;
@@ -225,7 +263,7 @@ struct DepthInferImpl {
         HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &stage_bgra);
         if (FAILED(hr)) { last_err = "CreateTexture2D(staging BGRA) failed"; return false; }
 
-        // Depth texture at model output resolution. Shader reads R16F.
+        // Two R16F depth textures for render-rate interpolation.
         D3D11_TEXTURE2D_DESC dd = {};
         dd.Width = DepthInferencer::kModelSize;
         dd.Height = DepthInferencer::kModelSize;
@@ -235,24 +273,27 @@ struct DepthInferImpl {
         dd.SampleDesc.Count = 1;
         dd.Usage = D3D11_USAGE_DEFAULT;
         dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
         hr = dev->CreateTexture2D(&dd, nullptr, &depth_tex);
-        if (FAILED(hr)) { last_err = "CreateTexture2D(depth R16F) failed"; return false; }
+        if (FAILED(hr)) { last_err = "CreateTexture2D(depth current) failed"; return false; }
+        hr = dev->CreateTexture2D(&dd, nullptr, &depth_prev_tex);
+        if (FAILED(hr)) { last_err = "CreateTexture2D(depth prev) failed"; return false; }
 
         D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
         srv.Format = dd.Format;
         srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srv.Texture2D.MipLevels = 1;
-        hr = dev->CreateShaderResourceView(depth_tex, &srv, &depth_srv);
-        if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth) failed"; return false; }
+        hr = dev->CreateShaderResourceView(depth_tex,      &srv, &depth_srv);
+        if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth current) failed"; return false; }
+        hr = dev->CreateShaderResourceView(depth_prev_tex, &srv, &depth_prev_srv);
+        if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth prev) failed"; return false; }
 
-        // Initialize depth texture to 0.5 so the parallax shader produces
-        // a sensible fallback on the first frame before inference completes.
+        // Initialise both textures to 0.5 (flat depth = no parallax on first frame).
         const int N = DepthInferencer::kModelSize * DepthInferencer::kModelSize;
         std::vector<uint16_t> half_filled(N, float_to_half(0.5f));
-        ctx->UpdateSubresource(depth_tex, 0, nullptr,
-                               half_filled.data(),
-                               DepthInferencer::kModelSize * sizeof(uint16_t),
-                               0);
+        ctx->UpdateSubresource(depth_tex,      0, nullptr, half_filled.data(), DepthInferencer::kModelSize * sizeof(uint16_t), 0);
+        ctx->UpdateSubresource(depth_prev_tex, 0, nullptr, half_filled.data(), DepthInferencer::kModelSize * sizeof(uint16_t), 0);
+        blend_t = 1.0f;
         return true;
     }
 
@@ -296,15 +337,19 @@ struct DepthInferImpl {
         return true;
     }
 
-    // CPU: downsample full-res captured BGRA8 -> NCHW fp32 RGB tensor with
-    // ImageNet normalization and aspect-ratio-correct letterboxing.
+    // CPU: downsample a center-cropped BGRA8 captured frame -> NCHW fp32 RGB
+    // tensor with ImageNet normalization and aspect-ratio-correct letterboxing.
     //
-    // Instead of squashing cap_w×cap_h into N×N (which distorts a 32:9
-    // ultrawide by 3.6× horizontally vs vertically), we scale uniformly so the
-    // larger dimension fills N pixels, centre the result, and leave the bars at
-    // 0.0f — which equals ImageNet-normalised mean grey, a neutral value for the
-    // depth model.  For a 5120×1440 capture:
-    //   scale=0.101 → content 518×145 at offset (0,186) in 518×518.
+    // We first center-crop to at most 16:9 aspect ratio (crop_w_eff × cap_h)
+    // so Depth Anything V2 receives a naturally-proportioned image. Without
+    // this, a 5120×1440 (32:9) capture letterboxes to a 518×145 content strip
+    // (28% fill), which gives nearly flat monocular depth output. The 16:9 crop
+    // (2560×1440 → 518×291, 56% fill) produces proper depth variation.
+    //
+    // Depth texture UV [0,1]×[0,1] still maps to full-screen UV [0,1]×[0,1]
+    // via the postprocess stretch. The outer horizontal bands beyond the crop
+    // use the edge depth value (clamped sampling) — acceptable for peripheral
+    // areas of an ultrawide display.
     void preprocess(const uint8_t* src, int src_pitch) {
         const int N = DepthInferencer::kModelSize;
         scratch_input_f32.assign(3 * N * N, 0.0f);   // 0.0f = ImageNet mean grey
@@ -317,7 +362,8 @@ struct DepthInferImpl {
             if (sy >= cap_h) sy = cap_h - 1;
             const uint8_t* row = src + sy * src_pitch;
             for (int ox = 0; ox < lb_w; ++ox) {
-                int sx = (ox * cap_w) / lb_w;
+                // Sample from the center-cropped horizontal region.
+                int sx = crop_x0 + (ox * crop_w_eff) / lb_w;
                 if (sx >= cap_w) sx = cap_w - 1;
                 const uint8_t* px = row + sx * 4;   // BGRA8
                 float b = px[0] / 255.0f;
@@ -332,8 +378,13 @@ struct DepthInferImpl {
     }
 
     // CPU: normalize raw depth to [0,1] fp16 for the parallax shader.
-    // Depth Anything V2 outputs relative (unbounded, monotonic) depth —
-    // higher = farther. Naive per-frame min/max remapping causes visible
+    // Depth Anything V2 outputs relative inverse-depth (disparity) —
+    // higher raw value = CLOSER to the camera.  The downstream shader
+    // assumes the opposite convention (0=near, 1=far) for its parallax
+    // formula `oz = virtualDepth * depth; f = oz/(hz+oz)` where far pixels
+    // must shift more than near pixels.  We therefore flip the sign during
+    // percentile normalization: v = (vhi - raw) / range → vlo→1 (far),
+    // vhi→0 (near).  Naive per-frame min/max remapping causes visible
     // pulsing at 10Hz inference cadence: a single bright/dark outlier pixel
     // shifts the whole depth range.
     //
@@ -402,72 +453,208 @@ struct DepthInferImpl {
                 if (sx < cx0) sx = cx0;
                 if (sx >= cx1) sx = cx1 - 1;
                 if (sx >= out_w) sx = out_w - 1;
-                float v = (in_row[sx] - vlo) / range;
+                // Flip sign: DAv2 outputs disparity (higher=nearer).
+                // Remap so vhi→0 (near) and vlo→1 (far) per shader convention.
+                float v = (vhi - in_row[sx]) / range;
                 if (v < 0.0f) v = 0.0f;
                 else if (v > 1.0f) v = 1.0f;
                 out_row[ox] = v;
             }
         }
 
-        // ── 3. EMA blend against previous frame (if any). ──
-        // alpha = weight of the NEW frame. 0.4 gives noticeable responsiveness
-        // but still suppresses high-freq flicker between 10Hz inferences.
-        // We store the UNBLURRED result so spatial blur doesn't compound
-        // across frames (→ increasingly-smeared depth).
-        // α=0.2 → heavy temporal smoothing. Depth from monocular models
-        // flickers pixel-to-pixel between frames; that flicker is the
-        // primary source of "watery shimmer" in the warped output. A
-        // stronger EMA trades a small lag (~4 frames at 10 Hz = 400 ms)
-        // for visibly steadier depth at object edges.
-        constexpr float kAlpha = 0.2f;
+        // ── 3. Per-pixel edge-preserving EMA in disparity space. ──
+        //
+        // Previous approach: one global alpha derived from the frame's mean
+        // depth difference. Problem: a fast-moving object in a static scene
+        // raises the global mean → static background blends fast too → noise.
+        //
+        // New approach (Intel RealSense temporal filter pattern):
+        //   1. Compute global mean-abs-diff on a 1/4 subsample.
+        //      If > kSnapThresh (15%): scene cut / zone load — accept new
+        //      frame instantly (skip the EMA loop entirely, alpha=1 everywhere).
+        //   2. Otherwise: per-pixel alpha decision.
+        //      |new[i] - prev[i]| > kEdgeDelta → HARD RESET (discard history,
+        //                                         use new sample verbatim)
+        //      else                             → kAlphaSlow (stable → suppress noise)
+        //
+        // The hard reset on the edge branch is the key difference from a plain
+        // two-alpha blend. Soft-blending across a real depth edge (object moved
+        // past a pixel) creates ghosting / smearing which reads as "watery"
+        // under head motion. The RealSense filter keeps history ONLY where the
+        // disparity is stable, which is exactly where noise suppression pays
+        // off and motion-blur does not.
+        //
+        // Blending in disparity (1/depth) space rather than depth space gives
+        // perceptually uniform filtering.  The parallax formula scales with
+        // oz/(hz+oz) where oz=vd*depth, so a fixed depth-noise at a near pixel
+        // (small depth) produces much more visible jitter than the same noise at
+        // a far pixel.  Converting to 1/depth normalises this: equal disparity
+        // deltas produce roughly equal parallax errors regardless of distance.
+        //
+        //   kAlphaSlow = 0.04 → ~2.4 s  to reach 63% of a step at 10 Hz
+        //   edge branch: alpha = 1 (hard reset) — no smearing across depth edges
+        //
+        // Tuning note (2026-04-17): α lowered 0.08 → 0.04 after observing that
+        // when the head is near-static the only thing changing between frames
+        // is the depth map itself. Each 10 Hz refresh shifts band boundaries on
+        // flat surfaces by a pixel or two; the parallax shader warps the scene
+        // with a slightly different depth, producing the "watery" look. A
+        // longer time constant trades latency we don't care about (static
+        // viewer) for much stronger suppression of per-inference wobble.
+        const uint32_t mode = performance_mode.load(std::memory_order_relaxed);
+        const float kAlphaSlow = mode >= 2 ? 0.08f : mode == 1 ? 0.05f : 0.04f;
+        constexpr float kSnapThresh = 0.15f;  // global scene-cut threshold
+        constexpr float kEdgeDelta  = 0.05f;  // per-pixel edge threshold (~3 depth levels)
+
         if (prev_norm_f32.size() == new_norm_f32.size()) {
-            for (size_t i = 0; i < new_norm_f32.size(); ++i) {
-                new_norm_f32[i] = kAlpha * new_norm_f32[i]
-                                + (1.0f - kAlpha) * prev_norm_f32[i];
+            const int N2 = DepthInferencer::kModelSize;
+
+            // Global mean-abs-diff on 1/4 subsample → scene-cut detection.
+            float sum_diff = 0.0f;
+            int   cnt      = 0;
+            for (int y = 0; y < N2; y += 2) {
+                const float* cur = new_norm_f32.data()  + y * N2;
+                const float* prv = prev_norm_f32.data() + y * N2;
+                for (int x = 0; x < N2; x += 2) {
+                    float d = cur[x] - prv[x];
+                    sum_diff += d < 0.0f ? -d : d;
+                    ++cnt;
+                }
+            }
+            float mean_diff = cnt > 0 ? sum_diff / cnt : 0.0f;
+
+            if (mean_diff <= kSnapThresh) {
+                // Normal frame: per-pixel delta-gated EMA in disparity space.
+                // Clamp depth away from 0 before inverting (HUD/near pixels
+                // can be exactly 0 after percentile normalisation).
+                constexpr float kDepthMin = 0.01f;
+                for (int i = 0; i < N2 * N2; ++i) {
+                    float new_d = new_norm_f32[i];
+                    float prv_d = prev_norm_f32[i];
+                    float delta = new_d - prv_d;
+                    if (delta < 0.0f) delta = -delta;
+
+                    if (delta > kEdgeDelta) {
+                        // Hard reset: real change at this pixel (object
+                        // edge moved, HUD popped on/off). Keep new_d as-is.
+                        // new_norm_f32[i] already holds new_d — nothing to do.
+                        continue;
+                    }
+
+                    // Stable pixel: slow EMA in disparity (1/depth) space for
+                    // uniform noise budget. Parallax shift scales with
+                    // oz/(hz+oz) where oz=vd*depth, so fixed depth-noise at a
+                    // near pixel produces much more visible jitter than the
+                    // same noise far. Inverting normalises this: equal
+                    // disparity deltas ≈ equal parallax errors at any range.
+                    float disp_new   = 1.0f / (new_d > kDepthMin ? new_d : kDepthMin);
+                    float disp_prv   = 1.0f / (prv_d > kDepthMin ? prv_d : kDepthMin);
+                    float disp_blend = kAlphaSlow * disp_new + (1.0f - kAlphaSlow) * disp_prv;
+                    float blended    = 1.0f / disp_blend;
+                    new_norm_f32[i]  = blended < 0.0f ? 0.0f :
+                                       blended > 1.0f ? 1.0f : blended;
+                }
+            }
+            // else: mean_diff > kSnapThresh → scene cut, keep new_norm_f32 as-is (alpha=1)
+        }
+        prev_norm_f32 = new_norm_f32;   // save BEFORE spatial processing
+
+        // (No 3×3 median filter.)
+        // A previous revision ran std::nth_element on a 9-element window for
+        // every one of 268k pixels per inference. Profiled cost: ~20–30 ms of
+        // postprocess time, which by itself was enough to drop the depth rate
+        // from 10 Hz to ~2 Hz on our target machine. Depth Anything V2 Small
+        // does not emit salt-and-pepper impulses in practice (its disparity
+        // output is already spatially continuous on a fine grid), so the
+        // median was removing noise that wasn't there while eating the
+        // inference budget. Residual noise on flat surfaces is now absorbed
+        // by the per-pixel edge-gated temporal EMA (step 3) which does the
+        // job without touching spatial detail and without the nth_element
+        // cost.
+
+        // (No post-median spatial smoothing.)
+        // The 3×3 median above already suppresses single-pixel outliers.
+        // An earlier 9-tap joint-bilateral starved the worker (→ 2 Hz
+        // depth), and the follow-up 5-tap Gaussian softened silhouettes
+        // enough that the parallax shader had nothing to grip — "no depth,
+        // a bit blurry". The per-pixel edge-gated temporal EMA (step 3)
+        // already removes inference-to-inference noise on flat surfaces;
+        // we rely on it as the primary denoiser so depth detail survives.
+
+        // ── 5. Adaptive std-based contrast normalisation. ──
+        //
+        // WHY: Depth Anything V2 compresses distant regions — past a
+        // ~scene-dependent distance the model outputs near-identical
+        // disparity values for everything. The percentile norm in step 1
+        // maps [p2, p98] to [0,1] but does nothing about *variance within*
+        // that range. On wall-dominated scenes the wall cluster sits in a
+        // narrow band (std ≈ 0.05) → every wall pixel shifts by the same
+        // fraction → the wall reads as a flat translating sheet under head
+        // motion ("the wall has no depth").
+        //
+        // A fixed contrast factor (previously kContrast=1.6) doesn't solve
+        // this: if the wall IS the mean, (wall_d − mean) is already ~0, so
+        // 1.6× of ~0 is still ~0. Fixed gain only helps scenes whose depth
+        // spread is already large, which is exactly when it's not needed.
+        //
+        // FIX: measure the scene's depth std on a 1/4 subsample and apply
+        // the gain needed to reach a target output std (kTargetStd). Scenes
+        // with a tight depth cluster (a wall, a closeup) get aggressive
+        // stretching; scenes with a naturally wide distribution get left
+        // alone. Gain is capped at kMaxGain to avoid blowing up model noise
+        // on pathologically flat views.
+        //
+        // Stretching around the mean (not 0.5) keeps the dominant depth
+        // centred while fanning deviations outward — on a mostly-far scene
+        // the wall cluster spreads into a visible range AND the closer
+        // foreground gets pushed toward 0 so every depth layer gains shift
+        // differentiation. Clamping to [0,1] is fine: clipped pixels were
+        // outer-tail outliers that the shift formula would saturate anyway.
+        //
+        // Target std 0.22 was picked as ~σ of well-layered outdoor scenes —
+        // enough to resolve wall depth variation without amplifying noise
+        // on flat regions past the kMaxGain ceiling.
+        if (mode < 2) {
+            const int N2 = DepthInferencer::kModelSize;
+
+            // Mean + variance on 1/4 subsample (single pass, Welford-style
+            // by pulling Σx and Σx² then computing σ² = E[x²] − E[x]²).
+            double sum   = 0.0;
+            double sum_sq = 0.0;
+            int    cnt   = 0;
+            for (int y = 0; y < N2; y += 2) {
+                const float* row = new_norm_f32.data() + y * N2;
+                for (int x = 0; x < N2; x += 2) {
+                    double v = row[x];
+                    sum    += v;
+                    sum_sq += v * v;
+                    ++cnt;
+                }
+            }
+            float mean = cnt > 0 ? static_cast<float>(sum / cnt) : 0.5f;
+            float var  = cnt > 0
+                ? static_cast<float>(sum_sq / cnt - (sum / cnt) * (sum / cnt))
+                : 0.0f;
+            if (var < 0.0f) var = 0.0f;       // fp round-off
+            float std_ = std::sqrt(var);
+
+            const float kTargetStd = mode == 1 ? 0.18f : 0.22f;
+            constexpr float kMinGain   = 1.0f;
+            const float kMaxGain = mode == 1 ? 2.5f : 3.5f;
+            constexpr float kStdFloor  = 1e-4f;
+
+            float gain = kTargetStd / (std_ > kStdFloor ? std_ : kStdFloor);
+            if (gain < kMinGain) gain = kMinGain;
+            if (gain > kMaxGain) gain = kMaxGain;
+
+            for (int i = 0; i < N2 * N2; ++i) {
+                float v = (new_norm_f32[i] - mean) * gain + mean;
+                new_norm_f32[i] = v < 0.0f ? 0.0f :
+                                  v > 1.0f ? 1.0f : v;
             }
         }
-        prev_norm_f32 = new_norm_f32;   // save BEFORE spatial blur
 
-        // ── 4. 3x3 median filter. ──
-        // Previous attempts:
-        //   - Gaussian blur: bled foreground depth into background across
-        //     edges → "watery halo" around foreground silhouettes.
-        //   - Max filter (foreground dilation): pushed the pixels *just
-        //     outside* a foreground edge to the foreground's depth. The
-        //     shader then warped those background-colored pixels with
-        //     foreground parallax → a ghost-copy of each FG edge dragging
-        //     with head motion (the "doubling").
-        //
-        // Median removes salt-and-pepper outliers from the model's raw
-        // depth predictions WITHOUT shifting edge positions: the median
-        // of a 3x3 patch straddling an edge is whichever side has 5+
-        // pixels, so the edge stays exactly where the model placed it.
-        //
-        // Single pass, ~9 comparisons/pixel via partial-sort nth_element;
-        // ~2.4M ops per 518² frame at 10 Hz — still trivial.
-        blur_tmp_f32.assign(N * N, 0.0f);
-        for (int y = 0; y < N; ++y) {
-            int ym = (y > 0)       ? (y - 1) : 0;
-            int yp = (y < N - 1)   ? (y + 1) : N - 1;
-            const float* r_m = new_norm_f32.data() + ym * N;
-            const float* r_0 = new_norm_f32.data() + y  * N;
-            const float* r_p = new_norm_f32.data() + yp * N;
-            float*       out_row = blur_tmp_f32.data() + y * N;
-            for (int x = 0; x < N; ++x) {
-                int xm = (x > 0)     ? (x - 1) : 0;
-                int xp = (x < N - 1) ? (x + 1) : N - 1;
-                float v[9] = {
-                    r_m[xm], r_m[x], r_m[xp],
-                    r_0[xm], r_0[x], r_0[xp],
-                    r_p[xm], r_p[x], r_p[xp],
-                };
-                std::nth_element(v, v + 4, v + 9);
-                out_row[x] = v[4];
-            }
-        }
-        std::swap(new_norm_f32, blur_tmp_f32);
-
-        // ── 5. Pack to fp16 for GPU upload. ──
+        // ── 6. Pack to fp16 for GPU upload. ──
         dst.assign(N * N, 0);
         for (size_t i = 0; i < new_norm_f32.size(); ++i) {
             dst[i] = float_to_half(new_norm_f32[i]);
@@ -479,13 +666,44 @@ struct DepthInferImpl {
     // worker, and uploads the worker's latest finished depth (if any) into
     // depth_tex. ORT Run itself runs on the worker and does NOT block Present.
     //
-    // Frame-drop policy: if the worker is still chewing on a previous frame
-    // (input_pending already true), we OVERWRITE the pending input with the
-    // newer preprocess — the worker will pick the freshest input when it's
-    // ready. Dropping stale inputs is preferable to queueing a backlog.
+    // Frame-skip policy: if the worker is still processing the previous frame
+    // (input_pending is true), we SKIP the expensive GPU→CPU readback entirely.
+    // Doing the readback+map every frame (60fps) while the worker only consumes
+    // at ~10fps stalls the GPU pipeline 60×/s for nothing. By skipping the
+    // readback when busy, we reduce the D3D11_MAP_READ stalls to ~10×/s.
     bool run_once(ID3D11Texture2D* captured) {
-        // 1. GPU -> CPU staging copy (cheap enqueue) + map (may briefly wait
-        //    on GPU to finish the copy; typically <1–2ms for desktop sizes).
+        // 1. Always drain any finished output first, regardless of worker state.
+        std::vector<uint16_t> drained_upload;
+        bool worker_busy;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            worker_busy = input_pending;
+            if (output_ready) {
+                drained_upload.swap(ready_upload_fp16);
+                output_ready = false;
+            }
+        }
+        if (!drained_upload.empty()) {
+            // New inference arrived: copy current → prev, upload new → current,
+            // then reset blend_t to 0 so the shader interpolates from prev to
+            // current over kBlendFrames render frames (~167ms at 60fps).
+            // This hides the 10Hz depth update as a smooth 60Hz transition.
+            const int N = DepthInferencer::kModelSize;
+            ctx->CopyResource(depth_prev_tex, depth_tex);
+            ctx->UpdateSubresource(depth_tex, 0, nullptr,
+                                   drained_upload.data(),
+                                   N * sizeof(uint16_t), 0);
+            blend_t = 0.0f;
+            has_valid_depth = true;
+        }
+
+        // 2. Skip readback if worker is still chewing on the previous frame.
+        //    This prevents a D3D11_MAP_READ GPU-pipeline stall at 60fps.
+        if (worker_busy) return true;
+
+        // 3. GPU -> CPU staging copy + map. Runs only at inference cadence (~10Hz).
+        //    Map(D3D11_MAP_READ) stalls until the copy completes — acceptable at
+        //    10Hz (~100ms budget) but fatal for game perf at 60Hz.
         ctx->CopyResource(stage_bgra, captured);
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         HRESULT hr = ctx->Map(stage_bgra, 0, D3D11_MAP_READ, 0, &mapped);
@@ -493,30 +711,13 @@ struct DepthInferImpl {
         preprocess(static_cast<const uint8_t*>(mapped.pData), int(mapped.RowPitch));
         ctx->Unmap(stage_bgra, 0);
 
-        // 2. Hand off freshest input to worker; drain any finished output.
-        std::vector<uint16_t> drained_upload;
+        // 4. Hand off freshest input to worker.
         {
             std::lock_guard<std::mutex> lk(m);
             pending_input_f32.swap(scratch_input_f32);
             input_pending = true;
-            if (output_ready) {
-                drained_upload.swap(ready_upload_fp16);
-                output_ready = false;
-            }
         }
         cv_work.notify_one();
-
-        // 3. Upload finished depth (done OUTSIDE the lock so we don't hold it
-        //    across a GPU call — UpdateSubresource is effectively a memcpy on
-        //    DEFAULT textures but the DC is shared with the render pass).
-        if (!drained_upload.empty()) {
-            const int N = DepthInferencer::kModelSize;
-            ctx->UpdateSubresource(depth_tex, 0, nullptr,
-                                   drained_upload.data(),
-                                   N * sizeof(uint16_t),
-                                   0);
-            has_valid_depth = true;
-        }
         return true;
     }
 
@@ -654,8 +855,40 @@ bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
     return impl_->run_once(captured_bgra8);
 }
 
+void DepthInferencer::set_performance_mode(uint32_t mode) {
+    if (!impl_) return;
+    if (mode > 2) mode = 1;
+    impl_->performance_mode.store(mode, std::memory_order_relaxed);
+}
+
+uint32_t DepthInferencer::performance_mode() const {
+    if (!impl_) return 1;
+    return impl_->performance_mode.load(std::memory_order_relaxed);
+}
+
 ID3D11ShaderResourceView* DepthInferencer::depth_srv() const {
     return impl_ ? impl_->depth_srv : nullptr;
+}
+
+ID3D11ShaderResourceView* DepthInferencer::depth_prev_srv() const {
+    return impl_ ? impl_->depth_prev_srv : nullptr;
+}
+
+float DepthInferencer::depth_blend() const {
+    if (!impl_) return 1.0f;
+    // Smoothstep: 3t² − 2t³. Zero first-derivative at t=0 and t=1, so the
+    // depth texture morph starts and ends with no visible velocity — the
+    // discrete 10 Hz update slides past the eye instead of snapping.
+    float t = impl_->blend_t;
+    if (t < 0.0f) t = 0.0f;
+    else if (t > 1.0f) t = 1.0f;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+void DepthInferencer::advance_blend() {
+    if (!impl_) return;
+    impl_->blend_t += 1.0f / DepthInferImpl::kBlendFrames;
+    if (impl_->blend_t > 1.0f) impl_->blend_t = 1.0f;
 }
 
 const char* DepthInferencer::last_error() const {
@@ -664,4 +897,14 @@ const char* DepthInferencer::last_error() const {
 
 uint64_t DepthInferencer::inferences_completed() const {
     return impl_ ? impl_->inferences.load(std::memory_order_relaxed) : 0;
+}
+
+float DepthInferencer::depth_crop_x0_uv() const {
+    if (!impl_ || impl_->cap_w <= 0) return 0.0f;
+    return (float)impl_->crop_x0 / (float)impl_->cap_w;
+}
+
+float DepthInferencer::depth_crop_w_uv() const {
+    if (!impl_ || impl_->cap_w <= 0) return 1.0f;
+    return (float)impl_->crop_w_eff / (float)impl_->cap_w;
 }

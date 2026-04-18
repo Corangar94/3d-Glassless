@@ -84,7 +84,7 @@ static const wchar_t* SHM_NAME      = L"G3D";            // head pose (tracker -
 static const wchar_t* SHM_SETTINGS  = L"G3D_Settings";   // live tuning (settings GUI -> us)
 #pragma pack(push, 1)
 struct HeadPose { float x, y, z; uint32_t ts; };
-// Must match tracker/shared_settings.py STRUCT_FORMAT = "<fffffIfffffffII" (60 bytes)
+// Must match tracker/shared_settings.py STRUCT_FORMAT = "<fffffIfffffffIII" (64 bytes)
 struct Settings {
     float     strengthX;
     float     strengthY;
@@ -100,8 +100,9 @@ struct Settings {
     float     smoothingAlpha;
     float     deadzoneM;
     uint32_t  displayBackend; // 0=desktop, 1=stereo, 2=quilt
+    uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast
     uint32_t  version;
-};  // 60 bytes
+};  // 64 bytes
 #pragma pack(pop)
 
 // ── Shader source ─────────────────────────────────────────────────────────
@@ -315,6 +316,15 @@ static float    g_depthGamma  = 1.0f;
 static float    g_focusRadius = 0.1f;
 static float    g_deadzoneCm  = 0.5f; // soft deadzone on dx/dy (default 5 mm)
 static uint32_t g_displayBackend = 0;  // 0=desktop, 1=stereo, 2=quilt
+static uint32_t g_depthMode = 1;       // 0=quality, 1=balanced, 2=fast
+
+static const char* DepthModeName(uint32_t mode) {
+    switch (mode) {
+        case 0: return "quality";
+        case 2: return "fast";
+        default: return "balanced";
+    }
+}
 
 static bool InitGpuTiming() {
     D3D11_QUERY_DESC q = {};
@@ -672,6 +682,7 @@ static void ApplySettings() {
     float sx = 1.0f, sy = 1.0f, dp = 30.0f;
     uint32_t dc = 1;
     uint32_t db = 0;
+    uint32_t dm = 1;
     float dg = 1.0f, fr = 0.1f;
     float dz_cm = 0.5f;   // default 5 mm
 
@@ -687,6 +698,7 @@ static void ApplySettings() {
         if (s.focusRadius >= 0.0f)    fr = s.focusRadius;
         if (s.deadzoneM   >= 0.0f)    dz_cm = s.deadzoneM * 0.1f;  // mm → cm
         db = s.displayBackend;
+        dm = s.depthMode <= 2 ? s.depthMode : 1;
     }
 
     if (g_cliScreenW  > 0.0f) sw = g_cliScreenW;
@@ -705,6 +717,8 @@ static void ApplySettings() {
     g_focusRadius  = fr;
     g_deadzoneCm   = dz_cm;
     g_displayBackend = db;
+    g_depthMode = dm;
+    if (g_depth) g_depth->set_performance_mode(g_depthMode);
 }
 
 // Query the primary monitor's physical size via EDID.
@@ -846,6 +860,7 @@ static void InitDepth() {
         return;
     }
     g_depth = d;
+    g_depth->set_performance_mode(g_depthMode);
     Log("InitDepth: depth inference online (capture %ux%u, model 518x518)",
         cd.Width, cd.Height);
 }
@@ -1160,10 +1175,10 @@ static void Frame() {
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
         else                            shmStatus = "LIVE";
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
-            "depth[total=%llu %dHz] gpu_ms=%.3f backend=%u head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
+            "depth[total=%llu %dHz mode=%s] gpu_ms=%.3f backend=%u head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
             frameCount, acquireOk, acquireTimeout, acquireLost, acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
-            (unsigned long long)infNow, depthHz, g_lastGpuMs, g_displayBackend,
+            (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode), g_lastGpuMs, g_displayBackend,
             hx - wobble, hy, hz, g_emaX, g_emaY, dx - wobble, dy, wobble, g_strength, g_virtualDepth, g_hasFrame ? 1 : 0);
     }
 

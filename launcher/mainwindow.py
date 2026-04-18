@@ -66,6 +66,16 @@ _TITLE_BG = "#10231f"
 _CARD_BG = "#132b25"
 _ACCENT = "#f0c15a"
 _DEPTH_HZ_WARN = 6
+_DEPTH_MODES = {
+    "quality": 0,
+    "balanced": 1,
+    "fast": 2,
+}
+_DEPTH_MODE_LABELS = {
+    0: "Quality",
+    1: "Balanced",
+    2: "Fast",
+}
 
 _COMFORT_PRESETS = {
     "safe": {
@@ -96,6 +106,29 @@ _COMFORT_PRESETS = {
         "deadzone_mm": 4.0,
     },
 }
+
+
+def _depth_mode_code(value: object) -> int:
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _DEPTH_MODES:
+            return _DEPTH_MODES[key]
+        try:
+            value = int(key)
+        except ValueError:
+            return _DEPTH_MODES["balanced"]
+    try:
+        code = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEPTH_MODES["balanced"]
+    return code if code in _DEPTH_MODE_LABELS else _DEPTH_MODES["balanced"]
+
+
+def _depth_mode_name(code: int) -> str:
+    for name, value in _DEPTH_MODES.items():
+        if value == code:
+            return name
+    return "balanced"
 
 
 
@@ -136,6 +169,7 @@ class MainWindow(QMainWindow):
             smoothing_alpha=float(ov.get("smoothing_alpha", 0.1)),
             deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
             display_backend=backend_code(self._display_backend_id),
+            depth_mode=_depth_mode_code(ov.get("depth_performance_mode", ov.get("depth_mode", "balanced"))),
         )
         self._settings_writer.write(self._settings)
 
@@ -301,6 +335,14 @@ class MainWindow(QMainWindow):
         self._comfort_status = QLabel("Balanced reduces vertical parallax for comfort")
         self._comfort_status.setStyleSheet("color:#8ea69b;font-size:10px;")
         layout.addWidget(self._comfort_status)
+
+        self._depth_mode_combo = QComboBox()
+        for label, code in (("Quality depth", 0), ("Balanced depth", 1), ("Fast depth", 2)):
+            self._depth_mode_combo.addItem(label, code)
+        self._depth_mode_combo.setCurrentIndex(max(0, self._depth_mode_combo.findData(self._settings.depth_mode)))
+        self._depth_mode_combo.currentIndexChanged.connect(self._on_settings_change)
+        self._depth_mode_combo.currentIndexChanged.connect(lambda _index: self._on_save_config())
+        layout.addWidget(self._depth_mode_combo)
         return panel
 
     def _make_titlebar(self) -> QWidget:
@@ -753,6 +795,7 @@ class MainWindow(QMainWindow):
             smoothing_alpha=self._slider_value(self._smoothing_slider),
             deadzone_mm=self._slider_value(self._deadzone_slider),
             display_backend=self._settings.display_backend,
+            depth_mode=int(self._depth_mode_combo.currentData() or 0),
         )
 
     def _on_settings_change(self, *_: object) -> None:
@@ -884,6 +927,7 @@ class MainWindow(QMainWindow):
             self._depth_gamma_spin, self._ipd_spin,
             self._screen_w_spin, self._screen_h_spin,
             self._head_dist_spin, self._depth_curve_combo, self._fov_combo,
+            self._depth_mode_combo,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -905,6 +949,10 @@ class MainWindow(QMainWindow):
             self._fov_combo.setCurrentIndex(idx)
         else:
             self._fov_combo.setCurrentText(str(fov_val))
+        depth_mode = _depth_mode_code(data.get("depth_performance_mode", data.get("depth_mode", 1)))
+        depth_mode_idx = self._depth_mode_combo.findData(depth_mode)
+        if depth_mode_idx >= 0:
+            self._depth_mode_combo.setCurrentIndex(depth_mode_idx)
         for w in widgets:
             w.blockSignals(False)
         self._on_settings_change()
@@ -924,7 +972,11 @@ class MainWindow(QMainWindow):
                     cfg = yaml.safe_load(f) or {}
             except FileNotFoundError:
                 cfg = {}
-            cfg.setdefault("overlay", {}).update(dataclasses.asdict(s))
+            overlay = cfg.setdefault("overlay", {})
+            values = dataclasses.asdict(s)
+            values.pop("depth_mode", None)
+            values["depth_performance_mode"] = _depth_mode_name(s.depth_mode)
+            overlay.update(values)
             cfg.setdefault("tracking", {})["camera_tilt_deg"] = self._camera_tilt_deg
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
