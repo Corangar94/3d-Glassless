@@ -12,6 +12,7 @@ from tracker.comfort_evaluation import (
     run_benchmark as run_comfort_benchmark,
 )
 from tracker.depth_benchmark import DepthBenchmarkResult, run_benchmark as run_depth_benchmark
+from tracker.depth_fixtures import DEFAULT_FIXTURE_ROOT, benchmark_fixture
 from tracker.display_quality import (
     DisplayQualityBenchmarkResult,
     run_benchmark as run_display_quality_benchmark,
@@ -37,6 +38,8 @@ class EvaluationSuiteResult:
 
 def run_suite(
     depth_dir: str | Path | None = None,
+    depth_fixture: str | None = None,
+    depth_fixture_root: str | Path = DEFAULT_FIXTURE_ROOT,
     timing_csv: str | Path | None = None,
     comfort_csv: str | Path | None = None,
     display_quality_csv: str | Path | None = None,
@@ -44,7 +47,12 @@ def run_suite(
     target_fps: float = 60.0,
     latency_target_ms: float = 20.0,
 ) -> EvaluationSuiteResult:
-    depth = run_depth_benchmark(depth_dir) if depth_dir is not None else None
+    if depth_dir is not None:
+        depth = run_depth_benchmark(depth_dir)
+    elif depth_fixture is not None:
+        depth = benchmark_fixture(depth_fixture, depth_fixture_root).result
+    else:
+        depth = None
     performance = (
         run_performance_benchmark(timing_csv, target_fps=target_fps)
         if timing_csv is not None
@@ -151,6 +159,8 @@ def format_suite_json(result: EvaluationSuiteResult) -> str:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Glassless3D benchmark suite")
     parser.add_argument("--depth-dir", help="Directory containing .npy depth frames")
+    parser.add_argument("--depth-fixture", help="Registered depth fixture name")
+    parser.add_argument("--depth-fixture-root", default=str(DEFAULT_FIXTURE_ROOT))
     parser.add_argument("--timing-csv", help="CSV with timestamp_ms,frame_time_ms columns")
     parser.add_argument("--comfort-csv", help="CSV with 1-5 comfort/display survey scores")
     parser.add_argument("--display-quality-csv", help="CSV with measured viewing-zone/crosstalk samples")
@@ -163,6 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     result = run_suite(
         depth_dir=args.depth_dir,
+        depth_fixture=args.depth_fixture,
+        depth_fixture_root=args.depth_fixture_root,
         timing_csv=args.timing_csv,
         comfort_csv=args.comfort_csv,
         display_quality_csv=args.display_quality_csv,

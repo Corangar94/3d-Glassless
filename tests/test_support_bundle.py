@@ -3,6 +3,7 @@ import numpy as np
 
 from launcher import support_bundle
 from launcher.diagnostics import DiagnosticsReport
+from tests.test_depth_fixtures import _write_fixture
 
 
 def test_create_support_bundle_writes_diagnostics_and_manifest(tmp_path):
@@ -32,6 +33,24 @@ def test_create_support_bundle_includes_evaluation_when_inputs_provided(tmp_path
     )
 
     assert (out_dir / "evaluation.json").exists()
+    manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest_data["evaluation"] == "evaluation.json"
+    assert manifest.evaluation_path == out_dir / "evaluation.json"
+
+
+def test_create_support_bundle_accepts_depth_fixture(tmp_path):
+    fixture_root = tmp_path / "fixtures"
+    _write_fixture(fixture_root)
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        depth_fixture="stable",
+        depth_fixture_root=fixture_root,
+    )
+
+    data = json.loads((out_dir / "evaluation.json").read_text(encoding="utf-8"))
+    assert data["depth"]["quality"] == "GOOD"
     manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_data["evaluation"] == "evaluation.json"
     assert manifest.evaluation_path == out_dir / "evaluation.json"
@@ -139,4 +158,23 @@ def test_main_writes_bundle(tmp_path, capsys):
 
     assert code == 0
     assert (out_dir / "manifest.json").exists()
+    assert "wrote support bundle" in capsys.readouterr().out
+
+
+def test_main_accepts_depth_fixture(tmp_path, capsys):
+    fixture_root = tmp_path / "fixtures"
+    _write_fixture(fixture_root)
+    out_dir = tmp_path / "bundle"
+
+    code = support_bundle.main([
+        "--output-dir",
+        str(out_dir),
+        "--depth-fixture",
+        "stable",
+        "--depth-fixture-root",
+        str(fixture_root),
+    ])
+
+    assert code == 0
+    assert (out_dir / "evaluation.json").exists()
     assert "wrote support bundle" in capsys.readouterr().out

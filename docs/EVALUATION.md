@@ -49,6 +49,16 @@ python -m tracker.depth_benchmark path\to\depth_frames
 
 The command exits non-zero when the sequence classifies as `DANGER`.
 
+The repository also has manifest-backed depth fixtures. List or benchmark them
+with:
+
+```powershell
+python -m tracker.depth_fixtures --list
+python -m tracker.depth_fixtures --benchmark-all
+python scripts/run_evaluation.py --depth-fixture synthetic_static_smoke
+python scripts/collect_support.py --output-dir support_bundle --depth-fixture synthetic_static_smoke
+```
+
 To generate controlled synthetic fixtures first:
 
 ```powershell

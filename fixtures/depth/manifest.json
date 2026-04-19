@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "name": "synthetic_static_smoke",
+      "directory": "synthetic_static_smoke",
+      "kind": "synthetic",
+      "source": "tracker.depth_synthetic.make_static_depth_sequence",
+      "description": "Stable 8x4 horizontal depth gradient used as a smoke-test baseline for fixture discovery and benchmark wiring.",
+      "frame_count": 4,
+      "width": 8,
+      "height": 4,
+      "expected_quality": "GOOD"
+    }
+  ]
+}

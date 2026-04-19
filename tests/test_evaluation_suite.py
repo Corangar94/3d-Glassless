@@ -2,6 +2,7 @@ import numpy as np
 import json
 
 from tracker import evaluation_suite
+from tests.test_depth_fixtures import _write_fixture
 
 
 def test_run_suite_combines_depth_and_performance_results(tmp_path):
@@ -21,6 +22,16 @@ def test_run_suite_combines_depth_and_performance_results(tmp_path):
 
     assert result.depth is not None
     assert result.performance is not None
+    assert result.overall_quality == "GOOD"
+
+
+def test_run_suite_accepts_named_depth_fixture(tmp_path):
+    _write_fixture(tmp_path)
+
+    result = evaluation_suite.run_suite(depth_fixture="stable", depth_fixture_root=tmp_path)
+
+    assert result.depth is not None
+    assert result.depth.quality == "GOOD"
     assert result.overall_quality == "GOOD"
 
 
@@ -101,6 +112,20 @@ def test_main_returns_nonzero_when_any_benchmark_is_danger(tmp_path, capsys):
 
     assert code == 1
     assert "overall_quality=DANGER" in capsys.readouterr().out
+
+
+def test_main_accepts_depth_fixture(tmp_path, capsys):
+    _write_fixture(tmp_path)
+
+    code = evaluation_suite.main([
+        "--depth-fixture",
+        "stable",
+        "--depth-fixture-root",
+        str(tmp_path),
+    ])
+
+    assert code == 0
+    assert "overall_quality=GOOD" in capsys.readouterr().out
 
 
 def test_format_suite_json_is_machine_readable(tmp_path):

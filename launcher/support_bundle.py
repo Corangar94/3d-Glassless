@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from launcher.diagnostics import collect_diagnostics, format_diagnostics_json
+from tracker.depth_fixtures import DEFAULT_FIXTURE_ROOT
 from tracker.evaluation_suite import format_suite_json, run_suite
 from tracker.feasibility_gate import decide_gate, format_assessment_json, wow_default_checks
 from tracker.performance_capture import export_overlay_frame_timings
@@ -27,6 +28,8 @@ def create_support_bundle(
     output_dir: str | Path,
     config_path: str | Path = "config.yaml",
     depth_dir: str | Path | None = None,
+    depth_fixture: str | None = None,
+    depth_fixture_root: str | Path = DEFAULT_FIXTURE_ROOT,
     timing_csv: str | Path | None = None,
     comfort_csv: str | Path | None = None,
     display_quality_csv: str | Path | None = None,
@@ -54,6 +57,7 @@ def create_support_bundle(
     evaluation_path: Path | None = None
     if (
         depth_dir is not None
+        or depth_fixture is not None
         or timing_csv is not None
         or comfort_csv is not None
         or display_quality_csv is not None
@@ -62,6 +66,8 @@ def create_support_bundle(
         evaluation_path = out / "evaluation.json"
         evaluation = run_suite(
             depth_dir=depth_dir,
+            depth_fixture=depth_fixture,
+            depth_fixture_root=depth_fixture_root,
             timing_csv=timing_csv,
             comfort_csv=comfort_csv,
             display_quality_csv=display_quality_csv,
@@ -95,6 +101,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--depth-dir")
+    parser.add_argument("--depth-fixture")
+    parser.add_argument("--depth-fixture-root", default=str(DEFAULT_FIXTURE_ROOT))
     parser.add_argument("--timing-csv")
     parser.add_argument("--comfort-csv")
     parser.add_argument("--display-quality-csv")
@@ -107,6 +115,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         config_path=args.config,
         depth_dir=args.depth_dir,
+        depth_fixture=args.depth_fixture,
+        depth_fixture_root=args.depth_fixture_root,
         timing_csv=args.timing_csv,
         comfort_csv=args.comfort_csv,
         display_quality_csv=args.display_quality_csv,
