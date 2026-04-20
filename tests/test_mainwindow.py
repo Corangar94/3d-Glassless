@@ -172,6 +172,27 @@ def test_runtime_health_updates_from_overlay_summary(window):
     assert "Depth OK" in window._comfort_status.text()
 
 
+def test_runtime_health_keyboard_interrupt_requests_shutdown(window, monkeypatch):
+    calls = []
+
+    class FakeApp:
+        def closeAllWindows(self):
+            calls.append("close")
+
+        def quit(self):
+            calls.append("quit")
+
+    def raise_keyboard_interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("launcher.mainwindow.QApplication.instance", lambda: FakeApp())
+    monkeypatch.setattr(window, "_read_overlay_summary", raise_keyboard_interrupt)
+
+    window._safe_refresh_runtime_health()
+
+    assert calls == ["close", "quit"]
+
+
 def test_runtime_health_warns_and_applies_safe_when_depth_rate_low(qapp, tmp_path):
     cfg_path = str(tmp_path / "config.yaml")
     summary = diagnostics.OverlayRuntimeSummary(

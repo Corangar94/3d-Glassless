@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QApplication,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -188,9 +189,9 @@ class MainWindow(QMainWindow):
         self._on_status("stopped")
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(2000)
-        self._health_timer.timeout.connect(self._refresh_runtime_health)
+        self._health_timer.timeout.connect(self._safe_refresh_runtime_health)
         self._health_timer.start()
-        self._refresh_runtime_health()
+        self._safe_refresh_runtime_health()
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -533,6 +534,15 @@ class MainWindow(QMainWindow):
     def _refresh_runtime_health(self) -> None:
         summary = self._read_overlay_summary()
         self._apply_runtime_health(summary)
+
+    def _safe_refresh_runtime_health(self) -> None:
+        try:
+            self._refresh_runtime_health()
+        except KeyboardInterrupt:
+            app = QApplication.instance()
+            if app is not None:
+                app.closeAllWindows()
+                app.quit()
 
     def _read_overlay_summary(self) -> OverlayRuntimeSummary | None:
         overlay_log = _find_overlay_log(None)

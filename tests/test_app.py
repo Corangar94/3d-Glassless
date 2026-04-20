@@ -3,7 +3,14 @@ import os
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from launcher.app import CONFIG_PATH, _is_first_run, _load_config, _parse_args
+from launcher.app import (
+    CONFIG_PATH,
+    _is_first_run,
+    _load_config,
+    _make_sigint_handler,
+    _parse_args,
+    _request_app_shutdown,
+)
 
 
 @pytest.fixture(scope="module")
@@ -53,3 +60,34 @@ def test_parse_args_defaults_to_appdata_config():
     args, _ = _parse_args([])
 
     assert args.config == CONFIG_PATH
+
+
+def test_request_app_shutdown_closes_windows_and_quits():
+    calls = []
+
+    class FakeApp:
+        def closeAllWindows(self):
+            calls.append("close")
+
+        def quit(self):
+            calls.append("quit")
+
+    _request_app_shutdown(FakeApp())
+
+    assert calls == ["close", "quit"]
+
+
+def test_sigint_handler_requests_app_shutdown():
+    calls = []
+
+    class FakeApp:
+        def closeAllWindows(self):
+            calls.append("close")
+
+        def quit(self):
+            calls.append("quit")
+
+    handler = _make_sigint_handler(FakeApp())
+    handler(None, None)
+
+    assert calls == ["close", "quit"]

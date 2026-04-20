@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import signal
 import sys
 
 import yaml
@@ -14,6 +15,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 from PySide6.QtWidgets import QApplication, QWizard
+from PySide6.QtCore import QTimer
 
 CONFIG_PATH = os.path.join(
     os.environ.get("APPDATA", "."), "Glassless3D", "config.yaml"
@@ -44,6 +46,29 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
     return parser.parse_known_args(argv)
 
 
+def _request_app_shutdown(app: QApplication) -> None:
+    """Close windows first so MainWindow.closeEvent can stop child processes."""
+    app.closeAllWindows()
+    app.quit()
+
+
+def _make_sigint_handler(app: QApplication):
+    def _handler(_signum: object, _frame: object) -> None:
+        _request_app_shutdown(app)
+
+    return _handler
+
+
+def _install_console_interrupt_handler(app: QApplication) -> QTimer:
+    signal.signal(signal.SIGINT, _make_sigint_handler(app))
+    # Periodic no-op lets Python process Ctrl+C while Qt owns the event loop.
+    timer = QTimer(app)
+    timer.setInterval(250)
+    timer.timeout.connect(lambda: None)
+    timer.start()
+    return timer
+
+
 def main(argv: list[str] | None = None) -> None:
     raw_args = sys.argv[1:] if argv is None else argv
     args, qt_args = _parse_args(raw_args)
@@ -62,4 +87,12 @@ def main(argv: list[str] | None = None) -> None:
     from launcher.mainwindow import MainWindow
     window = MainWindow(config=config, config_path=config_path)
     window.show()
-    sys.exit(app.exec())
+    interrupt_timer = _install_console_interrupt_handler(app)
+    try:
+        code = app.exec()
+    except KeyboardInterrupt:
+        _request_app_shutdown(app)
+        code = 130
+    finally:
+        interrupt_timer.stop()
+    sys.exit(code)
