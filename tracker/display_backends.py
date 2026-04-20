@@ -118,6 +118,22 @@ def backend_code(backend_id: str) -> int:
         raise ValueError(f"unknown display backend: {backend_id}") from e
 
 
+def normalize_backend_id(value: object) -> str:
+    """Return a stable backend ID from modern IDs or legacy numeric config values."""
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate in _BACKEND_CODES:
+            return candidate
+        try:
+            value = int(candidate)
+        except ValueError as e:
+            raise ValueError(f"unknown display backend: {value}") from e
+    try:
+        return backend_id_from_code(int(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"unknown display backend: {value}") from e
+
+
 def backend_id_from_code(code: int) -> str:
     for backend_id, backend_code_value in _BACKEND_CODES.items():
         if backend_code_value == code:

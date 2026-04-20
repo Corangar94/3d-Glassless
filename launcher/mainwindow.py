@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
-from tracker.display_backends import backend_code
+from tracker.display_backends import backend_code, normalize_backend_id
 from launcher.presets import list_presets, save_preset, load_preset, delete_preset
 from launcher.calibration import detect_screen_cm, measure_head_distance_or_none
 from launcher.diagnostics import (
@@ -153,7 +153,7 @@ class MainWindow(QMainWindow):
         trk = config.get("tracking", {})
         self._camera_tilt_deg: float = float(trk.get("camera_tilt_deg", 0.0))
         ov = config.get("overlay", {})
-        self._display_backend_id = str(ov.get("display_backend", "desktop_overlay"))
+        self._display_backend_id = normalize_backend_id(ov.get("display_backend", "desktop_overlay"))
         self._settings = OverlaySettings(
             strength_x=float(ov.get("strength_x", 1.0)),
             strength_y=float(ov.get("strength_y", 1.0)),
@@ -974,7 +974,9 @@ class MainWindow(QMainWindow):
                 cfg = {}
             overlay = cfg.setdefault("overlay", {})
             values = dataclasses.asdict(s)
+            values.pop("display_backend", None)
             values.pop("depth_mode", None)
+            values["display_backend"] = self._display_backend_id
             values["depth_performance_mode"] = _depth_mode_name(s.depth_mode)
             overlay.update(values)
             cfg.setdefault("tracking", {})["camera_tilt_deg"] = self._camera_tilt_deg

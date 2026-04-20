@@ -5,6 +5,7 @@ from tracker.display_backends import (
     built_in_backends,
     backend_code,
     backend_id_from_code,
+    normalize_backend_id,
 )
 
 
@@ -89,3 +90,10 @@ def test_backend_codes_roundtrip_stable_runtime_ids():
     assert backend_code("stereo_autostereo") == 1
     assert backend_code("lightfield_quilt") == 2
     assert backend_id_from_code(1) == "stereo_autostereo"
+
+
+def test_normalize_backend_id_accepts_legacy_numeric_values():
+    assert normalize_backend_id(0) == "desktop_overlay"
+    assert normalize_backend_id("0") == "desktop_overlay"
+    assert normalize_backend_id(2) == "lightfield_quilt"
+    assert normalize_backend_id("stereo_autostereo") == "stereo_autostereo"

@@ -292,6 +292,23 @@ def test_mainwindow_publishes_configured_display_backend(qapp, tmp_path):
     assert win._settings.display_backend == 1
 
 
+def test_mainwindow_accepts_legacy_numeric_display_backend(qapp, tmp_path):
+    import yaml
+
+    cfg_path = str(tmp_path / "config.yaml")
+    config = {**CONFIG, "overlay": {"display_backend": 0}}
+
+    with patch("launcher.mainwindow.TrackerProcess"):
+        win = MainWindow(config=config, config_path=cfg_path)
+        win._on_save_config()
+
+    assert win._display_backend_id == "desktop_overlay"
+    assert win._settings.display_backend == 0
+    with open(cfg_path, encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert saved["overlay"]["display_backend"] == "desktop_overlay"
+
+
 def test_mainwindow_settings_changes_preserve_configured_display_backend(qapp, tmp_path):
     cfg_path = str(tmp_path / "config.yaml")
     config = {**CONFIG, "overlay": {"display_backend": "lightfield_quilt"}}
