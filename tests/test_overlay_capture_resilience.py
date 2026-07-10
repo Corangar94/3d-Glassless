@@ -62,3 +62,32 @@ def test_overlay_does_not_sleep_inside_duplication_reset():
     assert "static void ResetDuplication()" not in source
     assert "Sleep(300)" not in source
     assert "RetrySchedule g_rebindRetry" in source
+
+
+def test_overlay_marks_bindings_dirty_for_dpi_and_display_changes():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "SetProcessDpiAwarenessContext" in source
+    assert "WM_DPICHANGED" in source
+    assert "WM_DISPLAYCHANGE" in source
+    assert "g_bindingDirty = true" in source
+
+
+def test_overlay_checks_present_and_enters_device_recovery():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "const HRESULT present_hr = g_swap->Present(0, 0);" in source
+    assert "GetDeviceRemovedReason" in source
+    assert "DXGI_ERROR_DEVICE_REMOVED" in source
+    assert "DXGI_ERROR_DEVICE_RESET" in source
+    assert "DXGI_ERROR_DEVICE_HUNG" in source
+    assert "CaptureState::DeviceRecovery" in source
+
+
+def test_depth_cleanup_releases_both_current_and_previous_depth_resources():
+    source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+
+    assert "if (depth_prev_srv) { depth_prev_srv->Release(); depth_prev_srv = nullptr; }" in source
+    assert "if (depth_prev_tex) { depth_prev_tex->Release(); depth_prev_tex = nullptr; }" in source
+    assert "if (depth_srv) { depth_srv->Release(); depth_srv = nullptr; }" in source
+    assert "if (depth_tex) { depth_tex->Release(); depth_tex = nullptr; }" in source

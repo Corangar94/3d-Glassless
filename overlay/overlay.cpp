@@ -89,6 +89,23 @@ static void LogClose() {
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
 #endif
 
+static void EnablePerMonitorV2DpiAwareness() {
+    using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const auto setContext = user32
+        ? reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+            GetProcAddress(user32, "SetProcessDpiAwarenessContext"))
+        : nullptr;
+    if (!setContext) {
+        Log("SetProcessDpiAwarenessContext unavailable; continuing with current DPI context");
+        return;
+    }
+    const HANDLE perMonitorV2 = reinterpret_cast<HANDLE>(static_cast<intptr_t>(-4));
+    const BOOL ok = setContext(perMonitorV2);
+    Log("SetProcessDpiAwarenessContext(PMv2): ok=%d GLE=%lu",
+        ok ? 1 : 0, ok ? 0 : GetLastError());
+}
+
 // ── Shared-memory layout (must match tracker/shared_memory.py) ────────────
 static const wchar_t* SHM_NAME      = L"G3D";            // head pose (tracker -> us)
 static const wchar_t* SHM_SETTINGS  = L"G3D_Settings";   // live tuning (settings GUI -> us)
@@ -460,6 +477,12 @@ static UINT                      g_captureW = 0;
 static UINT                      g_captureH = 0;
 static UINT                      g_renderWidth = 0;
 static UINT                      g_renderHeight = 0;
+static bool                      g_swapResizePending = false;
+static UINT                      g_pendingSwapWidth = 0;
+static UINT                      g_pendingSwapHeight = 0;
+static uint64_t                  g_nextTargetPollMs = 0;
+static LUID                      g_deviceAdapterLuid = {};
+static bool                      g_hasDeviceAdapterLuid = false;
 using g3d::capture::CaptureSignal;
 using g3d::capture::CaptureState;
 using g3d::capture::RetrySchedule;
@@ -804,7 +827,11 @@ static BindingStatus RefreshCaptureBinding() {
         : std::nullopt;
     const auto region = g3d::capture::BuildUprightCaptureRegion(
         ToCaptureRect(next.desktopRect), target);
-    if (!region) return BindingStatus::TargetSpansOutput;
+    if (!region) {
+        g_binding = next;
+        g_bindingDirty = false;
+        return BindingStatus::TargetSpansOutput;
+    }
 
     next.region = *region;
     g_binding = next;
@@ -850,6 +877,21 @@ static void SyncOverlayWindowToBinding() {
         SWP_NOACTIVATE | SWP_NOOWNERZORDER);
 }
 
+static void PollTargetWindow() {
+    const uint64_t nowMs = GetTickCount64();
+    if (nowMs < g_nextTargetPollMs) return;
+    g_nextTargetPollMs = nowMs + 250;
+
+    const HWND oldWindow = g_targetWindow;
+    const RECT oldRect = g_targetRect;
+    const bool oldEnabled = g_useTargetWindow;
+    DetectTargetWindowRect();
+    if (oldWindow != g_targetWindow || oldEnabled != g_useTargetWindow
+        || !EqualRect(&oldRect, &g_targetRect)) {
+        g_bindingDirty = true;
+    }
+}
+
 static int g_debugDepthMode = 0;  // Ctrl+D: off/depth/confidence/edge
 static constexpr int kDebugDepthModeCount = 4;
 // CLI-provided overrides (0 = not provided → use autodetect / settings GUI)
@@ -884,6 +926,28 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_HOTKEY && wp == HOTKEY_QUIT)  { Log("WndProc: WM_HOTKEY quit"); g_running = false; PostQuitMessage(0); }
     if (msg == WM_HOTKEY && wp == HOTKEY_DEBUG)      { g_debugDepthMode = (g_debugDepthMode + 1) % kDebugDepthModeCount; Log("WndProc: debug depth mode %d", g_debugDepthMode); }
     if (msg == WM_HOTKEY && wp == HOTKEY_SCREENSHOT) { g_wantScreenshot = true; Log("WndProc: screenshot queued"); }
+    if (msg == WM_DPICHANGED) {
+        const RECT* suggested = reinterpret_cast<const RECT*>(lp);
+        if (suggested && !g_useTargetWindow) {
+            SetWindowPos(hw, nullptr, suggested->left, suggested->top,
+                suggested->right - suggested->left, suggested->bottom - suggested->top,
+                SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+        g_bindingDirty = true;
+        return 0;
+    }
+    if (msg == WM_DISPLAYCHANGE) {
+        g_bindingDirty = true;
+        return 0;
+    }
+    if (msg == WM_SIZE) {
+        if (wp != SIZE_MINIMIZED) {
+            g_pendingSwapWidth = LOWORD(lp);
+            g_pendingSwapHeight = HIWORD(lp);
+            g_swapResizePending = g_pendingSwapWidth > 0 && g_pendingSwapHeight > 0;
+        }
+        return 0;
+    }
     if (msg == WM_TRAYICON) {
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
             POINT pt; GetCursorPos(&pt);
@@ -1392,6 +1456,15 @@ static bool IsUnavailableDuplicationFailure(HRESULT hr) {
         || hr == E_ACCESSDENIED;
 }
 
+static bool IsDeviceLoss(HRESULT hr) {
+    return hr == DXGI_ERROR_DEVICE_REMOVED
+        || hr == DXGI_ERROR_DEVICE_RESET
+        || hr == DXGI_ERROR_DEVICE_HUNG;
+}
+
+static HRESULT CreateDeviceAndRenderer();
+static void EnterDeviceRecovery(const char* operation, HRESULT hr, const char* reasonCode);
+
 class DesktopFrameLease {
 public:
     explicit DesktopFrameLease(IDXGIOutputDuplication* duplication) : duplication_(duplication) {
@@ -1428,6 +1501,30 @@ private:
 };
 
 static void TickCaptureRebind() {
+    if (g_captureState == CaptureState::DeviceRecovery) {
+        if (!g_rebindRetry.CanAttempt(GetTickCount64())) return;
+        const BindingStatus recoveryBinding = RefreshCaptureBinding();
+        if (recoveryBinding == BindingStatus::TargetSpansOutput) {
+            g_bindingDirty = false;
+            SetCaptureState(CaptureState::Unavailable, "target_spans_output");
+            return;
+        }
+        if (recoveryBinding != BindingStatus::Ready) {
+            g_bindingDirty = false;
+            SetCaptureState(CaptureState::Unavailable, "no_matching_output");
+            return;
+        }
+        SyncOverlayWindowToBinding();
+        const HRESULT createHr = CreateDeviceAndRenderer();
+        if (FAILED(createHr)) {
+            LogHR("CreateDeviceAndRenderer", createHr);
+            g_rebindRetry.RecordFailure(GetTickCount64());
+            return;
+        }
+        g_rebindRetry.Reset(GetTickCount64());
+        SetCaptureState(CaptureState::Rebinding, "device_recreated");
+        return;
+    }
     if (g_captureState == CaptureState::Unavailable) {
         if (!g_bindingDirty) return;
         QueueCaptureSignal(CaptureSignal::BindingDirty, "binding_changed");
@@ -1450,6 +1547,15 @@ static void TickCaptureRebind() {
     }
 
     SyncOverlayWindowToBinding();
+    if (!g_dev || !g_ctx || !g_swap) {
+        g_rebindRetry.Reset(GetTickCount64());
+        SetCaptureState(CaptureState::DeviceRecovery, "renderer_missing");
+        return;
+    }
+    if (g_hasDeviceAdapterLuid && !SameLuid(g_deviceAdapterLuid, g_binding.adapterLuid)) {
+        EnterDeviceRecovery("capture adapter changed", DXGI_ERROR_DEVICE_RESET, "adapter_changed");
+        return;
+    }
     const HRESULT hr = InitDuplication();
     if (SUCCEEDED(hr)) {
         InitDepth();
@@ -1461,6 +1567,9 @@ static void TickCaptureRebind() {
         DestroyCaptureResources();
         g_bindingDirty = false;
         SetCaptureState(CaptureState::Unavailable, "duplicate_unavailable");
+    } else if (IsDeviceLoss(hr)
+        || (g_dev && IsDeviceLoss(g_dev->GetDeviceRemovedReason()))) {
+        EnterDeviceRecovery("InitDuplication", hr, "device_lost");
     } else {
         QueueCaptureSignal(CaptureSignal::RebindRetry, "duplicate_failed");
     }
@@ -1509,6 +1618,190 @@ static void UpdateCapture() {
             Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
         }
     }
+}
+
+static void DestroyRendererResources() {
+    SafeRelease(g_normalizeCb);
+    SafeRelease(g_normalizePs);
+    SafeRelease(g_fallbackSrv);
+    SafeRelease(g_fallbackTex);
+    SafeRelease(g_gpuEnd);
+    SafeRelease(g_gpuStart);
+    SafeRelease(g_gpuDisjoint);
+    SafeRelease(g_sceneSmp);
+    SafeRelease(g_depthSmp);
+    SafeRelease(g_cb);
+    SafeRelease(g_ps);
+    SafeRelease(g_vs);
+    SafeRelease(g_rtv);
+    g_gpuTimingPending = false;
+    g_lastGpuMs = -1.0;
+    g_gpuTimingSamples = 0;
+    g_renderWidth = 0;
+    g_renderHeight = 0;
+}
+
+static void DestroyDeviceResources() {
+    DestroyCaptureResources();
+    if (g_ctx) {
+        g_ctx->ClearState();
+        g_ctx->Flush();
+    }
+    DestroyRendererResources();
+    SafeRelease(g_swap);
+    SafeRelease(g_ctx);
+    SafeRelease(g_dev);
+    g_deviceAdapterLuid = {};
+    g_hasDeviceAdapterLuid = false;
+}
+
+static HRESULT CreateRenderTargetAndViewport(UINT width, UINT height) {
+    if (!g_swap || !g_dev || !g_ctx || width == 0 || height == 0) return E_INVALIDARG;
+    SafeRelease(g_rtv);
+    ID3D11Texture2D* backBuffer = nullptr;
+    HRESULT hr = g_swap->GetBuffer(
+        0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backBuffer));
+    if (FAILED(hr)) return hr;
+    hr = g_dev->CreateRenderTargetView(backBuffer, nullptr, &g_rtv);
+    backBuffer->Release();
+    if (FAILED(hr)) return hr;
+    g_renderWidth = width;
+    g_renderHeight = height;
+    SetRenderViewport();
+    return S_OK;
+}
+
+static HRESULT CreateRendererResources() {
+    ID3DBlob* vsB = CompileShader(VS_SRC, "main", "vs_5_0");
+    ID3DBlob* psB = CompileShader(PS_SRC, "main", "ps_5_0");
+    ID3DBlob* normalizeB = CompileShader(NORMALIZE_PS_SRC, "main", "ps_5_0");
+    if (!vsB || !psB || !normalizeB) {
+        SafeRelease(vsB);
+        SafeRelease(psB);
+        SafeRelease(normalizeB);
+        return E_FAIL;
+    }
+    HRESULT hr = g_dev->CreateVertexShader(
+        vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &g_vs);
+    if (SUCCEEDED(hr)) {
+        hr = g_dev->CreatePixelShader(
+            psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &g_ps);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = g_dev->CreatePixelShader(
+            normalizeB->GetBufferPointer(), normalizeB->GetBufferSize(), nullptr, &g_normalizePs);
+    }
+    SafeRelease(vsB);
+    SafeRelease(psB);
+    SafeRelease(normalizeB);
+    if (FAILED(hr)) return hr;
+
+    D3D11_BUFFER_DESC cbd = {};
+    cbd.ByteWidth = sizeof(CBuf);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    hr = g_dev->CreateBuffer(&cbd, nullptr, &g_cb);
+    if (FAILED(hr)) return hr;
+
+    D3D11_BUFFER_DESC normalizeCbd = {};
+    normalizeCbd.ByteWidth = sizeof(NormalizeCB);
+    normalizeCbd.Usage = D3D11_USAGE_DEFAULT;
+    normalizeCbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    hr = g_dev->CreateBuffer(&normalizeCbd, nullptr, &g_normalizeCb);
+    if (FAILED(hr)) return hr;
+
+    D3D11_SAMPLER_DESC sceneSd = {};
+    sceneSd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sceneSd.AddressU = sceneSd.AddressV = sceneSd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    hr = g_dev->CreateSamplerState(&sceneSd, &g_sceneSmp);
+    if (FAILED(hr)) return hr;
+
+    D3D11_SAMPLER_DESC depthSd = sceneSd;
+    depthSd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    hr = g_dev->CreateSamplerState(&depthSd, &g_depthSmp);
+    if (FAILED(hr)) return hr;
+
+    if (!CreateFallbackDepthSrv()) return E_FAIL;
+    InitGpuTiming();
+    return S_OK;
+}
+
+static HRESULT CreateDeviceAndRenderer() {
+    IDXGIAdapter1* selectedAdapter = OpenAdapterForLuid(g_binding.adapterLuid);
+    if (!selectedAdapter) return DXGI_ERROR_NOT_FOUND;
+
+    RECT clientRect = {};
+    if (!g_hwnd || !GetClientRect(g_hwnd, &clientRect)) {
+        selectedAdapter->Release();
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+    const UINT clientWidth = static_cast<UINT>(clientRect.right - clientRect.left);
+    const UINT clientHeight = static_cast<UINT>(clientRect.bottom - clientRect.top);
+    if (clientWidth == 0 || clientHeight == 0) {
+        selectedAdapter->Release();
+        return E_INVALIDARG;
+    }
+
+    DXGI_SWAP_CHAIN_DESC scd = {};
+    scd.BufferCount = 1;
+    scd.BufferDesc.Width = clientWidth;
+    scd.BufferDesc.Height = clientHeight;
+    scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scd.OutputWindow = g_hwnd;
+    scd.SampleDesc.Count = 1;
+    scd.Windowed = TRUE;
+    scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+
+    D3D_FEATURE_LEVEL featureLevel = {};
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(
+        selectedAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+        &scd, &g_swap, &g_dev, &featureLevel, &g_ctx);
+    selectedAdapter->Release();
+    LogHR("D3D11CreateDeviceAndSwapChain(selected adapter)", hr);
+    if (FAILED(hr)) return hr;
+
+    g_deviceAdapterLuid = g_binding.adapterLuid;
+    g_hasDeviceAdapterLuid = true;
+    hr = CreateRenderTargetAndViewport(clientWidth, clientHeight);
+    if (SUCCEEDED(hr)) hr = CreateRendererResources();
+    if (FAILED(hr)) DestroyDeviceResources();
+    g_swapResizePending = false;
+    return hr;
+}
+
+static HRESULT ResizeSwapChain(UINT width, UINT height) {
+    if (!g_swap || !g_ctx || width == 0 || height == 0) return E_INVALIDARG;
+    g_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    g_ctx->ClearState();
+    g_ctx->Flush();
+    SafeRelease(g_rtv);
+    HRESULT hr = g_swap->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) return hr;
+    return CreateRenderTargetAndViewport(width, height);
+}
+
+static void EnterDeviceRecovery(const char* operation, HRESULT hr, const char* reasonCode) {
+    const HRESULT removedReason = g_dev ? g_dev->GetDeviceRemovedReason() : hr;
+    Log("Device recovery: operation=%s hr=0x%08X reason=0x%08X",
+        operation, static_cast<unsigned>(hr), static_cast<unsigned>(removedReason));
+    DestroyDeviceResources();
+    g_rebindRetry.Reset(GetTickCount64());
+    SetCaptureState(CaptureState::DeviceRecovery, reasonCode);
+}
+
+static bool HandleDeviceResult(const char* operation, HRESULT hr) {
+    if (SUCCEEDED(hr)) return true;
+    const HRESULT removedReason = g_dev ? g_dev->GetDeviceRemovedReason() : hr;
+    if (IsDeviceLoss(hr) || IsDeviceLoss(removedReason)) {
+        EnterDeviceRecovery(operation, hr, "device_lost");
+        return false;
+    }
+    LogHR(operation, hr);
+    EnterDeviceRecovery(operation, hr, "renderer_failed");
+    return false;
 }
 
 static bool Init(HINSTANCE hInst) {
@@ -1614,116 +1907,26 @@ static bool Init(HINSTANCE hInst) {
     wcscpy_s(g_nid.szTip, L"Glassless3D Overlay — right-click to quit");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
-    // D3D11 + swap chain
-    // Use DXGI_SWAP_EFFECT_DISCARD (BitBlt model) — compatible with all window styles.
-    // FLIP_DISCARD fails with certain window flag combinations on some drivers.
-    DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 1;
-    scd.BufferDesc.Width  = (UINT)overlayW;
-    scd.BufferDesc.Height = (UINT)overlayH;
-    scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    scd.OutputWindow = g_hwnd;
-    scd.SampleDesc.Count = 1;
-    scd.Windowed  = TRUE;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-
     const BindingStatus initialBinding = RefreshCaptureBinding();
-    if (initialBinding != BindingStatus::Ready) {
-        Log("Initial capture binding unavailable: %d", static_cast<int>(initialBinding));
-        return false;
+    if (initialBinding == BindingStatus::NoOutput) {
+        g_bindingDirty = false;
+        SetCaptureState(CaptureState::Unavailable, "no_matching_output");
+        return true;
     }
     SyncOverlayWindowToBinding();
-    IDXGIAdapter1* selectedAdapter = OpenAdapterForLuid(g_binding.adapterLuid);
-    if (!selectedAdapter) {
-        Log("OpenAdapterForLuid failed for selected capture output");
-        return false;
-    }
-
-    D3D_FEATURE_LEVEL fl;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        selectedAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION, &scd, &g_swap, &g_dev, &fl, &g_ctx);
-    selectedAdapter->Release();
-    LogHR("D3D11CreateDeviceAndSwapChain(selected adapter)", hr);
-    Log("D3D feature level: 0x%04X (11_0=0xb000 11_1=0xb100)", (unsigned)fl);
-    if (FAILED(hr)) {
-        FatalError(L"D3D11CreateDeviceAndSwapChain failed.\n\nEnsure your GPU drivers are up to date.", hr);
-        return false;
-    }
-
-    ID3D11Texture2D* bb = nullptr;
-    hr = g_swap->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
-    LogHR("SwapChain GetBuffer", hr);
-    if (FAILED(hr)) { FatalError(L"GetBuffer failed", hr); return false; }
-    hr = g_dev->CreateRenderTargetView(bb, nullptr, &g_rtv);
-    LogHR("CreateRenderTargetView", hr);
-    bb->Release();
-    if (FAILED(hr)) { FatalError(L"CreateRenderTargetView failed", hr); return false; }
-
-    // Shaders
-    ID3DBlob* vsB = CompileShader(VS_SRC, "main", "vs_5_0");
-    ID3DBlob* psB = CompileShader(PS_SRC, "main", "ps_5_0");
-    ID3DBlob* normalizeB = CompileShader(NORMALIZE_PS_SRC, "main", "ps_5_0");
-    if (!vsB || !psB || !normalizeB) {
-        SafeRelease(vsB);
-        SafeRelease(psB);
-        SafeRelease(normalizeB);
-        return false;
-    }
-    hr = g_dev->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &g_vs);
-    if (SUCCEEDED(hr)) {
-        hr = g_dev->CreatePixelShader(psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &g_ps);
-    }
-    if (SUCCEEDED(hr)) {
-        hr = g_dev->CreatePixelShader(
-            normalizeB->GetBufferPointer(), normalizeB->GetBufferSize(), nullptr, &g_normalizePs);
-    }
-    SafeRelease(vsB);
-    SafeRelease(psB);
-    SafeRelease(normalizeB);
-    if (FAILED(hr)) { LogHR("Create renderer shaders", hr); return false; }
-
-    // Constant buffer
-    D3D11_BUFFER_DESC cbd = {};
-    cbd.ByteWidth = sizeof(CBuf); cbd.Usage = D3D11_USAGE_DYNAMIC;
-    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    hr = g_dev->CreateBuffer(&cbd, nullptr, &g_cb);
-    LogHR("CreateBuffer(CBuf)", hr);
-    if (FAILED(hr)) { FatalError(L"CreateBuffer(CBuf) failed", hr); return false; }
-
-    D3D11_BUFFER_DESC normalizeCbd = {};
-    normalizeCbd.ByteWidth = sizeof(NormalizeCB);
-    normalizeCbd.Usage = D3D11_USAGE_DEFAULT;
-    normalizeCbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    hr = g_dev->CreateBuffer(&normalizeCbd, nullptr, &g_normalizeCb);
-    LogHR("CreateBuffer(NormalizeCB)", hr);
-    if (FAILED(hr)) { FatalError(L"CreateBuffer(NormalizeCB) failed", hr); return false; }
-
-    // Samplers: keep warped game pixels crisp, but interpolate low-res depth.
-    D3D11_SAMPLER_DESC sceneSd = {};
-    sceneSd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-    sceneSd.AddressU = sceneSd.AddressV = sceneSd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    g_dev->CreateSamplerState(&sceneSd, &g_sceneSmp);
-
-    D3D11_SAMPLER_DESC depthSd = {};
-    depthSd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    depthSd.AddressU = depthSd.AddressV = depthSd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    g_dev->CreateSamplerState(&depthSd, &g_depthSmp);
-
-    g_renderWidth = static_cast<UINT>(overlayW);
-    g_renderHeight = static_cast<UINT>(overlayH);
-    SetRenderViewport();
-
-    InitGpuTiming();  // best-effort; diagnostics still work without GPU queries
-
-    // Bring up depth first as a 1x1 fallback so the pixel shader always has
-    // a valid t1 SRV, then try to upgrade to the real DepthInferencer.
-    if (!CreateFallbackDepthSrv()) {
-        Log("Warning: fallback depth SRV creation failed — depth slot will be null");
+    const HRESULT createHr = CreateDeviceAndRenderer();
+    if (FAILED(createHr)) {
+        LogHR("Initial CreateDeviceAndRenderer", createHr);
+        g_rebindRetry.Reset(GetTickCount64());
+        SetCaptureState(CaptureState::DeviceRecovery, "renderer_create_failed");
+        return true;
     }
     g_rebindRetry.Reset(GetTickCount64());
-    SetCaptureState(CaptureState::Rebinding, "startup");
+    if (initialBinding == BindingStatus::TargetSpansOutput) {
+        SetCaptureState(CaptureState::Unavailable, "target_spans_output");
+    } else {
+        SetCaptureState(CaptureState::Rebinding, "startup");
+    }
     return true;
 }
 
@@ -1740,6 +1943,18 @@ static void Frame() {
     TryAttachShm();
     TryAttachSettings();
     ApplySettings();   // CLI > GUI > autodetect → publishes to g_screenW, g_strength, etc.
+
+    PollTargetWindow();
+    if (g_captureState == CaptureState::Running && g_bindingDirty) {
+        QueueCaptureSignal(CaptureSignal::BindingDirty, "binding_changed");
+    }
+    if (g_swapResizePending && g_swap) {
+        const UINT width = g_pendingSwapWidth;
+        const UINT height = g_pendingSwapHeight;
+        g_swapResizePending = false;
+        const HRESULT resizeHr = ResizeSwapChain(width, height);
+        if (!HandleDeviceResult("ResizeBuffers", resizeHr)) return;
+    }
 
     // Read head position from shared memory
     float hx = 0.f, hy = 0.f, hz = 60.f;
@@ -1874,7 +2089,7 @@ static void Frame() {
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     HRESULT hr = g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (FAILED(hr)) {
-        LogHR("Map(CBuf)", hr);
+        HandleDeviceResult("Map(CBuf)", hr);
         return;
     }
     float cropX0    = g_depth ? g_depth->depth_crop_x0_uv() : 0.0f;
@@ -2016,7 +2231,8 @@ static void Frame() {
         }
     }
 
-    g_swap->Present(0, 0);
+    const HRESULT present_hr = g_swap->Present(0, 0);
+    if (!HandleDeviceResult("Present", present_hr)) return;
 }
 
 static void Cleanup() {
@@ -2028,33 +2244,14 @@ static void Cleanup() {
     if (g_shmH)    CloseHandle(g_shmH);
     if (g_setView) UnmapViewOfFile((void*)g_setView);
     if (g_setH)    CloseHandle(g_setH);
-    // Depth resources: destroy inferencer BEFORE the D3D device that owns its
-    // staging/depth textures and ORT session.
-    if (g_depth)       { delete g_depth; g_depth = nullptr; }
-    if (g_fallbackSrv) { g_fallbackSrv->Release(); g_fallbackSrv = nullptr; }
-    if (g_fallbackTex) { g_fallbackTex->Release(); g_fallbackTex = nullptr; }
-    ReleaseCaptureTextures();
-    SafeRelease(g_dup);
-    SafeReleaseQuery(g_gpuEnd);
-    SafeReleaseQuery(g_gpuStart);
-    SafeReleaseQuery(g_gpuDisjoint);
-    if (g_sceneSmp) g_sceneSmp->Release();
-    if (g_depthSmp) g_depthSmp->Release();
-    SafeRelease(g_normalizeCb);
-    if (g_cb)      g_cb->Release();
-    SafeRelease(g_normalizePs);
-    if (g_ps)      g_ps->Release();
-    if (g_vs)      g_vs->Release();
-    if (g_rtv)     g_rtv->Release();
-    if (g_swap)    g_swap->Release();
-    if (g_ctx)     g_ctx->Release();
-    if (g_dev)     g_dev->Release();
+    DestroyDeviceResources();
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
     LogInit();
     Log("=== Glassless3D Overlay starting ===");
     Log("cmdline: '%s'", cmd ? cmd : "");
+    EnablePerMonitorV2DpiAwareness();
 
     // WIC (used for Ctrl+Shift+S PNG screenshots) requires COM on this thread.
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

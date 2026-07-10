@@ -53,13 +53,13 @@ def test_overlay_shader_uses_focus_plane_as_convergence_plane():
     assert "float f  = (oz / (hz + oz)) - focusF;" in source
 
 
-def test_overlay_checks_constant_buffer_creation_and_map_failures():
+def test_overlay_routes_constant_buffer_creation_and_map_failures_to_recovery():
     source = Path("overlay/overlay.cpp").read_text(encoding="utf-8")
 
-    assert 'LogHR("CreateBuffer(CBuf)", hr)' in source
-    assert 'FatalError(L"CreateBuffer(CBuf) failed", hr)' in source
-    assert 'LogHR("Map(CBuf)", hr)' in source
-    assert "if (FAILED(hr)) {\n        LogHR(\"Map(CBuf)\", hr);\n        return;\n    }" in source
+    assert "hr = g_dev->CreateBuffer(&cbd, nullptr, &g_cb);" in source
+    assert 'HandleDeviceResult("Map(CBuf)", hr);' in source
+    assert "static bool HandleDeviceResult" in source
+    assert 'EnterDeviceRecovery(operation, hr, "device_lost")' in source
 
 
 def test_overlay_shader_contains_stereo_and_quilt_layout_paths():

@@ -126,6 +126,19 @@ static inline float half_to_float(uint16_t h) {
     return f;
 }
 
+static inline bool IsLikelyHudUv(float u, float v) {
+    // Conservative static HUD mask for screen-capture fallback depth.
+    // Monocular depth models treat UI as scene geometry, which creates false
+    // near planes and watery parallax around action bars, quest panes, chat,
+    // minimaps, and unit frames. Leave these pixels at ImageNet mean grey so
+    // the model gets the game view as the dominant signal.
+    if (v < 0.08f) return true;                         // top bars/unit frames
+    if (v > 0.78f) return true;                         // action bars/chat
+    if (u < 0.18f && v > 0.30f) return true;            // left chat/quest stack
+    if (u > 0.82f && (v < 0.28f || v > 0.62f)) return true; // minimap/side UI
+    return false;
+}
+
 // ── Impl ─────────────────────────────────────────────────────────────────────
 struct DepthInferImpl {
     // D3D11 resources (device/context NOT owned; borrowed from overlay).
@@ -365,6 +378,12 @@ struct DepthInferImpl {
                 // Sample from the center-cropped horizontal region.
                 int sx = crop_x0 + (ox * crop_w_eff) / lb_w;
                 if (sx >= cap_w) sx = cap_w - 1;
+                float u = (float)sx / (float)std::max(1, cap_w - 1);
+                float v = (float)sy / (float)std::max(1, cap_h - 1);
+                if (IsLikelyHudUv(u, v)) {
+                    // leave HUD-like pixels at ImageNet mean grey
+                    continue;
+                }
                 const uint8_t* px = row + sx * 4;   // BGRA8
                 float b = px[0] / 255.0f;
                 float g = px[1] / 255.0f;
@@ -614,7 +633,7 @@ struct DepthInferImpl {
         // Target std 0.22 was picked as ~σ of well-layered outdoor scenes —
         // enough to resolve wall depth variation without amplifying noise
         // on flat regions past the kMaxGain ceiling.
-        if (mode < 2) {
+        if (mode <= 2) {
             const int N2 = DepthInferencer::kModelSize;
 
             // Mean + variance on 1/4 subsample (single pass, Welford-style
@@ -638,9 +657,9 @@ struct DepthInferImpl {
             if (var < 0.0f) var = 0.0f;       // fp round-off
             float std_ = std::sqrt(var);
 
-            const float kTargetStd = mode == 1 ? 0.18f : 0.22f;
-            constexpr float kMinGain   = 1.0f;
-            const float kMaxGain = mode == 1 ? 2.5f : 3.5f;
+            const float kTargetStd = mode == 2 ? 0.20f : (mode == 1 ? 0.18f : 0.22f);
+            constexpr float kMinGain = 1.0f;
+            const float kMaxGain = mode == 2 ? 2.2f : (mode == 1 ? 2.5f : 3.5f);
             constexpr float kStdFloor  = 1e-4f;
 
             float gain = kTargetStd / (std_ > kStdFloor ? std_ : kStdFloor);
@@ -813,12 +832,23 @@ struct DepthInferImpl {
             cv_work.notify_all();
             worker.join();
         }
+        if (depth_prev_srv) { depth_prev_srv->Release(); depth_prev_srv = nullptr; }
         if (depth_srv) { depth_srv->Release(); depth_srv = nullptr; }
+        if (depth_prev_tex) { depth_prev_tex->Release(); depth_prev_tex = nullptr; }
         if (depth_tex) { depth_tex->Release(); depth_tex = nullptr; }
-        if (stage_bgra){ stage_bgra->Release(); stage_bgra = nullptr; }
+        if (stage_bgra) { stage_bgra->Release(); stage_bgra = nullptr; }
         session.reset();
         opts.reset();
         env.reset();
+        input_pending = false;
+        output_ready = false;
+        pending_input_f32.clear();
+        running_input_f32.clear();
+        ready_upload_fp16.clear();
+        dev = nullptr;
+        ctx = nullptr;
+        cap_w = 0;
+        cap_h = 0;
     }
 };
 
@@ -836,12 +866,28 @@ DepthInferencer::~DepthInferencer() {
 bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                            const std::wstring& model_path,
                            int capture_w, int capture_h) {
+    if (!impl_ || !dev || !ctx || capture_w <= 0 || capture_h <= 0) return false;
+    impl_->cleanup();
+    {
+        std::lock_guard<std::mutex> lock(impl_->m);
+        impl_->input_pending = false;
+        impl_->output_ready = false;
+        impl_->last_err.clear();
+    }
+    impl_->stop.store(false, std::memory_order_relaxed);
+    impl_->inferences.store(0, std::memory_order_relaxed);
     impl_->dev = dev;
     impl_->ctx = ctx;
     impl_->cap_w = capture_w;
     impl_->cap_h = capture_h;
-    if (!impl_->create_d3d_resources()) return false;
-    if (!impl_->create_ort_session(model_path)) return false;
+    if (!impl_->create_d3d_resources()) {
+        impl_->cleanup();
+        return false;
+    }
+    if (!impl_->create_ort_session(model_path)) {
+        impl_->cleanup();
+        return false;
+    }
     // Session is ready — spin up the async inference worker.
     impl_->worker = std::thread([impl = impl_.get()] { impl->worker_loop(); });
     return true;
