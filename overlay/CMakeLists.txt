@@ -32,7 +32,7 @@ if(NOT EXISTS "${DML_DIR}/lib/DirectML.dll")
         "Run: python scripts/bootstrap.py")
 endif()
 
-add_executable(Glassless3DOverlay WIN32 overlay.cpp depth_infer.cpp)
+add_executable(Glassless3DOverlay WIN32 overlay.cpp depth_infer.cpp capture_recovery.cpp)
 
 target_compile_definitions(Glassless3DOverlay PRIVATE UNICODE _UNICODE)
 
