@@ -989,9 +989,17 @@ class MainWindow(QMainWindow):
         if summary.depth_hz < _DEPTH_HZ_WARN:
             depth_status = f"LOW {depth_status}"
         self._depth_tile.setText(f"Depth\n{depth_status}")
-        self._capture_tile.setText(
-            "Capture\nFrame OK" if summary.has_frame else "Capture\nNo frame"
-        )
+        if summary.capture_state == "unavailable":
+            self._capture_tile.setText("Capture\nUnavailable")
+            self._capture_tile.setToolTip(summary.capture_reason or "desktop capture unavailable")
+        elif summary.capture_state in {"rebinding", "device_recovery"}:
+            self._capture_tile.setText("Capture\nRecovering")
+            self._capture_tile.setToolTip(summary.capture_reason or "native recovery in progress")
+        else:
+            self._capture_tile.setText(
+                "Capture\nFrame OK" if summary.has_frame else "Capture\nNo frame"
+            )
+            self._capture_tile.setToolTip("")
 
         if summary.depth_hz < _DEPTH_HZ_WARN:
             self._comfort_status.setText(
@@ -1014,6 +1022,10 @@ class MainWindow(QMainWindow):
 
         if not self._overlay.is_running():
             self._restart_overlay_from_health("process exited")
+            return
+
+        if summary.capture_state in {"unavailable", "rebinding", "device_recovery"}:
+            self._capture_loss_count = 0
             return
 
         if summary.has_frame:

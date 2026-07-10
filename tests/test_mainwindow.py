@@ -552,6 +552,38 @@ def test_runtime_health_restarts_overlay_after_repeated_capture_loss(window):
     assert "Restarted" in window._overlay_tile.text()
 
 
+def test_runtime_health_does_not_restart_an_intentionally_unavailable_capture(window):
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=3,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=8,
+        head_z_cm=58.5,
+        has_frame=False,
+        capture_state="unavailable",
+        capture_reason="target_spans_output",
+    )
+    fake_thread = MagicMock()
+    fake_thread.isRunning.return_value = True
+    window._thread = fake_thread
+    window._overlay_started = True
+    window._overlay = MagicMock()
+    window._overlay.is_running.return_value = True
+
+    window._apply_runtime_health(summary)
+    window._apply_runtime_health(summary)
+    window._apply_runtime_health(summary)
+
+    window._overlay.stop.assert_not_called()
+    window._overlay.start.assert_not_called()
+    assert "Unavailable" in window._capture_tile.text()
+
+
 def test_low_depth_runtime_health_does_not_apply_safe_preset(qapp, tmp_path):
     cfg_path = str(tmp_path / "config.yaml")
     summary = diagnostics.OverlayRuntimeSummary(

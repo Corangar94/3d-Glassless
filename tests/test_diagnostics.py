@@ -51,6 +51,38 @@ def test_diagnostics_reports_malformed_profile_config_without_crashing(tmp_path,
     assert any("profile configuration" in problem for problem in report.problems)
 
 
+def test_diagnostics_explains_unavailable_capture_from_overlay_summary(tmp_path, monkeypatch):
+    log_path = tmp_path / "overlay.log"
+    log_path.write_text(
+        "[15:26:00.371] Frame#300 acq[ok=300 timeout=0 lost=0 other=0] "
+        "shm[LIVE reads=300 changes=200 (34/s) ts=123] "
+        "depth[total=17 5Hz mode=balanced] head=(0.00,0.00,60.00) "
+        "rest=(0.00,0.00) rel=(0.00,0.00) wobble=0.00 strength=1.00 "
+        "depth=30.00 hasFrame=0 capture=unavailable capture_reason=target_spans_output\n",
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("camera:\n  index: 0\n", encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "find_overlay_exe", lambda: tmp_path / "overlay.exe")
+    monkeypatch.setattr(diagnostics, "find_depth_model", lambda: tmp_path / "model.onnx")
+    monkeypatch.setattr(diagnostics, "_find_overlay_log", lambda _exe: log_path)
+    monkeypatch.setattr(
+        diagnostics,
+        "_probe_camera",
+        lambda index: diagnostics.CameraProbe(index=index, opened=True, frame_ok=True),
+    )
+    monkeypatch.setattr(diagnostics, "_collect_display_inventory", lambda: [])
+
+    report = diagnostics.collect_diagnostics(config_path=cfg)
+
+    assert report.ready is False
+    assert report.overlay_summary is not None
+    assert report.overlay_summary.capture_state == "unavailable"
+    assert report.overlay_summary.capture_reason == "target_spans_output"
+    assert "move it fully onto one display" in diagnostics.format_diagnostics_report(report)
+    assert '"capture_reason": "target_spans_output"' in diagnostics.format_diagnostics_json(report)
+
+
 def test_collect_diagnostics_reports_overlay_assets(tmp_path, monkeypatch):
     exe = tmp_path / "Glassless3DOverlay.exe"
     model = tmp_path / "models" / "depth_anything_v2_small_fp16.onnx"

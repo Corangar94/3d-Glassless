@@ -27,6 +27,13 @@ from tracker.display_backends import (
 
 _DEPTH_HZ_READY_MIN = 3
 _OVERLAY_LOG_FRESH_SECONDS = 30.0
+_CAPTURE_REASON_GUIDANCE = {
+    "target_spans_output": "target window spans multiple displays; move it fully onto one display",
+    "no_matching_output": "no attached display output matches the target; reconnect or enable the display",
+    "duplicate_unavailable": "desktop capture is unavailable or protected for this output; use a normal local desktop session",
+    "device_lost": "the graphics device was reset; wait for the overlay to rebind after the display stabilizes",
+    "adapter_changed": "the target moved to another graphics adapter; wait for the overlay to rebuild its renderer",
+}
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,8 @@ class OverlayRuntimeSummary:
     panel_width_px: int | None = None
     panel_height_px: int | None = None
     tracking_mode: int | None = None
+    capture_state: str | None = None
+    capture_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,7 @@ _SUMMARY_RE = re.compile(
     r"(?:tracking=(?P<tracking>\d+)\s+)?)?"
     r"head=\([^,]+,[^,]+,(?P<head_z>-?\d+(?:\.\d+)?)\).*?"
     r"hasFrame=(?P<has_frame>[01])"
+    r"(?:\s+capture=(?P<capture_state>[a-z_]+)\s+capture_reason=(?P<capture_reason>[a-z0-9_]+))?"
 )
 
 
@@ -210,6 +220,16 @@ def collect_diagnostics(
             warnings.append("overlay log reports no captured frame")
             if require_live_runtime:
                 problems.append("overlay runtime has no captured frame")
+        if overlay_summary.capture_state == "unavailable":
+            guidance = _CAPTURE_REASON_GUIDANCE.get(
+                overlay_summary.capture_reason or "",
+                "desktop capture is unavailable; check the overlay log for its capture reason",
+            )
+            problems.append(f"overlay capture unavailable: {guidance}")
+        elif overlay_summary.capture_state in {"rebinding", "device_recovery"}:
+            warnings.append(
+                f"overlay capture is {overlay_summary.capture_state}; waiting for native recovery"
+            )
         if runtime_backend_id is not None:
             try:
                 configured_code = backend_code(configured_backend_id)
@@ -324,6 +344,10 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
                 f"- tracking_mode: {s.tracking_mode}" if s.tracking_mode is not None else "- tracking_mode: unavailable",
                 f"- headZ: {s.head_z_cm:.2f} cm",
                 f"- hasFrame: {s.has_frame}",
+                (
+                    f"- capture: {s.capture_state or 'unavailable'} "
+                    f"({s.capture_reason or 'not reported'})"
+                ),
             ]
         )
 
@@ -788,6 +812,8 @@ def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object]
         "tracking_mode": summary.tracking_mode,
         "head_z_cm": summary.head_z_cm,
         "has_frame": summary.has_frame,
+        "capture_state": summary.capture_state,
+        "capture_reason": summary.capture_reason,
     }
 
 
@@ -817,6 +843,8 @@ def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:
         tracking_mode=int(match.group("tracking")) if match.group("tracking") is not None else None,
         head_z_cm=float(match.group("head_z")),
         has_frame=match.group("has_frame") == "1",
+        capture_state=match.group("capture_state"),
+        capture_reason=match.group("capture_reason"),
     )
 
 
