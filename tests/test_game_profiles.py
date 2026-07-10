@@ -75,3 +75,37 @@ def test_publisher_approved_mode_remains_reserved_and_fails_closed():
     assert decision.active_mode is RequestedMode.NON_INJECTING_DESKTOP
     assert not decision.allows(Backend.RESHADE_ADDON)
     assert decision.reason == "publisher-approved integration is not implemented"
+
+
+def test_invalid_runtime_context_cannot_enable_reshade():
+    profile = GameProfile(
+        profile_id="invalid",
+        display_name="Invalid",
+        executable_path="C:/Games/Invalid/Invalid.exe",
+        play_context="online_multiplayer",  # type: ignore[arg-type]
+        requested_mode=RequestedMode.OFFLINE_ADVANCED,
+        advanced_acknowledged=True,
+    )
+
+    decision = evaluate_profile(profile)
+
+    assert decision.active_mode is RequestedMode.NON_INJECTING_DESKTOP
+    assert not decision.allows(Backend.RESHADE_ADDON)
+    assert decision.reason == "invalid play context permits non-injecting desktop only"
+
+
+def test_truthy_non_boolean_acknowledgement_cannot_enable_reshade():
+    profile = GameProfile(
+        profile_id="invalid-acknowledgement",
+        display_name="Invalid acknowledgement",
+        executable_path="C:/Games/Invalid/Invalid.exe",
+        play_context=PlayContext.OFFLINE_SINGLEPLAYER,
+        requested_mode=RequestedMode.OFFLINE_ADVANCED,
+        advanced_acknowledged="yes",  # type: ignore[arg-type]
+    )
+
+    decision = evaluate_profile(profile)
+
+    assert decision.active_mode is RequestedMode.NON_INJECTING_DESKTOP
+    assert not decision.allows(Backend.RESHADE_ADDON)
+    assert decision.reason == "offline advanced requires acknowledgement"

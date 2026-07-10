@@ -1,6 +1,6 @@
 # tests/test_presets.py
 import pytest
-from launcher.presets import list_presets, save_preset, load_preset, delete_preset
+from launcher.presets import PresetConfigError, delete_preset, list_presets, load_preset, save_preset
 
 @pytest.fixture
 def tmp_config(tmp_path):
@@ -8,6 +8,27 @@ def tmp_config(tmp_path):
 
 def test_list_empty(tmp_config):
     assert list_presets(tmp_config) == []
+
+
+def test_list_presets_returns_empty_for_malformed_yaml(tmp_config):
+    from pathlib import Path
+
+    Path(tmp_config).write_text("presets: [unterminated\n", encoding="utf-8")
+
+    assert list_presets(tmp_config) == []
+
+
+def test_save_preset_does_not_overwrite_malformed_yaml(tmp_config):
+    from pathlib import Path
+
+    original = "presets: [unterminated\n"
+    Path(tmp_config).write_text(original, encoding="utf-8")
+
+    with pytest.raises(PresetConfigError, match="malformed"):
+        save_preset(tmp_config, "safe", {"strength_x": 1.0})
+
+    assert Path(tmp_config).read_text(encoding="utf-8") == original
+
 
 def test_save_and_list(tmp_config):
     save_preset(tmp_config, "wow", {"strength_x": 1.5, "depth_curve": 1})

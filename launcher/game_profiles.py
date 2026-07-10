@@ -65,8 +65,15 @@ def evaluate_profile(profile: GameProfile) -> PolicyDecision:
             "online profiles permit non-injecting desktop only",
         )
 
+    if profile.play_context is not PlayContext.OFFLINE_SINGLEPLAYER:
+        return PolicyDecision(
+            RequestedMode.NON_INJECTING_DESKTOP,
+            _DESKTOP_BACKENDS,
+            "invalid play context permits non-injecting desktop only",
+        )
+
     if profile.requested_mode is RequestedMode.OFFLINE_ADVANCED:
-        if not profile.advanced_acknowledged:
+        if profile.advanced_acknowledged is not True:
             return PolicyDecision(
                 RequestedMode.NON_INJECTING_DESKTOP,
                 _DESKTOP_BACKENDS,

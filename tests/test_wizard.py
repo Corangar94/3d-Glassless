@@ -145,10 +145,28 @@ def test_done_page_writes_overlay_config_defaults(qapp, tmp_path):
         "strength_x": pytest.approx(1.0),
         "strength_y": pytest.approx(1.0),
         "virtual_depth_cm": pytest.approx(30.0),
+        "depth_curve": 2,
+        "depth_gamma": pytest.approx(2.0),
         "screen_w_cm": pytest.approx(59.8),
         "screen_h_cm": pytest.approx(33.6),
     }
     assert cfg["gui"] == {"compact_mode": False}
+
+
+def test_done_page_writes_default_non_injecting_game_profile(qapp, tmp_path):
+    import yaml
+
+    config_path = str(tmp_path / "config.yaml")
+    page = DonePage(config_path=config_path)
+    page._write_config()
+
+    with open(config_path, encoding="utf-8") as config_file:
+        cfg = yaml.safe_load(config_file)
+
+    assert cfg["active_game_profile"] == "default"
+    assert cfg["game_profiles"]["default"]["play_context"] == "online_multiplayer"
+    assert cfg["game_profiles"]["default"]["requested_mode"] == "non_injecting_desktop"
+    assert cfg["game_profiles"]["default"]["advanced_acknowledged"] is False
 
 
 def test_setup_wizard_has_four_pages(qapp, tmp_path):

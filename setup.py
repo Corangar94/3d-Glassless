@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Sequence
 
 from launcher.game_profile_store import ProfileStoreError, load_profiles
-from launcher.game_profiles import Backend, PolicyDecision, evaluate_profile
+from launcher.game_profiles import Backend, GameProfile, PolicyDecision, evaluate_profile
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
@@ -147,6 +147,36 @@ def install(
     print("  5. Enjoy!\n")
 
 
+def _normalized_path(path: str | Path) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(path))))
+
+
+def _require_target_matches_active_profile(
+    active_profile: GameProfile,
+    game_dir: str,
+    install_profile: dict,
+) -> None:
+    executable_path = active_profile.executable_path.strip()
+    if not executable_path:
+        sys.exit(
+            "ERROR: The active game profile requires an executable path before ReShade installation."
+        )
+
+    executable = Path(executable_path)
+    if not executable.is_absolute():
+        sys.exit("ERROR: The active game profile executable path must be absolute.")
+    if _normalized_path(executable.parent) != _normalized_path(game_dir):
+        sys.exit("ERROR: Target game directory does not match active profile executable.")
+
+    setup = install_profile.get("setup")
+    expected_name = setup.get("executable") if isinstance(setup, dict) else None
+    if isinstance(expected_name, str) and expected_name:
+        if os.path.normcase(executable.name) != os.path.normcase(expected_name):
+            sys.exit("ERROR: Target executable does not match selected ReShade install profile.")
+    if not executable.is_file():
+        sys.exit(f"ERROR: Active profile executable not found: {executable}")
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Glassless3D experimental ReShade backend installer")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -169,23 +199,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         sys.exit(f"ERROR: {exc}")
     if active_profile_id is None:
         sys.exit("ERROR: No active Glassless3D game profile is configured.")
-    policy = evaluate_profile(profiles[active_profile_id])
+    active_profile = profiles[active_profile_id]
+    policy = evaluate_profile(active_profile)
     if not policy.allows(Backend.RESHADE_ADDON):
         sys.exit(f"ERROR: ReShade installation is not permitted: {policy.reason}")
 
-    if not os.path.exists(ADDON_PATH):
-        sys.exit("ERROR: Glassless3D.addon not found.\nBuild it: cd addon && build.bat")
-
     if args.game:
-        profile  = load_profile(args.game)
-        game_dir = find_game_dir(profile)
+        install_profile = load_profile(args.game)
+        game_dir = find_game_dir(install_profile)
     else:
-        profile  = load_profile(args.profile)
+        install_profile = load_profile(args.profile)
         game_dir = os.path.abspath(args.game_dir)
         if not os.path.isdir(game_dir):
             sys.exit(f"ERROR: Directory not found: {game_dir}")
 
-    install(game_dir, profile, dry_run=args.dry_run, policy=policy)
+    _require_target_matches_active_profile(active_profile, game_dir, install_profile)
+
+    if not os.path.exists(ADDON_PATH):
+        sys.exit("ERROR: Glassless3D.addon not found.\nBuild it: cd addon && build.bat")
+
+    install(game_dir, install_profile, dry_run=args.dry_run, policy=policy)
 
 
 if __name__ == "__main__":

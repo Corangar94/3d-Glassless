@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import copy
 import dataclasses
 import logging
+import re
 import yaml
 from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QPixmap
@@ -15,12 +17,15 @@ from PySide6.QtGui import QPixmap
 _log = logging.getLogger(__name__)
 from PySide6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QApplication,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QScrollArea,
@@ -31,7 +36,13 @@ from PySide6.QtWidgets import (
 )
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
 from tracker.display_backends import backend_code, normalize_backend_id
-from launcher.presets import list_presets, save_preset, load_preset, delete_preset
+from launcher.presets import (
+    PresetConfigError,
+    delete_preset,
+    list_presets,
+    load_preset,
+    save_preset,
+)
 from launcher.calibration import detect_screen_cm, measure_head_distance_or_none
 from launcher.diagnostics import (
     OverlayRuntimeSummary,
@@ -41,9 +52,17 @@ from launcher.diagnostics import (
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
 from launcher.tracker_process import TrackerProcess
+from launcher.game_profile_store import ProfileStoreError, load_profiles, save_profiles
+from launcher.game_profiles import (
+    Backend,
+    GameProfile,
+    PlayContext,
+    RequestedMode,
+    evaluate_profile,
+)
 
 # Window dimensions
-_EXPANDED_W, _EXPANDED_H = 760, 560
+_EXPANDED_W, _EXPANDED_H = 760, 700
 _COMPACT_W,  _COMPACT_H  = 760, 120
 
 _STATUS_TEXT = {
@@ -52,6 +71,7 @@ _STATUS_TEXT = {
     "paused":       "● PAUSED",
     "stopped":      "● STOPPED",
     "initializing": "⟳ INITIALIZING",
+    "restarting":   "⟳ RESTARTING",
     "error":        "✕ ERROR",
 }
 _STATUS_COLOR = {
@@ -60,6 +80,7 @@ _STATUS_COLOR = {
     "paused":       "#888888",
     "stopped":      "#888888",
     "initializing": "#3ecfcf",
+    "restarting":   "#f0c15a",
     "error":        "#e84040",
 }
 _DARK_BG = "#08110f"
@@ -67,15 +88,28 @@ _TITLE_BG = "#10231f"
 _CARD_BG = "#132b25"
 _ACCENT = "#f0c15a"
 _DEPTH_HZ_WARN = 6
+_CAPTURE_LOSS_RESTART_THRESHOLD = 3
 _DEPTH_MODES = {
     "quality": 0,
     "balanced": 1,
     "fast": 2,
 }
+_STEREO_LAYOUTS = {"full_sbs": 0, "half_sbs": 1}
+_EYE_ORDERS = {"left_right": 0, "right_left": 1}
+_TRACKING_MODES = {"glassless3d_managed": 0, "vendor_managed": 1}
 _DEPTH_MODE_LABELS = {
     0: "Quality",
     1: "Balanced",
     2: "Fast",
+}
+_PROFILE_CONTEXT_LABELS = {
+    PlayContext.ONLINE_MULTIPLAYER: "Online / multiplayer",
+    PlayContext.OFFLINE_SINGLEPLAYER: "Offline / single-player",
+}
+_REQUESTED_MODE_LABELS = {
+    RequestedMode.NON_INJECTING_DESKTOP: "Non-injecting desktop",
+    RequestedMode.OFFLINE_ADVANCED: "Offline advanced",
+    RequestedMode.PUBLISHER_APPROVED_INTEGRATION: "Publisher-approved integration",
 }
 
 _COMFORT_PRESETS = {
@@ -84,6 +118,8 @@ _COMFORT_PRESETS = {
         "strength_x": 0.75,
         "strength_y": 0.30,
         "virtual_depth_cm": 24.0,
+        "depth_curve": 2,
+        "depth_gamma": 1.8,
         "focus_radius": 0.12,
         "smoothing_alpha": 0.16,
         "deadzone_mm": 6.0,
@@ -93,6 +129,8 @@ _COMFORT_PRESETS = {
         "strength_x": 1.00,
         "strength_y": 0.40,
         "virtual_depth_cm": 30.0,
+        "depth_curve": 2,
+        "depth_gamma": 2.0,
         "focus_radius": 0.10,
         "smoothing_alpha": 0.12,
         "deadzone_mm": 5.0,
@@ -102,6 +140,8 @@ _COMFORT_PRESETS = {
         "strength_x": 1.25,
         "strength_y": 0.65,
         "virtual_depth_cm": 42.0,
+        "depth_curve": 2,
+        "depth_gamma": 2.2,
         "focus_radius": 0.08,
         "smoothing_alpha": 0.10,
         "deadzone_mm": 4.0,
@@ -132,6 +172,76 @@ def _depth_mode_name(code: int) -> str:
     return "balanced"
 
 
+class ConfigMappingError(ValueError):
+    """Raised when config.yaml is valid YAML but not a mapping."""
+
+
+def _load_yaml_mapping(path: str, fallback: dict[str, object] | None = None) -> dict[str, object]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = yaml.safe_load(f)
+    except FileNotFoundError:
+        return copy.deepcopy(fallback) if fallback is not None else {}
+    if isinstance(loaded, dict):
+        return loaded
+    raise ConfigMappingError("config root must be a mapping")
+
+
+def _ensure_mapping_child(data: dict[str, object], key: str) -> dict[str, object]:
+    child = data.get(key)
+    if isinstance(child, dict):
+        return child
+    child = {}
+    data[key] = child
+    return child
+
+
+def _positive_float(data: dict[str, object], key: str, default: float) -> float:
+    raw = data.get(key, default)
+    if not isinstance(raw, (int, float, str)):
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0.0 else default
+
+
+def _calibrated_float(
+    overlay: dict[str, object],
+    calibration: dict[str, object],
+    calibration_key: str,
+    overlay_key: str,
+    default: float,
+) -> float:
+    value = _positive_float(calibration, calibration_key, 0.0)
+    if value > 0.0:
+        return value
+    return _positive_float(overlay, overlay_key, default)
+
+
+def _enum_code(data: dict[str, object], key: str, choices: dict[str, int], default: int) -> int:
+    value = data.get(key)
+    if isinstance(value, str):
+        return choices.get(value.strip().lower(), default)
+    try:
+        code = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return code if code in choices.values() else default
+
+
+def _positive_int(data: dict[str, object], key: str, default: int = 0) -> int:
+    raw = data.get(key, default)
+    if not isinstance(raw, (int, float, str)):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 
 class MainWindow(QMainWindow):
     def __init__(
@@ -144,33 +254,47 @@ class MainWindow(QMainWindow):
         self._config = config
         self._config_path = config_path
         self._compact: bool = config.get("gui", {}).get("compact_mode", False)
-        self._thread: Optional[TrackerThread] = None
+        self._thread: Optional[TrackerProcess] = None
         self._overlay = OverlayProcess()
+        self._overlay_started = False
+        self._hidden_for_overlay = False
+        self._capture_loss_count = 0
         self._debug_monitor_proc: Optional[subprocess.Popen[bytes]] = None
         self._drag_pos: Optional[QPoint] = None
-        self._auto_safe_applied = False
+        self._initialize_game_profiles()
 
         self._settings_writer = SharedSettingsWriter()
         trk = config.get("tracking", {})
         self._camera_tilt_deg: float = float(trk.get("camera_tilt_deg", 0.0))
         ov = config.get("overlay", {})
+        if not isinstance(ov, dict):
+            ov = {}
+        calibration = ov.get("display_calibration", {})
+        if not isinstance(calibration, dict):
+            calibration = {}
         self._display_backend_id = normalize_backend_id(ov.get("display_backend", "desktop_overlay"))
         self._settings = OverlaySettings(
             strength_x=float(ov.get("strength_x", 1.0)),
             strength_y=float(ov.get("strength_y", 1.0)),
             virtual_depth_cm=float(ov.get("virtual_depth_cm", 30.0)),
-            screen_w_cm=float(ov.get("screen_w_cm", 0.0)),
-            screen_h_cm=float(ov.get("screen_h_cm", 0.0)),
+            screen_w_cm=_calibrated_float(ov, calibration, "panel_width_cm", "screen_w_cm", 0.0),
+            screen_h_cm=_calibrated_float(ov, calibration, "panel_height_cm", "screen_h_cm", 0.0),
             depth_curve=int(ov.get("depth_curve", 1)),
             depth_gamma=float(ov.get("depth_gamma", 1.0)),
             focus_radius=float(ov.get("focus_radius", 0.1)),
-            head_dist_cm=float(ov.get("head_dist_cm", 60.0)),
+            head_dist_cm=_calibrated_float(ov, calibration, "viewer_distance_cm", "head_dist_cm", 60.0),
             camera_fov_deg=float(ov.get("camera_fov_deg", 90.0)),
-            ipd_mm=float(ov.get("ipd_mm", 64.0)),
+            ipd_mm=_calibrated_float(ov, calibration, "ipd_mm", "ipd_mm", 64.0),
             smoothing_alpha=float(ov.get("smoothing_alpha", 0.1)),
             deadzone_mm=float(ov.get("deadzone_mm", 5.0)),
             display_backend=backend_code(self._display_backend_id),
             depth_mode=_depth_mode_code(ov.get("depth_performance_mode", ov.get("depth_mode", "balanced"))),
+            stereo_layout=_enum_code(calibration, "stereo_layout", _STEREO_LAYOUTS, 0),
+            eye_order=_enum_code(calibration, "eye_order", _EYE_ORDERS, 0),
+            panel_width_px=_positive_int(calibration, "panel_width_px"),
+            panel_height_px=_positive_int(calibration, "panel_height_px"),
+            focus_plane_cm=_positive_float(calibration, "focus_plane_cm", 0.0),
+            tracking_mode=_enum_code(calibration, "tracking_mode", _TRACKING_MODES, 0),
         )
         self._settings_writer.write(self._settings)
 
@@ -192,6 +316,57 @@ class MainWindow(QMainWindow):
         self._health_timer.timeout.connect(self._safe_refresh_runtime_health)
         self._health_timer.start()
         self._safe_refresh_runtime_health()
+
+    def _initialize_game_profiles(self) -> None:
+        self._profile_store_error: str | None = None
+        try:
+            profiles, active_profile_id = load_profiles(
+                Path(self._config_path),
+                fallback=self._config,
+            )
+        except ProfileStoreError as exc:
+            profiles = {}
+            active_profile_id = None
+            self._profile_store_error = str(exc)
+
+        if active_profile_id is None:
+            default_profile = GameProfile(
+                profile_id="default",
+                display_name="Default profile",
+                executable_path="",
+            )
+            profiles = {default_profile.profile_id: default_profile}
+            active_profile_id = default_profile.profile_id
+
+        self._profiles: dict[str, GameProfile] = profiles
+        self._active_profile_id = active_profile_id
+        self._active_profile = self._profiles[active_profile_id]
+        self._policy_decision = evaluate_profile(self._active_profile)
+
+        if self._profile_store_error is None:
+            self._persist_game_profiles(fallback=self._config)
+
+    def _persist_game_profiles(
+        self,
+        *,
+        fallback: dict[str, object] | None = None,
+        base_config: dict[str, object] | None = None,
+    ) -> bool:
+        if self._profile_store_error is not None:
+            return False
+        try:
+            save_profiles(
+                Path(self._config_path),
+                self._profiles,
+                self._active_profile_id,
+                fallback=fallback,
+                base_config=base_config,
+            )
+        except (OSError, ProfileStoreError) as exc:
+            self._profile_store_error = str(exc)
+            self._update_profile_mode_label()
+            return False
+        return True
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -257,6 +432,8 @@ class MainWindow(QMainWindow):
             health_row.addWidget(tile)
         layout.addLayout(health_row)
 
+        layout.addWidget(self._make_game_profile_panel())
+
         mid_row = QHBoxLayout()
         mid_row.setSpacing(12)
         self._camera_label = QLabel("Camera preview is available in embedded tracker mode")
@@ -292,6 +469,226 @@ class MainWindow(QMainWindow):
         )
         tile.setMinimumHeight(64)
         return tile
+
+    def _make_game_profile_panel(self) -> QGroupBox:
+        panel = QGroupBox("Game profile")
+        panel.setStyleSheet(
+            f"QGroupBox{{background:{_CARD_BG};color:{_ACCENT};font-weight:800;"
+            "border:1px solid #254f45;border-radius:10px;margin-top:8px;padding:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}"
+        )
+        layout = QFormLayout(panel)
+        layout.setContentsMargins(10, 12, 10, 8)
+        layout.setSpacing(6)
+
+        profile_row = QWidget()
+        profile_layout = QHBoxLayout(profile_row)
+        profile_layout.setContentsMargins(0, 0, 0, 0)
+        profile_layout.setSpacing(6)
+        self._profile_combo = QComboBox()
+        for profile_id, profile in sorted(
+            self._profiles.items(),
+            key=lambda item: (item[1].display_name.casefold(), item[0]),
+        ):
+            self._profile_combo.addItem(profile.display_name, profile_id)
+        self._profile_combo.setCurrentIndex(
+            max(0, self._profile_combo.findData(self._active_profile_id))
+        )
+        profile_layout.addWidget(self._profile_combo)
+        self._profile_add_button = QPushButton("Add game")
+        self._profile_add_button.setToolTip(
+            "Create a manually named profile. Glassless3D does not auto-classify games."
+        )
+        profile_layout.addWidget(self._profile_add_button)
+        layout.addRow("Profile", profile_row)
+
+        self._profile_executable_edit = QLineEdit()
+        self._profile_executable_edit.setPlaceholderText("C:/Games/Title/Title.exe")
+        layout.addRow("Executable", self._profile_executable_edit)
+
+        self._play_context_combo = QComboBox()
+        for context, label in _PROFILE_CONTEXT_LABELS.items():
+            self._play_context_combo.addItem(label, context.value)
+        layout.addRow("Play context", self._play_context_combo)
+
+        self._requested_mode_combo = QComboBox()
+        for mode, label in _REQUESTED_MODE_LABELS.items():
+            self._requested_mode_combo.addItem(label, mode.value)
+        layout.addRow("Requested mode", self._requested_mode_combo)
+
+        self._advanced_ack_checkbox = QCheckBox(
+            "I confirmed this game permits advanced integration"
+        )
+        self._advanced_ack_checkbox.setStyleSheet("color:#dce8df;font-size:11px;")
+        layout.addRow("", self._advanced_ack_checkbox)
+
+        self._profile_mode_label = QLabel()
+        self._profile_mode_label.setWordWrap(True)
+        layout.addRow("Active", self._profile_mode_label)
+
+        self._profile_disclaimer_label = QLabel(
+            "Online compatibility is title-specific and subject to the game publisher and anti-cheat policy."
+        )
+        self._profile_disclaimer_label.setWordWrap(True)
+        self._profile_disclaimer_label.setStyleSheet("color:#8ea69b;font-size:10px;")
+        layout.addRow("", self._profile_disclaimer_label)
+
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_selection_changed)
+        self._profile_add_button.clicked.connect(self._add_game_profile)
+        self._profile_executable_edit.editingFinished.connect(self._on_profile_controls_changed)
+        self._play_context_combo.currentIndexChanged.connect(self._on_profile_controls_changed)
+        self._requested_mode_combo.currentIndexChanged.connect(self._on_profile_controls_changed)
+        self._advanced_ack_checkbox.toggled.connect(self._on_profile_controls_changed)
+        self._sync_profile_controls()
+        return panel
+
+    def _sync_profile_controls(self) -> None:
+        if not hasattr(self, "_profile_combo"):
+            return
+        controls = (
+            self._profile_combo,
+            self._play_context_combo,
+            self._requested_mode_combo,
+            self._advanced_ack_checkbox,
+            self._profile_executable_edit,
+        )
+        for control in controls:
+            control.blockSignals(True)
+        try:
+            profile_index = self._profile_combo.findData(self._active_profile_id)
+            if profile_index >= 0:
+                self._profile_combo.setCurrentIndex(profile_index)
+            context_index = self._play_context_combo.findData(self._active_profile.play_context.value)
+            if context_index >= 0:
+                self._play_context_combo.setCurrentIndex(context_index)
+            mode_index = self._requested_mode_combo.findData(self._active_profile.requested_mode.value)
+            if mode_index >= 0:
+                self._requested_mode_combo.setCurrentIndex(mode_index)
+            self._advanced_ack_checkbox.setChecked(self._active_profile.advanced_acknowledged)
+            self._profile_executable_edit.setText(self._active_profile.executable_path)
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+
+        editable = self._profile_store_error is None
+        advanced_controls_enabled = (
+            editable and self._active_profile.play_context is PlayContext.OFFLINE_SINGLEPLAYER
+        )
+        self._profile_combo.setEnabled(editable)
+        self._play_context_combo.setEnabled(editable)
+        self._requested_mode_combo.setEnabled(advanced_controls_enabled)
+        self._advanced_ack_checkbox.setEnabled(advanced_controls_enabled)
+        self._profile_executable_edit.setEnabled(editable)
+        self._profile_add_button.setEnabled(editable)
+        self._update_profile_mode_label()
+
+    def _update_profile_mode_label(self) -> None:
+        if not hasattr(self, "_profile_mode_label"):
+            return
+        if self._profile_store_error is not None:
+            self._profile_mode_label.setStyleSheet("color:#ff9b9b;font-size:11px;")
+            self._profile_mode_label.setText(
+                f"Profile configuration error: {self._profile_store_error}"
+            )
+            return
+
+        active_mode = _REQUESTED_MODE_LABELS[self._policy_decision.active_mode]
+        if self._policy_decision.reason:
+            text = f"{active_mode} — {self._policy_decision.reason}"
+        else:
+            text = active_mode
+        self._profile_mode_label.setStyleSheet("color:#b9d7c7;font-size:11px;")
+        self._profile_mode_label.setText(text)
+
+    def _on_profile_selection_changed(self, index: int) -> None:
+        profile_id = self._profile_combo.itemData(index)
+        if not isinstance(profile_id, str) or profile_id not in self._profiles:
+            return
+        previous_profile_id = self._active_profile_id
+        previous_profile = self._active_profile
+        self._active_profile_id = profile_id
+        self._active_profile = self._profiles[profile_id]
+        self._policy_decision = evaluate_profile(self._active_profile)
+        if not self._persist_game_profiles():
+            self._active_profile_id = previous_profile_id
+            self._active_profile = previous_profile
+            self._policy_decision = evaluate_profile(previous_profile)
+        self._sync_profile_controls()
+
+    def _on_profile_controls_changed(self, *_: object) -> None:
+        if self._profile_store_error is not None:
+            return
+        try:
+            play_context = PlayContext(str(self._play_context_combo.currentData()))
+        except ValueError:
+            play_context = PlayContext.ONLINE_MULTIPLAYER
+        try:
+            requested_mode = RequestedMode(str(self._requested_mode_combo.currentData()))
+        except ValueError:
+            requested_mode = RequestedMode.NON_INJECTING_DESKTOP
+        advanced_acknowledged = self._advanced_ack_checkbox.isChecked()
+        if play_context is PlayContext.ONLINE_MULTIPLAYER:
+            requested_mode = RequestedMode.NON_INJECTING_DESKTOP
+            advanced_acknowledged = False
+
+        previous_profile = self._active_profile
+        updated_profile = dataclasses.replace(
+            previous_profile,
+            play_context=play_context,
+            requested_mode=requested_mode,
+            advanced_acknowledged=advanced_acknowledged,
+            executable_path=self._profile_executable_edit.text().strip(),
+        )
+        self._profiles[self._active_profile_id] = updated_profile
+        self._active_profile = updated_profile
+        self._policy_decision = evaluate_profile(updated_profile)
+        if not self._persist_game_profiles():
+            self._profiles[self._active_profile_id] = previous_profile
+            self._active_profile = previous_profile
+            self._policy_decision = evaluate_profile(previous_profile)
+            self._sync_profile_controls()
+            return
+        self._sync_profile_controls()
+
+    def _add_game_profile(self) -> None:
+        if self._profile_store_error is not None:
+            return
+        name, accepted = QInputDialog.getText(self, "Add game profile", "Game name:")
+        display_name = name.strip()
+        if not accepted or not display_name:
+            return
+
+        base_profile_id = re.sub(r"[^a-z0-9]+", "-", display_name.casefold()).strip("-")
+        if not base_profile_id:
+            base_profile_id = "game"
+        profile_id = base_profile_id
+        suffix = 2
+        while profile_id in self._profiles:
+            profile_id = f"{base_profile_id}-{suffix}"
+            suffix += 1
+
+        previous_profiles = self._profiles
+        previous_profile_id = self._active_profile_id
+        previous_profile = self._active_profile
+        profile = GameProfile(
+            profile_id=profile_id,
+            display_name=display_name,
+            executable_path="",
+        )
+        self._profiles = {**self._profiles, profile_id: profile}
+        self._active_profile_id = profile_id
+        self._active_profile = profile
+        self._policy_decision = evaluate_profile(profile)
+        if not self._persist_game_profiles():
+            self._profiles = previous_profiles
+            self._active_profile_id = previous_profile_id
+            self._active_profile = previous_profile
+            self._policy_decision = evaluate_profile(previous_profile)
+            self._sync_profile_controls()
+            return
+
+        self._profile_combo.addItem(profile.display_name, profile_id)
+        self._sync_profile_controls()
 
     def _operator_button(self, text: str, slot: object) -> QPushButton:
         btn = QPushButton(text)
@@ -426,15 +823,11 @@ class MainWindow(QMainWindow):
 
     def _save_compact_pref(self) -> None:
         try:
-            try:
-                with open(self._config_path) as f:
-                    cfg = yaml.safe_load(f) or {}
-            except FileNotFoundError:
-                cfg = {}
-            cfg.setdefault("gui", {})["compact_mode"] = self._compact
+            cfg = _load_yaml_mapping(self._config_path)
+            _ensure_mapping_child(cfg, "gui")["compact_mode"] = self._compact
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
-        except OSError:
+        except (ConfigMappingError, OSError, yaml.YAMLError):
             pass
 
     # ── Tracking control ───────────────────────────────────────────────────────
@@ -446,6 +839,13 @@ class MainWindow(QMainWindow):
             self._start_tracking()
 
     def _start_tracking(self) -> None:
+        self._policy_decision = evaluate_profile(self._active_profile)
+        self._update_profile_mode_label()
+        if not self._policy_decision.allows(Backend.DESKTOP_OVERLAY):
+            self._on_status("error")
+            self._status_label.setToolTip("The active game profile does not permit desktop overlay runtime.")
+            return
+
         self._on_status("initializing")
         self._action_btn.setText("■ STOP TRACKING")
         self._action_btn.setStyleSheet(
@@ -481,6 +881,8 @@ class MainWindow(QMainWindow):
         try:
             self._overlay.start()
             self._overlay_tile.setText("Overlay\nRunning")
+            self._hidden_for_overlay = True
+            self.showMinimized()
         except OverlayStartError as e:
             self._on_status("error")
             self._status_label.setText("✕ OVERLAY ERROR")
@@ -493,6 +895,9 @@ class MainWindow(QMainWindow):
             self._thread.stop()
             self._thread = None
         self._overlay.stop()
+        if self._hidden_for_overlay:
+            self._hidden_for_overlay = False
+            self.showNormal()
         self._on_status("stopped")
         self._action_btn.setText("▶ START TRACKING")
         self._action_btn.setStyleSheet(
@@ -510,7 +915,7 @@ class MainWindow(QMainWindow):
 
     def _on_frame(self, jpeg: bytes) -> None:
         pix = QPixmap()
-        pix.loadFromData(jpeg, "JPEG")
+        pix.loadFromData(jpeg, b"JPEG")
         self._camera_label.setPixmap(
             pix.scaled(
                 self._camera_label.size(),
@@ -530,6 +935,22 @@ class MainWindow(QMainWindow):
             self._status_label.setToolTip("")
         if hasattr(self, "_tracker_tile"):
             self._tracker_tile.setText(f"Tracker\n{text.replace('● ', '').replace('⟳ ', '').replace('✕ ', '')}")
+        if status == "error":
+            if self._thread:
+                self._thread.stop()
+                self._thread = None
+            self._overlay.stop()
+            self._overlay_started = False
+            if self._hidden_for_overlay:
+                self._hidden_for_overlay = False
+                self.showNormal()
+            self._action_btn.setText("▶ START TRACKING")
+            self._action_btn.setStyleSheet(
+                f"background:{_ACCENT};color:#111;font-weight:900;"
+                "font-size:13px;padding:12px;border:none;border-radius:8px;"
+            )
+            if hasattr(self, "_overlay_tile"):
+                self._overlay_tile.setText("Overlay\nIdle")
 
     def _refresh_runtime_health(self) -> None:
         summary = self._read_overlay_summary()
@@ -539,10 +960,16 @@ class MainWindow(QMainWindow):
         try:
             self._refresh_runtime_health()
         except KeyboardInterrupt:
-            app = QApplication.instance()
-            if app is not None:
-                app.closeAllWindows()
-                app.quit()
+            self._shutdown_application()
+
+    def _shutdown_application(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        close_all = getattr(app, "closeAllWindows", None)
+        if callable(close_all):
+            close_all()
+        app.quit()
 
     def _read_overlay_summary(self) -> OverlayRuntimeSummary | None:
         overlay_log = _find_overlay_log(None)
@@ -555,6 +982,8 @@ class MainWindow(QMainWindow):
             self._capture_tile.setText("Capture\nWaiting")
             return
 
+        self._maybe_recover_overlay(summary)
+
         self._shm_tile.setText(f"SHM\n{summary.shm_status} {summary.shm_changes_per_sec}/s")
         depth_status = f"{summary.depth_hz} Hz"
         if summary.depth_hz < _DEPTH_HZ_WARN:
@@ -564,13 +993,10 @@ class MainWindow(QMainWindow):
             "Capture\nFrame OK" if summary.has_frame else "Capture\nNo frame"
         )
 
-        if (
-            summary.depth_hz < _DEPTH_HZ_WARN
-            and not self._auto_safe_applied
-            and self._tracker_is_running()
-        ):
-            self._auto_safe_applied = True
-            self._apply_comfort_preset("safe", reason="low_depth")
+        if summary.depth_hz < _DEPTH_HZ_WARN:
+            self._comfort_status.setText(
+                f"Depth LOW: {summary.depth_hz} Hz, keeping current preset"
+            )
             return
 
         if summary.depth_hz >= _DEPTH_HZ_WARN and hasattr(self, "_comfort_status"):
@@ -580,6 +1006,41 @@ class MainWindow(QMainWindow):
 
     def _tracker_is_running(self) -> bool:
         return bool(self._thread is not None and self._thread.isRunning())
+
+    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
+        if not self._overlay_started or not self._tracker_is_running():
+            self._capture_loss_count = 0
+            return
+
+        if not self._overlay.is_running():
+            self._restart_overlay_from_health("process exited")
+            return
+
+        if summary.has_frame:
+            self._capture_loss_count = 0
+            return
+
+        self._capture_loss_count += 1
+        if self._capture_loss_count >= _CAPTURE_LOSS_RESTART_THRESHOLD:
+            self._restart_overlay_from_health("capture lost")
+
+    def _restart_overlay_from_health(self, reason: str) -> None:
+        self._capture_loss_count = 0
+        try:
+            self._overlay.stop()
+            self._overlay.start()
+            self._overlay_started = True
+            if hasattr(self, "_overlay_tile"):
+                self._overlay_tile.setText("Overlay\nRestarted")
+            _log.warning("overlay restarted after runtime health failure: %s", reason)
+        except OverlayStartError as e:
+            self._overlay_started = False
+            self._on_status("error")
+            if hasattr(self, "_overlay_tile"):
+                self._overlay_tile.setText("Overlay\nError")
+            self._status_label.setText("✕ OVERLAY ERROR")
+            self._status_label.setToolTip(str(e))
+            _log.warning("overlay restart failed after %s: %s", reason, e)
 
     # ── Drag to move ───────────────────────────────────────────────────────────
 
@@ -806,6 +1267,12 @@ class MainWindow(QMainWindow):
             deadzone_mm=self._slider_value(self._deadzone_slider),
             display_backend=self._settings.display_backend,
             depth_mode=int(self._depth_mode_combo.currentData() or 0),
+            stereo_layout=self._settings.stereo_layout,
+            eye_order=self._settings.eye_order,
+            panel_width_px=self._settings.panel_width_px,
+            panel_height_px=self._settings.panel_height_px,
+            focus_plane_cm=self._settings.focus_plane_cm,
+            tracking_mode=self._settings.tracking_mode,
         )
 
     def _on_settings_change(self, *_: object) -> None:
@@ -830,6 +1297,8 @@ class MainWindow(QMainWindow):
             self._set_slider_value(self._strength_x_slider, float(preset["strength_x"]))
             self._set_slider_value(self._strength_y_slider, float(preset["strength_y"]))
             self._set_slider_value(self._virtual_depth_slider, float(preset["virtual_depth_cm"]))
+            self._depth_curve_combo.setCurrentIndex(int(preset["depth_curve"]))
+            self._depth_gamma_spin.setValue(float(preset["depth_gamma"]))
             self._set_slider_value(self._focus_radius_slider, float(preset["focus_radius"]))
             self._set_slider_value(self._smoothing_slider, float(preset["smoothing_alpha"]))
             self._set_slider_value(self._deadzone_slider, float(preset["deadzone_mm"]))
@@ -855,12 +1324,11 @@ class MainWindow(QMainWindow):
         """Reset tilt to 0 and restart tracker — it will auto-detect continuously."""
         import yaml  # local import to avoid shadowing module-level yaml
         try:
-            with open(self._config_path) as f:
-                cfg = yaml.safe_load(f) or {}
-            cfg.setdefault("tracking", {})["camera_tilt_deg"] = 0.0
+            cfg = _load_yaml_mapping(self._config_path)
+            _ensure_mapping_child(cfg, "tracking")["camera_tilt_deg"] = 0.0
             with open(self._config_path, "w") as f:
                 yaml.dump(cfg, f, default_flow_style=False)
-        except OSError as e:
+        except (ConfigMappingError, OSError, yaml.YAMLError) as e:
             self._tilt_status.setText(f"Error: {e}")
             return
         self._config.setdefault("tracking", {})["camera_tilt_deg"] = 0.0
@@ -917,7 +1385,11 @@ class MainWindow(QMainWindow):
         if not name:
             return
         s = self._snapshot_settings()
-        save_preset(self._config_path, name, dataclasses.asdict(s))
+        try:
+            save_preset(self._config_path, name, dataclasses.asdict(s))
+        except (OSError, PresetConfigError) as exc:
+            self._comfort_status.setText(f"Configuration error: {exc}")
+            return
         self._refresh_presets()
 
     def _set_slider_value(self, sl: QSlider, v: float) -> None:
@@ -975,24 +1447,31 @@ class MainWindow(QMainWindow):
         self._refresh_presets()
 
     def _on_save_config(self) -> None:
+        if self._profile_store_error is not None:
+            self._update_profile_mode_label()
+            return
         s = self._snapshot_settings()
         try:
-            try:
-                with open(self._config_path) as f:
-                    cfg = yaml.safe_load(f) or {}
-            except FileNotFoundError:
-                cfg = {}
-            overlay = cfg.setdefault("overlay", {})
+            cfg = _load_yaml_mapping(self._config_path, fallback=self._config)
+            overlay = _ensure_mapping_child(cfg, "overlay")
             values = dataclasses.asdict(s)
             values.pop("display_backend", None)
             values.pop("depth_mode", None)
+            for calibration_key in (
+                "stereo_layout",
+                "eye_order",
+                "panel_width_px",
+                "panel_height_px",
+                "focus_plane_cm",
+                "tracking_mode",
+            ):
+                values.pop(calibration_key, None)
             values["display_backend"] = self._display_backend_id
             values["depth_performance_mode"] = _depth_mode_name(s.depth_mode)
             overlay.update(values)
-            cfg.setdefault("tracking", {})["camera_tilt_deg"] = self._camera_tilt_deg
-            with open(self._config_path, "w") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
-        except OSError:
+            _ensure_mapping_child(cfg, "tracking")["camera_tilt_deg"] = self._camera_tilt_deg
+            self._persist_game_profiles(base_config=cfg)
+        except (ConfigMappingError, OSError, yaml.YAMLError):
             pass
 
     def _open_debug_monitor(self) -> None:
@@ -1030,6 +1509,7 @@ class MainWindow(QMainWindow):
                     "support_bundle",
                     "--config",
                     self._config_path,
+                    "--require-live-runtime",
                 ],
                 cwd=str(Path(__file__).resolve().parent.parent),
             )

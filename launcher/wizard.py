@@ -135,6 +135,19 @@ _DEFAULT_OVERLAY = {
     "strength_x": 1.0,
     "strength_y": 1.0,
     "virtual_depth_cm": 30.0,
+    "depth_curve": 2,
+    "depth_gamma": 2.0,
+}
+
+_DEFAULT_GAME_PROFILES = {
+    "default": {
+        "display_name": "Default profile",
+        "executable_path": "",
+        "play_context": "online_multiplayer",
+        "requested_mode": "non_injecting_desktop",
+        "advanced_acknowledged": False,
+        "approval_id": None,
+    }
 }
 
 
@@ -196,6 +209,8 @@ class DonePage(QWizardPage):
                 "screen_h_cm": self._screen_height_cm,
             },
             "gui": {"compact_mode": False},
+            "game_profiles": _DEFAULT_GAME_PROFILES,
+            "active_game_profile": "default",
         }
         dirname = os.path.dirname(self._config_path)
         if dirname:
