@@ -5,9 +5,9 @@
 # depth buffer settings.
 #
 # Usage:
-#   python setup.py --game wow
-#   python setup.py --game-dir "C:\Games\MyGame" --profile default
-#   python setup.py --game wow --dry-run
+#   python setup.py --game wow --profile-config "%APPDATA%\Glassless3D\config.yaml"
+#   python setup.py --game-dir "C:\Games\MyGame" --profile default --profile-config config.yaml
+#   python setup.py --game wow --profile-config config.yaml --dry-run
 
 import argparse
 import json
@@ -15,6 +15,11 @@ import os
 import shutil
 import sys
 import winreg
+from pathlib import Path
+from typing import Sequence
+
+from launcher.game_profile_store import ProfileStoreError, load_profiles
+from launcher.game_profiles import Backend, PolicyDecision, evaluate_profile
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 PROFILES_DIR = os.path.join(BASE_DIR, "profiles")
@@ -90,7 +95,19 @@ def apply_depth_settings(game_dir: str, profile: dict, dry_run: bool) -> None:
         print(f"  [OK] Updated {ini_path}")
 
 
-def install(game_dir: str, profile: dict, dry_run: bool) -> None:
+def install(
+    game_dir: str,
+    profile: dict,
+    dry_run: bool,
+    *,
+    policy: PolicyDecision,
+) -> None:
+    if not policy.allows(Backend.RESHADE_ADDON):
+        sys.exit(
+            "ERROR: ReShade installation is not permitted: "
+            f"{policy.reason or 'offline advanced acknowledgement is required'}"
+        )
+
     print(f"\nInstalling to: {game_dir}")
     print(f"Profile:       {profile['name']}")
     if dry_run:
@@ -130,15 +147,31 @@ def install(game_dir: str, profile: dict, dry_run: bool) -> None:
     print("  5. Enjoy!\n")
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Glassless3D experimental ReShade backend installer")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--game",     help="Profile name (wow, default)")
     group.add_argument("--game-dir", help="Path to game directory")
     parser.add_argument("--profile", default="default",
                         help="Profile to use with --game-dir")
+    parser.add_argument(
+        "--profile-config",
+        type=Path,
+        required=True,
+        help="Glassless3D config.yaml containing the active game profile",
+    )
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    try:
+        profiles, active_profile_id = load_profiles(args.profile_config)
+    except ProfileStoreError as exc:
+        sys.exit(f"ERROR: {exc}")
+    if active_profile_id is None:
+        sys.exit("ERROR: No active Glassless3D game profile is configured.")
+    policy = evaluate_profile(profiles[active_profile_id])
+    if not policy.allows(Backend.RESHADE_ADDON):
+        sys.exit(f"ERROR: ReShade installation is not permitted: {policy.reason}")
 
     if not os.path.exists(ADDON_PATH):
         sys.exit("ERROR: Glassless3D.addon not found.\nBuild it: cd addon && build.bat")
@@ -152,7 +185,7 @@ def main() -> None:
         if not os.path.isdir(game_dir):
             sys.exit(f"ERROR: Directory not found: {game_dir}")
 
-    install(game_dir, profile, dry_run=args.dry_run)
+    install(game_dir, profile, dry_run=args.dry_run, policy=policy)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import shutil
 import sys
 from collections.abc import Generator
 
+from launcher.game_profiles import Backend, PolicyDecision
+
 
 class InstallError(Exception):
     """Raised when an installation step fails."""
@@ -29,12 +31,22 @@ def _bundle_dir() -> str:
 
 
 def install_steps(
-    game_dir: str, profile_name: str = "wow"
+    game_dir: str,
+    profile_name: str = "wow",
+    *,
+    policy: PolicyDecision,
 ) -> Generator[str, None, None]:
     """Install the experimental backend assets into game_dir.
 
     Raises InstallError if any step fails.
     """
+    if not policy.allows(Backend.RESHADE_ADDON):
+        raise InstallError(
+            "Policy check",
+            "ReShade installation is not permitted: "
+            f"{policy.reason or 'offline advanced acknowledgement is required'}",
+        )
+
     base = _bundle_dir()
 
     # Step 1: Experimental ReShade DLL
@@ -94,9 +106,14 @@ def install_steps(
     yield "Installing addon"
 
 
-def install(game_dir: str, profile_name: str = "wow") -> None:
+def install(
+    game_dir: str,
+    profile_name: str = "wow",
+    *,
+    policy: PolicyDecision,
+) -> None:
     """Install the experimental backend into game_dir. Raises InstallError on failure."""
-    for _ in install_steps(game_dir, profile_name):
+    for _ in install_steps(game_dir, profile_name, policy=policy):
         pass
 
 
