@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
 project(Glassless3DOverlay CXX)
 
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(capture_recovery_tests
+        capture_recovery.cpp
+        capture_recovery_tests.cpp
+    )
+    target_compile_features(capture_recovery_tests PRIVATE cxx_std_17)
+    add_test(NAME capture_recovery_tests COMMAND capture_recovery_tests)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
