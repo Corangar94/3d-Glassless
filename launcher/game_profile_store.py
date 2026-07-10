@@ -91,9 +91,15 @@ def save_profiles(
     active_profile_id: str | None,
     *,
     fallback: Mapping[str, Any] | None = None,
+    base_config: Mapping[str, Any] | None = None,
 ) -> None:
     """Atomically store profiles without modifying unrelated configuration keys."""
-    root = _load_root(config_path, fallback)
+    if base_config is None:
+        root = _load_root(config_path, fallback)
+    else:
+        if config_path.exists():
+            _load_root(config_path)
+        root = dict(base_config)
     root["game_profiles"] = {
         profile_id: {
             "display_name": profile.display_name,

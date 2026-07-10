@@ -28,6 +28,24 @@ def test_save_profiles_preserves_camera_and_overlay_sections(tmp_path):
     assert saved["game_profiles"]["arena"]["requested_mode"] == "non_injecting_desktop"
 
 
+def test_save_profiles_can_atomically_write_an_updated_base_config(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("camera:\n  index: 0\n", encoding="utf-8")
+    updated_config = {"camera": {"index": 2}, "overlay": {"strength_x": 1.5}}
+
+    save_profiles(
+        config_path,
+        {},
+        active_profile_id=None,
+        base_config=updated_config,
+    )
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert saved["camera"]["index"] == 2
+    assert saved["overlay"]["strength_x"] == 1.5
+    assert saved["game_profiles"] == {}
+
+
 def test_load_profiles_treats_invalid_profile_values_as_non_injecting(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
