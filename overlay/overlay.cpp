@@ -1591,6 +1591,12 @@ static void UpdateCapture() {
             hr == DXGI_ERROR_ACCESS_LOST ? "access_lost" : "invalid_call");
         return;
     }
+    if (IsDeviceLoss(hr)
+        || (g_dev && IsDeviceLoss(g_dev->GetDeviceRemovedReason()))) {
+        ++g_acquireOther;
+        EnterDeviceRecovery("AcquireNextFrame", hr, "device_lost");
+        return;
+    }
     if (IsUnavailableDuplicationFailure(hr)) {
         ++g_acquireOther;
         DestroyCaptureResources();
@@ -1618,6 +1624,22 @@ static void UpdateCapture() {
             Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
         }
     }
+}
+
+static DWORD CaptureIdleWaitMs() {
+    if (g_captureState == CaptureState::Running) return 0;
+
+    const uint64_t nowMs = GetTickCount64();
+    uint64_t deadlineMs = g_nextTargetPollMs;
+    if (g_captureState == CaptureState::Rebinding
+        || g_captureState == CaptureState::DeviceRecovery) {
+        const uint64_t retryMs = g_rebindRetry.next_attempt_ms();
+        if (deadlineMs == 0 || retryMs < deadlineMs) deadlineMs = retryMs;
+    }
+
+    if (deadlineMs <= nowMs) return 1;
+    const uint64_t remainingMs = deadlineMs - nowMs;
+    return static_cast<DWORD>(remainingMs < 50 ? remainingMs : 50);
 }
 
 static void DestroyRendererResources() {
@@ -2053,15 +2075,26 @@ static void Frame() {
     TickCaptureRebind();
     UpdateCapture();
 
-    // Periodic summary — once per second at ~60fps
+    // Periodic summary based on wall time. Capture recovery can intentionally
+    // throttle the loop, so frame counts are not a reliable one-second clock.
     static int lastChanges = 0;
     static uint64_t lastInferences = 0;
-    if (frameCount % 60 == 0) {
-        int changesThisSec = shmChanges - lastChanges;
+    static uint64_t lastSummaryMs = GetTickCount64();
+    const uint64_t summaryNowMs = GetTickCount64();
+    const uint64_t summaryElapsedMs = summaryNowMs - lastSummaryMs;
+    if (summaryElapsedMs >= 1000) {
+        const int changesSinceSummary = shmChanges - lastChanges;
+        const int changesThisSec = static_cast<int>(
+            (static_cast<uint64_t>(changesSinceSummary) * 1000u) / summaryElapsedMs);
         lastChanges = shmChanges;
         uint64_t infNow = g_depth ? g_depth->inferences_completed() : 0;
-        int depthHz = (int)(infNow - lastInferences);
+        const uint64_t inferenceDelta = infNow >= lastInferences
+            ? infNow - lastInferences
+            : infNow;  // DepthInferencer was recreated during recovery.
+        const int depthHz = static_cast<int>(
+            (inferenceDelta * 1000u) / summaryElapsedMs);
         lastInferences = infNow;
+        lastSummaryMs = summaryNowMs;
         const char* shmStatus;
         if (!g_shmView)                 shmStatus = "NO_SHM (tracker not running?)";
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
@@ -2300,6 +2333,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
             if (msg.message == WM_QUIT) { Log("Main loop: WM_QUIT"); g_running = false; }
         }
         Frame();
+        const DWORD idleWaitMs = CaptureIdleWaitMs();
+        if (idleWaitMs > 0) {
+            MsgWaitForMultipleObjectsEx(
+                0, nullptr, idleWaitMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
         loopIters++;
     }
     Log("Exiting main loop after %d iterations", loopIters);

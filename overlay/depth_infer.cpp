@@ -194,6 +194,7 @@ struct DepthInferImpl {
     std::unique_ptr<Ort::Env>            env;
     std::unique_ptr<Ort::SessionOptions> opts;
     std::unique_ptr<Ort::Session>        session;
+    std::unique_ptr<Ort::RunOptions>     run_options;
     Ort::AllocatorWithDefaultOptions     allocator;
     std::string                          input_name;
     std::string                          output_name;
@@ -329,6 +330,9 @@ struct DepthInferImpl {
             opts->SetExecutionMode(ORT_SEQUENTIAL);
 
             session = std::make_unique<Ort::Session>(*env, model_path.c_str(), *opts);
+            // Keep one RunOptions object alive for the worker lifetime so
+            // cleanup() can interrupt a device-stalled Run before joining.
+            run_options = std::make_unique<Ort::RunOptions>();
 
             size_t num_in = session->GetInputCount();
             size_t num_out = session->GetOutputCount();
@@ -696,6 +700,10 @@ struct DepthInferImpl {
         bool worker_busy;
         {
             std::lock_guard<std::mutex> lk(m);
+            if (stop.load()) {
+                last_err = "DepthInferencer is stopping";
+                return false;
+            }
             worker_busy = input_pending;
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
@@ -733,6 +741,10 @@ struct DepthInferImpl {
         // 4. Hand off freshest input to worker.
         {
             std::lock_guard<std::mutex> lk(m);
+            if (stop.load()) {
+                last_err = "DepthInferencer is stopping";
+                return false;
+            }
             pending_input_f32.swap(scratch_input_f32);
             input_pending = true;
         }
@@ -769,7 +781,7 @@ struct DepthInferImpl {
 
                 const char* in_names[]  = {input_name.c_str()};
                 const char* out_names[] = {output_name.c_str()};
-                auto outs = session->Run(Ort::RunOptions{nullptr},
+                auto outs = session->Run(*run_options,
                                          in_names, &in_tensor, 1,
                                          out_names, 1);
                 if (outs.size() != 1) {
@@ -828,6 +840,18 @@ struct DepthInferImpl {
             {
                 std::lock_guard<std::mutex> lk(m);
                 stop.store(true);
+                input_pending = false;
+            }
+            // DirectML may be blocked in Run while its D3D device is being
+            // removed. ORT's termination flag is thread-safe and makes that
+            // Run return, allowing the worker join to complete.
+            if (run_options) {
+                try {
+                    run_options->SetTerminate();
+                } catch (...) {
+                    // cleanup/destruction must not throw; join remains the
+                    // final synchronization point for the session lifetime.
+                }
             }
             cv_work.notify_all();
             worker.join();
@@ -838,6 +862,7 @@ struct DepthInferImpl {
         if (depth_tex) { depth_tex->Release(); depth_tex = nullptr; }
         if (stage_bgra) { stage_bgra->Release(); stage_bgra = nullptr; }
         session.reset();
+        run_options.reset();
         opts.reset();
         env.reset();
         input_pending = false;

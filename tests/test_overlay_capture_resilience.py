@@ -91,3 +91,37 @@ def test_depth_cleanup_releases_both_current_and_previous_depth_resources():
     assert "if (depth_prev_tex) { depth_prev_tex->Release(); depth_prev_tex = nullptr; }" in source
     assert "if (depth_srv) { depth_srv->Release(); depth_srv = nullptr; }" in source
     assert "if (depth_tex) { depth_tex->Release(); depth_tex = nullptr; }" in source
+
+
+def test_depth_worker_run_can_be_terminated_before_join():
+    source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+
+    assert "std::unique_ptr<Ort::RunOptions>" in source
+    assert "session->Run(*run_options" in source
+    assert "run_options->SetTerminate()" in source
+    assert source.index("run_options->SetTerminate()") < source.index("worker.join()")
+
+
+def test_acquire_device_loss_enters_device_recovery_before_generic_rebind():
+    source = OVERLAY.read_text(encoding="utf-8")
+    update_capture = source[source.index("static void UpdateCapture()") :]
+
+    assert 'EnterDeviceRecovery("AcquireNextFrame"' in update_capture
+    assert update_capture.index('EnterDeviceRecovery("AcquireNextFrame"') < update_capture.index(
+        '"acquire_failed"'
+    )
+
+
+def test_hidden_capture_states_use_bounded_message_wait_and_wall_clock_summary():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "CaptureIdleWaitMs" in source
+    assert "MsgWaitForMultipleObjectsEx" in source
+    assert "lastSummaryMs" in source
+    assert "frameCount % 60" not in source
+
+
+def test_depth_rate_handles_inference_counter_reset_after_recovery():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "infNow >= lastInferences" in source
