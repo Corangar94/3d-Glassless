@@ -460,6 +460,16 @@ static UINT                      g_captureW = 0;
 static UINT                      g_captureH = 0;
 static UINT                      g_renderWidth = 0;
 static UINT                      g_renderHeight = 0;
+using g3d::capture::CaptureSignal;
+using g3d::capture::CaptureState;
+using g3d::capture::RetrySchedule;
+static CaptureState              g_captureState = CaptureState::Rebinding;
+static RetrySchedule g_rebindRetry;
+static const char*               g_captureReason = "startup";
+static int                       g_acquireOk = 0;
+static int                       g_acquireTimeout = 0;
+static int                       g_acquireLost = 0;
+static int                       g_acquireOther = 0;
 
 static void ReleaseCaptureTextures() {
     SafeRelease(g_capRtv);
@@ -1091,14 +1101,6 @@ static HRESULT InitDuplication() {
     return hr;
 }
 
-static void ResetDuplication() {
-    g_hasFrame = false;
-    ReleaseCaptureTextures();
-    SafeRelease(g_dup);
-    Sleep(300);
-    InitDuplication();
-}
-
 // Try to (re)open the tracker shared memory. Safe to call repeatedly.
 static void TryAttachShm() {
     if (g_shmView) return;
@@ -1341,6 +1343,174 @@ static void InitDepth() {
         cd.Width, cd.Height);
 }
 
+static const char* CaptureStateName(CaptureState state) {
+    switch (state) {
+    case CaptureState::Running: return "running";
+    case CaptureState::Rebinding: return "rebinding";
+    case CaptureState::DeviceRecovery: return "device_recovery";
+    case CaptureState::Unavailable: return "unavailable";
+    }
+    return "unavailable";
+}
+
+static void UpdateOverlayVisibility() {
+    if (!g_hwnd) return;
+    const bool visible = g_captureState == CaptureState::Running && g_hasFrame;
+    ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+}
+
+static void SetCaptureState(CaptureState state, const char* reason) {
+    g_captureState = state;
+    g_captureReason = reason;
+    Log("CaptureStatus: state=%s reason=%s", CaptureStateName(state), reason);
+    UpdateOverlayVisibility();
+}
+
+static void DestroyCaptureResources() {
+    g_hasFrame = false;
+    if (g_depth) { delete g_depth; g_depth = nullptr; }
+    ReleaseCaptureTextures();
+    SafeRelease(g_dup);
+}
+
+static void QueueCaptureSignal(CaptureSignal signal, const char* reason) {
+    const auto action = g3d::capture::AdvanceCaptureState(g_captureState, signal);
+    if (signal == CaptureSignal::BindingDirty) {
+        DestroyCaptureResources();
+        g_rebindRetry.Reset(GetTickCount64());
+    } else if (signal == CaptureSignal::DuplicationLost || signal == CaptureSignal::RebindRetry) {
+        DestroyCaptureResources();
+        g_rebindRetry.RecordFailure(GetTickCount64());
+    }
+    SetCaptureState(action.next_state, reason);
+}
+
+static bool IsUnavailableDuplicationFailure(HRESULT hr) {
+    return hr == DXGI_ERROR_NOT_CURRENTLY_AVAILABLE
+        || hr == DXGI_ERROR_UNSUPPORTED
+        || hr == DXGI_ERROR_SESSION_DISCONNECTED
+        || hr == E_ACCESSDENIED;
+}
+
+class DesktopFrameLease {
+public:
+    explicit DesktopFrameLease(IDXGIOutputDuplication* duplication) : duplication_(duplication) {
+        if (duplication_) duplication_->AddRef();
+    }
+
+    ~DesktopFrameLease() {
+        if (acquired_ && duplication_) {
+            const HRESULT hr = duplication_->ReleaseFrame();
+            if (FAILED(hr)) LogHR("ReleaseFrame", hr);
+        }
+        SafeRelease(texture_);
+        SafeRelease(resource_);
+        SafeRelease(duplication_);
+    }
+
+    HRESULT Acquire(UINT timeoutMs, DXGI_OUTDUPL_FRAME_INFO* frameInfo) {
+        if (!duplication_ || !frameInfo) return E_POINTER;
+        const HRESULT hr = duplication_->AcquireNextFrame(timeoutMs, frameInfo, &resource_);
+        if (FAILED(hr)) return hr;
+        acquired_ = true;
+        if (!resource_) return E_FAIL;
+        return resource_->QueryInterface(
+            __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture_));
+    }
+
+    ID3D11Texture2D* texture() const { return texture_; }
+
+private:
+    IDXGIOutputDuplication* duplication_ = nullptr;
+    IDXGIResource* resource_ = nullptr;
+    ID3D11Texture2D* texture_ = nullptr;
+    bool acquired_ = false;
+};
+
+static void TickCaptureRebind() {
+    if (g_captureState == CaptureState::Unavailable) {
+        if (!g_bindingDirty) return;
+        QueueCaptureSignal(CaptureSignal::BindingDirty, "binding_changed");
+    }
+    if (g_captureState != CaptureState::Rebinding
+        || !g_rebindRetry.CanAttempt(GetTickCount64())) {
+        return;
+    }
+
+    const BindingStatus bindingStatus = RefreshCaptureBinding();
+    if (bindingStatus == BindingStatus::TargetSpansOutput) {
+        g_bindingDirty = false;
+        SetCaptureState(CaptureState::Unavailable, "target_spans_output");
+        return;
+    }
+    if (bindingStatus != BindingStatus::Ready) {
+        g_bindingDirty = false;
+        SetCaptureState(CaptureState::Unavailable, "no_matching_output");
+        return;
+    }
+
+    SyncOverlayWindowToBinding();
+    const HRESULT hr = InitDuplication();
+    if (SUCCEEDED(hr)) {
+        InitDepth();
+        g_rebindRetry.Reset(GetTickCount64());
+        SetCaptureState(CaptureState::Running, "bound");
+    } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "duplicate_retry");
+    } else if (IsUnavailableDuplicationFailure(hr)) {
+        DestroyCaptureResources();
+        g_bindingDirty = false;
+        SetCaptureState(CaptureState::Unavailable, "duplicate_unavailable");
+    } else {
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "duplicate_failed");
+    }
+}
+
+static void UpdateCapture() {
+    if (g_captureState != CaptureState::Running || !g_dup) return;
+
+    DXGI_OUTDUPL_FRAME_INFO info = {};
+    DesktopFrameLease frame(g_dup);
+    const HRESULT hr = frame.Acquire(16, &info);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        ++g_acquireTimeout;
+        return;
+    }
+    if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
+        ++g_acquireLost;
+        QueueCaptureSignal(CaptureSignal::DuplicationLost,
+            hr == DXGI_ERROR_ACCESS_LOST ? "access_lost" : "invalid_call");
+        return;
+    }
+    if (IsUnavailableDuplicationFailure(hr)) {
+        ++g_acquireOther;
+        DestroyCaptureResources();
+        g_bindingDirty = false;
+        SetCaptureState(CaptureState::Unavailable, "duplicate_unavailable");
+        return;
+    }
+    if (FAILED(hr) || !frame.texture()) {
+        ++g_acquireOther;
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "acquire_failed");
+        return;
+    }
+
+    ++g_acquireOk;
+    if (!NormalizeCapturedFrame(frame.texture())) {
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "normalize_failed");
+        return;
+    }
+
+    g_hasFrame = true;
+    UpdateOverlayVisibility();
+    if (g_depth && !g_depth->run(g_capTex)) {
+        static int depthFails = 0;
+        if (++depthFails < 5 || depthFails % 120 == 0) {
+            Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
+        }
+    }
+}
+
 static bool Init(HINSTANCE hInst) {
     // Auto-detect physical screen size once; stored in g_auto* for reuse.
     float aw = 0, ah = 0;
@@ -1547,22 +1717,18 @@ static bool Init(HINSTANCE hInst) {
 
     InitGpuTiming();  // best-effort; diagnostics still work without GPU queries
 
-    const HRESULT duplicationHr = InitDuplication();
-    if (FAILED(duplicationHr)) return false;
-
     // Bring up depth first as a 1x1 fallback so the pixel shader always has
     // a valid t1 SRV, then try to upgrade to the real DepthInferencer.
     if (!CreateFallbackDepthSrv()) {
         Log("Warning: fallback depth SRV creation failed — depth slot will be null");
     }
-    InitDepth();   // best-effort; g_depth stays null on failure
-
+    g_rebindRetry.Reset(GetTickCount64());
+    SetCaptureState(CaptureState::Rebinding, "startup");
     return true;
 }
 
 static void Frame() {
     static int frameCount = 0;
-    static int acquireOk = 0, acquireTimeout = 0, acquireLost = 0, acquireOther = 0;
     static uint32_t lastShmTs = 0;
     static bool seenPose = false;
     static DWORD lastPoseChangeMs = 0;
@@ -1669,45 +1835,8 @@ static void Frame() {
         hx += wobble;
     }
 
-    // Acquire new desktop frame (16 ms timeout)
-    DXGI_OUTDUPL_FRAME_INFO fi = {};
-    IDXGIResource* res = nullptr;
-    HRESULT hr = g_dup->AcquireNextFrame(16, &fi, &res);
-
-    if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
-        acquireLost++;
-        Log("AcquireNextFrame: ACCESS_LOST/INVALID_CALL (0x%08X), resetting", (unsigned)hr);
-        ResetDuplication(); return;
-    }
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        acquireTimeout++;
-    } else if (SUCCEEDED(hr) && res) {
-        acquireOk++;
-        ID3D11Texture2D* src = nullptr;
-        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&src))) {
-            const bool normalized = NormalizeCapturedFrame(src);
-            src->Release();
-            if (normalized) g_hasFrame = true;
-
-            // Phase 1: synchronous per-frame depth inference. Non-fatal on
-            // failure — previous depth texture remains bound, so the overlay
-            // keeps rendering (possibly with a stale depth map).
-            if (normalized && g_depth) {
-                if (!g_depth->run(g_capTex)) {
-                    static int depthFails = 0;
-                    if (++depthFails < 5 || depthFails % 120 == 0)
-                        Log("DepthInferencer::run failed (#%d): %s",
-                            depthFails, g_depth->last_error());
-                }
-            }
-        }
-        res->Release();
-        g_dup->ReleaseFrame();
-    } else {
-        acquireOther++;
-        if (acquireOther < 5 || acquireOther % 60 == 0)
-            Log("AcquireNextFrame: unexpected HRESULT=0x%08X (count=%d)", (unsigned)hr, acquireOther);
-    }
+    TickCaptureRebind();
+    UpdateCapture();
 
     // Periodic summary — once per second at ~60fps
     static int lastChanges = 0;
@@ -1725,7 +1854,7 @@ static void Frame() {
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
             "depth[total=%llu %dHz mode=%s] gpu_ms=%.3f backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
             "head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f hasFrame=%d",
-            frameCount, acquireOk, acquireTimeout, acquireLost, acquireOther,
+            frameCount, g_acquireOk, g_acquireTimeout, g_acquireLost, g_acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
             (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode), g_lastGpuMs, g_displayBackend,
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
@@ -1733,7 +1862,7 @@ static void Frame() {
     }
 
     // Don't render until we have at least one real frame
-    if (!g_hasFrame) {
+    if (g_captureState != CaptureState::Running || !g_hasFrame) {
         if (frameCount == 1 || frameCount % 120 == 0)
             Log("Frame#%d: no captured frame yet, skipping render", frameCount);
         return;
@@ -1743,7 +1872,7 @@ static void Frame() {
     // at the user's rest position and only responds to head movement.
     // hz stays absolute: the physics formula needs the real eye-to-screen distance.
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    hr = g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+    HRESULT hr = g_ctx->Map(g_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
     if (FAILED(hr)) {
         LogHR("Map(CBuf)", hr);
         return;
