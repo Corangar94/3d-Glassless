@@ -76,7 +76,8 @@ def test_overlay_marks_bindings_dirty_for_dpi_and_display_changes():
 def test_overlay_checks_present_and_enters_device_recovery():
     source = OVERLAY.read_text(encoding="utf-8")
 
-    assert "const HRESULT present_hr = g_swap->Present(0, 0);" in source
+    assert "const HRESULT present_hr = g_swap->Present(1, 0);" in source
+    assert "SetMaximumFrameLatency(1)" in source
     assert "GetDeviceRemovedReason" in source
     assert "DXGI_ERROR_DEVICE_REMOVED" in source
     assert "DXGI_ERROR_DEVICE_RESET" in source

@@ -1785,6 +1785,17 @@ static HRESULT CreateDeviceAndRenderer() {
     LogHR("D3D11CreateDeviceAndSwapChain(selected adapter)", hr);
     if (FAILED(hr)) return hr;
 
+    // Keep the transparent desktop overlay from queuing multiple full-resolution
+    // frames ahead of the game.  The default DXGI latency is three frames, which
+    // can monopolize the GPU on high-refresh ultrawide displays.
+    IDXGIDevice1* dxgiDevice = nullptr;
+    if (SUCCEEDED(g_dev->QueryInterface(__uuidof(IDXGIDevice1),
+                                        reinterpret_cast<void**>(&dxgiDevice)))) {
+        const HRESULT latencyHr = dxgiDevice->SetMaximumFrameLatency(1);
+        LogHR("IDXGIDevice1::SetMaximumFrameLatency(1)", latencyHr);
+        dxgiDevice->Release();
+    }
+
     g_deviceAdapterLuid = g_binding.adapterLuid;
     g_hasDeviceAdapterLuid = true;
     hr = CreateRenderTargetAndViewport(clientWidth, clientHeight);
@@ -2266,7 +2277,10 @@ static void Frame() {
         }
     }
 
-    const HRESULT present_hr = g_swap->Present(0, 0);
+    // Synchronize with DWM/display presentation. Present(0, 0) allowed this
+    // 5120x1440 overlay to render hundreds of frames per second and starve the
+    // game sharing the adapter.
+    const HRESULT present_hr = g_swap->Present(1, 0);
     if (!HandleDeviceResult("Present", present_hr)) return;
 }
 
