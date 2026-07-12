@@ -23,6 +23,7 @@
 #include <cmath>
 #include <ctime>
 #include <cstdarg>
+#include <cwctype>
 #include <share.h>
 #include <optional>
 #include <string>
@@ -469,6 +470,7 @@ static bool                      g_gpuTimingPending = false;
 static double                    g_lastGpuMs = -1.0;
 static int                       g_gpuTimingSamples = 0;
 static HWND                      g_targetWindow = nullptr;
+static std::wstring              g_targetExePath;
 static RECT                      g_targetRect = {};
 static bool                      g_useTargetWindow = false;
 static CaptureBinding            g_binding = {};
@@ -707,24 +709,62 @@ static void ClampVectorLength(float& x, float& y, float max_len) {
 }
 
 static constexpr float kMaxParallaxRelCm = 6.0f;
-static BOOL CALLBACK FindWowWindowProc(HWND hwnd, LPARAM lparam) {
-    if (!IsWindowVisible(hwnd)) return TRUE;
-    wchar_t title[256] = {};
-    GetWindowTextW(hwnd, title, (int)_countof(title));
-    if (wcsstr(title, L"World of Warcraft") == nullptr) return TRUE;
-    *reinterpret_cast<HWND*>(lparam) = hwnd;
-    return FALSE;
+static std::wstring NormalizeExePath(std::wstring path) {
+    for (wchar_t& ch : path) {
+        if (ch == L'/') ch = L'\\';
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+    return path;
 }
 
-static HWND FindWowWindow() {
-    HWND target = FindWindowW(nullptr, L"World of Warcraft");
-    if (target) return target;
-    EnumWindows(FindWowWindowProc, reinterpret_cast<LPARAM>(&target));
-    return target;
+struct TargetWindowSearch {
+    std::wstring normalizedPath;
+    HWND best = nullptr;
+    uint64_t bestScore = 0;
+};
+
+static BOOL CALLBACK FindTargetWindowProc(HWND hwnd, LPARAM lparam) {
+    auto* search = reinterpret_cast<TargetWindowSearch*>(lparam);
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return TRUE;
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return TRUE;
+    wchar_t imagePath[32768] = {};
+    DWORD imagePathLen = static_cast<DWORD>(_countof(imagePath));
+    const BOOL queried = QueryFullProcessImageNameW(process, 0, imagePath, &imagePathLen);
+    CloseHandle(process);
+    if (!queried || NormalizeExePath(std::wstring(imagePath, imagePathLen)) != search->normalizedPath) {
+        return TRUE;
+    }
+
+    RECT client = {};
+    if (!GetClientRect(hwnd, &client)) return TRUE;
+    const LONG width = client.right - client.left;
+    const LONG height = client.bottom - client.top;
+    if (width < 320 || height < 240) return TRUE;
+    uint64_t score = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    if (GetAncestor(hwnd, GA_ROOTOWNER) == hwnd) score += (1ull << 61);
+    if (GetForegroundWindow() == hwnd) score += (1ull << 62);
+    if (!search->best || score > search->bestScore) {
+        search->best = hwnd;
+        search->bestScore = score;
+    }
+    return TRUE;
+}
+
+static HWND FindTargetWindow() {
+    if (g_targetExePath.empty()) return nullptr;
+    TargetWindowSearch search = { NormalizeExePath(g_targetExePath) };
+    EnumWindows(FindTargetWindowProc, reinterpret_cast<LPARAM>(&search));
+    return search.best;
 }
 
 static bool DetectTargetWindowRect() {
-    HWND target = FindWowWindow();
+    HWND target = FindTargetWindow();
     RECT nextRect = {};
     RECT client = {};
     bool valid = target && IsWindowVisible(target) && GetClientRect(target, &client);
@@ -901,6 +941,7 @@ static float g_cliStrength  = 0.0f;
 static float g_cliDepth     = -1.0f;  // -1 = not provided
 static bool  g_running        = true;
 static bool  g_hasFrame       = false;  // true once we have at least one captured frame
+static bool  g_overlayRevealed = false; // alpha stays zero until first successful present
 static bool  g_wantScreenshot = false;  // Ctrl+Shift+S: save next rendered frame
 
 static const int  HOTKEY_QUIT       = 1;
@@ -922,6 +963,7 @@ static void FatalError(const wchar_t* msg, HRESULT hr = S_OK) {
 
 // ── Window procedure ──────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
     if (msg == WM_DESTROY) { Log("WndProc: WM_DESTROY"); g_running = false; PostQuitMessage(0); }
     if (msg == WM_HOTKEY && wp == HOTKEY_QUIT)  { Log("WndProc: WM_HOTKEY quit"); g_running = false; PostQuitMessage(0); }
     if (msg == WM_HOTKEY && wp == HOTKEY_DEBUG)      { g_debugDepthMode = (g_debugDepthMode + 1) % kDebugDepthModeCount; Log("WndProc: debug depth mode %d", g_debugDepthMode); }
@@ -1884,7 +1926,7 @@ static bool Init(HINSTANCE hInst) {
         overlayY = (int)g_targetRect.top;
         overlayW = (int)(g_targetRect.right - g_targetRect.left);
         overlayH = (int)(g_targetRect.bottom - g_targetRect.top);
-        Log("Target window active: World of Warcraft overlay=(%d,%d) %dx%d",
+        Log("Target window active: configured game overlay=(%d,%d) %dx%d",
             overlayX, overlayY, overlayW, overlayH);
     } else {
         Log("Target window inactive: using full primary desktop capture");
@@ -1911,9 +1953,10 @@ static bool Init(HINSTANCE hInst) {
     Log("Post-style: exStyle=0x%08lX (LAYERED|TRANSPARENT applied)",
         GetWindowLongW(g_hwnd, GWL_EXSTYLE));
 
-    // Fully opaque — D3D swap chain content still renders through the redirection surface.
-    BOOL lwa = SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
-    Log("SetLayeredWindowAttributes(alpha=255): ok=%d GLE=%lu", lwa ? 1 : 0, lwa ? 0 : GetLastError());
+    // Start fully transparent. The window is revealed only after the first
+    // captured frame has been presented, preventing a full-screen black flash.
+    BOOL lwa = SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA);
+    Log("SetLayeredWindowAttributes(alpha=0): ok=%d GLE=%lu", lwa ? 1 : 0, lwa ? 0 : GetLastError());
 
     // CRITICAL: hide our own window from DXGI capture so we don't capture ourselves
     BOOL wda = SetWindowDisplayAffinity(g_hwnd, WDA_EXCLUDEFROMCAPTURE);
@@ -2282,6 +2325,12 @@ static void Frame() {
     // game sharing the adapter.
     const HRESULT present_hr = g_swap->Present(1, 0);
     if (!HandleDeviceResult("Present", present_hr)) return;
+    if (!g_overlayRevealed && g_hasFrame) {
+        const BOOL revealed = SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
+        Log("First frame presented; reveal overlay: ok=%d GLE=%lu",
+            revealed ? 1 : 0, revealed ? 0 : GetLastError());
+        g_overlayRevealed = revealed != FALSE;
+    }
 }
 
 static void Cleanup() {
@@ -2301,6 +2350,20 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
     Log("=== Glassless3D Overlay starting ===");
     Log("cmdline: '%s'", cmd ? cmd : "");
     EnablePerMonitorV2DpiAwareness();
+
+    int wideArgc = 0;
+    LPWSTR* wideArgv = CommandLineToArgvW(GetCommandLineW(), &wideArgc);
+    if (wideArgv) {
+        for (int i = 1; i + 1 < wideArgc; ++i) {
+            if (wcscmp(wideArgv[i], L"--target-exe") == 0) {
+                g_targetExePath = wideArgv[++i];
+            }
+        }
+        LocalFree(wideArgv);
+    }
+    if (!g_targetExePath.empty()) {
+        Log("Configured target executable: %ls", g_targetExePath.c_str());
+    }
 
     // WIC (used for Ctrl+Shift+S PNG screenshots) requires COM on this thread.
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);

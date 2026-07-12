@@ -69,10 +69,11 @@ class OverlayProcess:
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen[bytes]] = None
         self._exe_path: Optional[Path] = None
+        self._target_executable: Optional[str] = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
-    def start(self) -> Path:
+    def start(self, target_executable: Optional[str] = None) -> Path:
         """Launch the overlay. Returns the path of the exe actually spawned.
 
         Raises OverlayStartError if the binary is missing or launch fails.
@@ -82,6 +83,9 @@ class OverlayProcess:
         if self.is_running():
             assert self._exe_path is not None
             return self._exe_path
+
+        if target_executable is not None:
+            self._target_executable = target_executable.strip() or None
 
         exe = find_overlay_exe()
         if exe is None:
@@ -111,8 +115,11 @@ class OverlayProcess:
             )
 
         try:
+            args = [str(exe)]
+            if self._target_executable:
+                args.extend(["--target-exe", self._target_executable])
             self._proc = subprocess.Popen(
-                [str(exe)],
+                args,
                 cwd=cwd,
                 creationflags=creationflags,
                 # Inherit stdout/stderr so the overlay's diagnostic prints show up

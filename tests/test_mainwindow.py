@@ -51,6 +51,14 @@ def test_mainwindow_tabs_scroll_when_content_exceeds_viewport(window):
     assert window._tabs.widget(1).widgetResizable()
 
 
+def test_advanced_tab_stylesheet_uses_a_scoped_root_selector(window):
+    advanced = window._tabs.widget(1).widget()
+
+    assert advanced.objectName() == "advancedTabRoot"
+    assert "QWidget#advancedTabRoot{" in advanced.styleSheet()
+    assert not advanced.styleSheet().startswith("background:")
+
+
 def test_mainwindow_toggle_switches_to_compact(window):
     window._toggle_mode()
     assert window._compact

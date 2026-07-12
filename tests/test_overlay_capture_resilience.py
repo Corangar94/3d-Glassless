@@ -81,6 +81,17 @@ def test_overlay_checks_present_and_enters_device_recovery():
     assert "GetDeviceRemovedReason" in source
     assert "DXGI_ERROR_DEVICE_REMOVED" in source
     assert "DXGI_ERROR_DEVICE_RESET" in source
+
+
+def test_overlay_targets_configured_game_without_taking_focus_or_flashing_black():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert 'L"--target-exe"' in source
+    assert "QueryFullProcessImageNameW" in source
+    assert "WM_MOUSEACTIVATE" in source
+    assert "MA_NOACTIVATE" in source
+    assert "SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA)" in source
+    assert "First frame presented; reveal overlay" in source
     assert "DXGI_ERROR_DEVICE_HUNG" in source
     assert "CaptureState::DeviceRecovery" in source
 

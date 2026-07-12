@@ -101,6 +101,25 @@ def test_start_spawns_subprocess_and_records_path(tmp_path, monkeypatch):
     assert kwargs["cwd"] == str(tmp_path)
 
 
+def test_start_passes_configured_game_executable_to_overlay(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    monkeypatch.setattr(overlay_process, "find_depth_model", lambda: None)
+    fake_popen = MagicMock()
+    fake_popen.return_value.poll.return_value = None
+
+    with patch.object(overlay_process.subprocess, "Popen", fake_popen):
+        OverlayProcess().start(r"C:\Games\Example\game.exe")
+
+    assert fake_popen.call_args.args[0] == [
+        str(exe),
+        "--target-exe",
+        r"C:\Games\Example\game.exe",
+    ]
+
+
 def test_start_warns_but_succeeds_without_model(tmp_path, monkeypatch, capsys):
     exe = tmp_path / "Glassless3DOverlay.exe"
     exe.write_bytes(b"")

@@ -965,7 +965,7 @@ class MainWindow(QMainWindow):
         if self._thread:
             self._thread.status_changed.disconnect(self._on_tracker_status_for_overlay)
         try:
-            self._overlay.start()
+            self._overlay.start(self._active_profile.executable_path)
             self._overlay_tile.setText("Overlay\nRunning")
             self._hidden_for_overlay = True
             self.showMinimized()
@@ -1181,8 +1181,9 @@ class MainWindow(QMainWindow):
 
     def _make_advanced_tab(self) -> QWidget:
         inner = QWidget()
+        inner.setObjectName("advancedTabRoot")
         inner.setStyleSheet(
-            f"background:{_ADVANCED_BG};color:#c8c8e8;"
+            f"QWidget#advancedTabRoot{{background:{_ADVANCED_BG};color:#c8c8e8;}}"
             "QPushButton{min-height:24px;padding:4px 10px;}"
             "QComboBox,QDoubleSpinBox,QLineEdit{min-height:22px;}"
             "QSlider{min-height:20px;}"
