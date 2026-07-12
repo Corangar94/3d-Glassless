@@ -92,6 +92,15 @@ def test_overlay_targets_configured_game_without_taking_focus_or_flashing_black(
     assert "MA_NOACTIVATE" in source
     assert "SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA)" in source
     assert "First frame presented; reveal overlay" in source
+
+
+def test_overlay_hides_instead_of_presenting_blocked_or_black_game_capture():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "ProtectedContentMaskedOut" in source
+    assert "CaptureIsUniformBlack" in source
+    assert 'SetCaptureState(CaptureState::Unavailable, "protected_content")' in source
+    assert 'SetCaptureState(CaptureState::Unavailable, "black_capture")' in source
     assert "DXGI_ERROR_DEVICE_HUNG" in source
     assert "CaptureState::DeviceRecovery" in source
 

@@ -453,6 +453,7 @@ static IDXGIOutputDuplication*   g_dup     = nullptr;
 static ID3D11Texture2D*          g_rawCapTex = nullptr;
 static ID3D11ShaderResourceView* g_rawSrv = nullptr;
 static ID3D11Texture2D*          g_capTex  = nullptr;
+static ID3D11Texture2D*          g_blackProbeTex = nullptr;
 static ID3D11RenderTargetView*   g_capRtv = nullptr;
 static ID3D11ShaderResourceView* g_srv     = nullptr;
 static HANDLE                    g_shmH    = nullptr;
@@ -495,8 +496,11 @@ static int                       g_acquireOk = 0;
 static int                       g_acquireTimeout = 0;
 static int                       g_acquireLost = 0;
 static int                       g_acquireOther = 0;
+static DWORD                     g_nextBlackProbeMs = 0;
+static int                       g_blackProbeStreak = 0;
 
 static void ReleaseCaptureTextures() {
+    SafeRelease(g_blackProbeTex);
     SafeRelease(g_capRtv);
     SafeRelease(g_srv);
     SafeRelease(g_capTex);
@@ -504,6 +508,7 @@ static void ReleaseCaptureTextures() {
     SafeRelease(g_rawCapTex);
     g_captureW = 0;
     g_captureH = 0;
+    g_blackProbeStreak = 0;
 }
 // Settings channel (G3D_Settings) — optional; owned by the settings GUI.
 static HANDLE                    g_setH    = nullptr;
@@ -1617,6 +1622,59 @@ static void TickCaptureRebind() {
     }
 }
 
+static bool CaptureIsUniformBlack() {
+    if (!g_dev || !g_ctx || !g_capTex || g_captureW < 4 || g_captureH < 4) return false;
+    const DWORD nowMs = GetTickCount();
+    if (nowMs < g_nextBlackProbeMs) return false;
+    g_nextBlackProbeMs = nowMs + 250;
+
+    if (!g_blackProbeTex) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = 3;
+        desc.Height = 3;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        const HRESULT createHr = g_dev->CreateTexture2D(&desc, nullptr, &g_blackProbeTex);
+        if (FAILED(createHr)) {
+            LogHR("CreateTexture2D(black probe)", createHr);
+            return false;
+        }
+    }
+
+    const UINT sampleX[3] = { g_captureW / 4, g_captureW / 2, (g_captureW * 3) / 4 };
+    const UINT sampleY[3] = { g_captureH / 4, g_captureH / 2, (g_captureH * 3) / 4 };
+    for (UINT y = 0; y < 3; ++y) {
+        for (UINT x = 0; x < 3; ++x) {
+            const D3D11_BOX box = {
+                sampleX[x], sampleY[y], 0,
+                sampleX[x] + 1, sampleY[y] + 1, 1,
+            };
+            g_ctx->CopySubresourceRegion(g_blackProbeTex, 0, x, y, 0, g_capTex, 0, &box);
+        }
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    const HRESULT mapHr = g_ctx->Map(g_blackProbeTex, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(mapHr)) return false;
+    bool black = true;
+    for (UINT y = 0; y < 3 && black; ++y) {
+        const auto* row = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+        for (UINT x = 0; x < 3; ++x) {
+            const uint8_t* pixel = row + x * 4;
+            if (pixel[0] > 4 || pixel[1] > 4 || pixel[2] > 4) {
+                black = false;
+                break;
+            }
+        }
+    }
+    g_ctx->Unmap(g_blackProbeTex, 0);
+    return black;
+}
+
 static void UpdateCapture() {
     if (g_captureState != CaptureState::Running || !g_dup) return;
 
@@ -1652,10 +1710,34 @@ static void UpdateCapture() {
         return;
     }
 
+    if (info.ProtectedContentMaskedOut) {
+        Log("Capture blocked: ProtectedContentMaskedOut=TRUE; hiding overlay");
+        g_hasFrame = false;
+        SetCaptureState(CaptureState::Unavailable, "protected_content");
+        return;
+    }
+
     ++g_acquireOk;
     if (!NormalizeCapturedFrame(frame.texture())) {
         QueueCaptureSignal(CaptureSignal::RebindRetry, "normalize_failed");
         return;
+    }
+
+    if (g_useTargetWindow && GetForegroundWindow() == g_targetWindow) {
+        if (CaptureIsUniformBlack()) {
+            ++g_blackProbeStreak;
+            g_hasFrame = false;
+            SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA);
+            g_overlayRevealed = false;
+            UpdateOverlayVisibility();
+            if (g_blackProbeStreak >= 3) {
+                Log("Capture safety: repeated uniform-black game frames; hiding overlay");
+                SetCaptureState(CaptureState::Unavailable, "black_capture");
+            }
+            return;
+        } else {
+            g_blackProbeStreak = 0;
+        }
     }
 
     g_hasFrame = true;
