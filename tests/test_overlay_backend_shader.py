@@ -136,12 +136,12 @@ def test_overlay_debug_depth_cycles_through_multiple_views():
     assert "debug edge" in source
 
 
-def test_overlay_targets_world_of_warcraft_window_instead_of_full_desktop():
+def test_overlay_targets_configured_game_window_instead_of_full_desktop():
     source = Path("overlay/overlay.cpp").read_text(encoding="utf-8")
 
-    assert "FindWindowW(nullptr, L\"World of Warcraft\")" in source
-    assert "EnumWindows(FindWowWindowProc" in source
-    assert "wcsstr(title, L\"World of Warcraft\")" in source
+    assert 'L"--target-exe"' in source
+    assert "EnumWindows(FindTargetWindowProc" in source
+    assert "QueryFullProcessImageNameW" in source
     assert "GetClientRect(target" in source
     assert "ClientToScreen(target" in source
     assert "g_useTargetWindow" in source
@@ -153,7 +153,7 @@ def test_overlay_targets_world_of_warcraft_window_instead_of_full_desktop():
 def test_overlay_normalizes_desktop_duplication_to_the_target_window_when_available():
     source = Path("overlay/overlay.cpp").read_text(encoding="utf-8")
 
-    assert "FindWindowW(nullptr, L\"World of Warcraft\")" in source
+    assert "FindTargetWindow()" in source
     assert "BuildUprightCaptureRegion" in source
     assert "NormalizeCapturedFrame" in source
     assert "CopyResource(g_rawCapTex, source)" in source

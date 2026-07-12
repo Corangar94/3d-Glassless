@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +53,7 @@ from launcher.diagnostics import (
 )
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
+from launcher.auto_tune import TrackingAutoTuner
 from launcher.tracker_process import TrackerProcess
 from launcher.game_profile_store import ProfileStoreError, load_profiles, save_profiles
 from launcher.game_profiles import (
@@ -295,6 +297,10 @@ class MainWindow(QMainWindow):
 
         self._settings_writer = SharedSettingsWriter()
         trk = config.get("tracking", {})
+        self._auto_tune_enabled = bool(trk.get("auto_tune", True))
+        self._auto_tuner = TrackingAutoTuner()
+        self._last_auto_tune_write_s = 0.0
+        self._tracking_status = "stopped"
         self._camera_tilt_deg: float = float(trk.get("camera_tilt_deg", 0.0))
         ov = config.get("overlay", {})
         if not isinstance(ov, dict):
@@ -783,6 +789,19 @@ class MainWindow(QMainWindow):
         title.setStyleSheet(f"color:{_ACCENT};font-size:12px;font-weight:900;")
         layout.addWidget(title)
 
+        self._auto_tune_checkbox = QCheckBox("Automatic head tracking (recommended)")
+        self._auto_tune_checkbox.setChecked(self._auto_tune_enabled)
+        self._auto_tune_checkbox.setToolTip(
+            "Automatically balances stability and response from live head motion."
+        )
+        self._auto_tune_checkbox.toggled.connect(self._on_auto_tune_toggle)
+        layout.addWidget(self._auto_tune_checkbox)
+
+        self._auto_tune_status = QLabel("Auto tuning will calibrate when tracking starts")
+        self._auto_tune_status.setWordWrap(True)
+        self._auto_tune_status.setStyleSheet("color:#78cbb0;font-size:10px;")
+        layout.addWidget(self._auto_tune_status)
+
         row = QHBoxLayout()
         row.setSpacing(6)
         for key, text in (
@@ -998,6 +1017,37 @@ class MainWindow(QMainWindow):
         self._label_x.setText(f"X\n{x:+.1f}")
         self._label_y.setText(f"Y\n{y:+.1f}")
         self._label_z.setText(f"Z\n{z:.1f}")
+        if not self._auto_tune_enabled or self._tracking_status != "tracking":
+            return
+
+        now_s = time.monotonic()
+        tuned = self._auto_tuner.update(x, y, z, now_s)
+        if now_s - self._last_auto_tune_write_s < 0.25:
+            return
+        self._last_auto_tune_write_s = now_s
+        self._settings = dataclasses.replace(
+            self._settings,
+            smoothing_alpha=tuned.smoothing_alpha,
+            deadzone_mm=tuned.deadzone_mm,
+        )
+        self._settings_writer.write(self._settings)
+
+        for widget, value in (
+            (getattr(self, "_smoothing_slider", None), tuned.smoothing_alpha),
+            (getattr(self, "_deadzone_slider", None), tuned.deadzone_mm),
+        ):
+            if widget is not None:
+                lo = float(widget.property("_lo"))
+                step = float(widget.property("_step"))
+                widget.blockSignals(True)
+                widget.setValue(round((value - lo) / step))
+                widget.blockSignals(False)
+        if hasattr(self, "_auto_tune_status"):
+            mode = "responsive" if tuned.speed_cm_s >= 8.0 else "stable"
+            self._auto_tune_status.setText(
+                f"Auto: {tuned.head_dist_cm:.0f} cm · {mode} · "
+                f"dead-zone {tuned.deadzone_mm:.1f} mm"
+            )
 
     def _on_frame(self, jpeg: bytes) -> None:
         pix = QPixmap()
@@ -1011,6 +1061,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_status(self, status: str) -> None:
+        self._tracking_status = status
         text = _STATUS_TEXT.get(status, f"● {status.upper()}")
         color = _STATUS_COLOR.get(status, "#888")
         self._status_label.setText(text)
@@ -1352,6 +1403,7 @@ class MainWindow(QMainWindow):
         tilt_row_layout.addWidget(self._tilt_status)
         tf.addRow("Camera tilt", tilt_row)
         lay.addWidget(tg)
+        self._apply_auto_tune_control_state()
         lay.addStretch()
 
         save_cfg_btn = QPushButton("Save to config.yaml")
@@ -1395,6 +1447,30 @@ class MainWindow(QMainWindow):
     def _on_settings_change(self, *_: object) -> None:
         self._settings = self._snapshot_settings()
         self._settings_writer.write(self._settings)
+
+    def _apply_auto_tune_control_state(self) -> None:
+        manual = not self._auto_tune_enabled
+        for name in ("_head_dist_spin", "_smoothing_slider", "_deadzone_slider"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(manual)
+
+    def _on_auto_tune_toggle(self, checked: bool) -> None:
+        self._auto_tune_enabled = bool(checked)
+        self._auto_tuner = TrackingAutoTuner()
+        self._apply_auto_tune_control_state()
+        cfg = _load_yaml_mapping(self._config_path)
+        _ensure_mapping_child(cfg, "tracking")["auto_tune"] = self._auto_tune_enabled
+        try:
+            with open(self._config_path, "w", encoding="utf-8") as handle:
+                yaml.safe_dump(cfg, handle, default_flow_style=False, sort_keys=False)
+        except OSError:
+            _log.warning("could not save automatic tracking preference")
+        if hasattr(self, "_auto_tune_status"):
+            self._auto_tune_status.setText(
+                "Auto tuning will calibrate when tracking starts"
+                if checked else "Manual tracking controls enabled"
+            )
 
     def _apply_comfort_preset(self, preset_id: str, reason: str = "manual") -> None:
         preset = _COMFORT_PRESETS.get(preset_id)

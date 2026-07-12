@@ -668,6 +668,35 @@ def test_mainwindow_xyz_labels_update_on_signal(window):
     assert "57.3" in window._label_z.text()
 
 
+def test_automatic_tracking_is_default_and_hides_manual_noise_tuning(window):
+    assert window._auto_tune_checkbox.isChecked()
+    assert not window._smoothing_slider.isEnabled()
+    assert not window._deadzone_slider.isEnabled()
+    assert not window._head_dist_spin.isEnabled()
+
+
+def test_automatic_tracking_updates_live_noise_settings(window, monkeypatch):
+    window._settings_writer = MagicMock()
+    window._on_status("tracking")
+    timestamps = iter((10.0, 10.3))
+    monkeypatch.setattr("launcher.mainwindow.time.monotonic", lambda: next(timestamps))
+
+    window._on_position(0.0, 0.0, 60.0)
+    window._on_position(4.0, 0.0, 60.0)
+
+    assert window._settings_writer.write.call_count == 2
+    assert "Auto:" in window._auto_tune_status.text()
+    assert window._settings.deadzone_mm < 3.0
+
+
+def test_disabling_automatic_tracking_enables_manual_controls(window):
+    window._auto_tune_checkbox.setChecked(False)
+
+    assert window._smoothing_slider.isEnabled()
+    assert window._deadzone_slider.isEnabled()
+    assert window._head_dist_spin.isEnabled()
+
+
 def test_mainwindow_status_badge_tracking(window):
     window._on_status("tracking")
     assert "TRACKING" in window._status_label.text().upper()
