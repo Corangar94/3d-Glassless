@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QGroupBox
+from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea
 
 from launcher import diagnostics
 from launcher.mainwindow import MainWindow
@@ -40,6 +40,15 @@ def test_mainwindow_starts_in_expanded_mode(window):
     assert not window._compact
     assert window.width() >= 700
     assert window.height() >= 520
+    assert window.maximumWidth() > window.minimumWidth()
+    assert window.maximumHeight() > window.minimumHeight()
+
+
+def test_mainwindow_tabs_scroll_when_content_exceeds_viewport(window):
+    assert isinstance(window._tabs.widget(0), QScrollArea)
+    assert isinstance(window._tabs.widget(1), QScrollArea)
+    assert window._tabs.widget(0).widgetResizable()
+    assert window._tabs.widget(1).widgetResizable()
 
 
 def test_mainwindow_toggle_switches_to_compact(window):

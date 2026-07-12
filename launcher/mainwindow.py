@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QTabWidget,
     QVBoxLayout,
@@ -62,7 +63,8 @@ from launcher.game_profiles import (
 )
 
 # Window dimensions
-_EXPANDED_W, _EXPANDED_H = 760, 700
+_EXPANDED_W, _EXPANDED_H = 920, 760
+_MIN_EXPANDED_W, _MIN_EXPANDED_H = 760, 620
 _COMPACT_W,  _COMPACT_H  = 760, 120
 
 _STATUS_TEXT = {
@@ -87,6 +89,7 @@ _DARK_BG = "#08110f"
 _TITLE_BG = "#10231f"
 _CARD_BG = "#132b25"
 _ACCENT = "#f0c15a"
+_ADVANCED_BG = "#0d0d22"
 _DEPTH_HZ_WARN = 6
 _CAPTURE_LOSS_RESTART_THRESHOLD = 3
 _DEPTH_MODES = {
@@ -240,6 +243,33 @@ def _positive_int(data: dict[str, object], key: str, default: int = 0) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _scrollable_tab(inner: QWidget, background: str) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setStyleSheet(f"QScrollArea{{border:none;background:{background};}}")
+    scroll.setWidget(inner)
+    return scroll
+
+
+def _advanced_group_style() -> str:
+    return (
+        f"QGroupBox{{background:{_ADVANCED_BG};color:#3ecfcf;border:1px solid #213a54;"
+        "border-radius:8px;margin-top:14px;padding-top:10px;}}"
+        "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}"
+    )
+
+
+def _configure_form_layout(form: QFormLayout) -> None:
+    form.setContentsMargins(12, 14, 12, 12)
+    form.setHorizontalSpacing(16)
+    form.setVerticalSpacing(10)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
 
 
@@ -402,6 +432,9 @@ class MainWindow(QMainWindow):
             "Overlay-first runtime\n"
             "Camera tracking drives the standalone Windows overlay. ReShade is experimental."
         )
+        self._hero_label.setWordWrap(True)
+        self._hero_label.setMinimumWidth(0)
+        self._hero_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._hero_label.setStyleSheet(
             f"color:{_ACCENT};font-size:20px;font-weight:800;line-height:130%;"
         )
@@ -439,6 +472,9 @@ class MainWindow(QMainWindow):
         self._camera_label = QLabel("Camera preview is available in embedded tracker mode")
         self._camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._camera_label.setMinimumHeight(210)
+        self._camera_label.setMinimumWidth(0)
+        self._camera_label.setWordWrap(True)
+        self._camera_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._camera_label.setStyleSheet(
             "background:#020706;color:#7b8f86;border:1px solid #24443b;"
             "border-radius:10px;font-size:12px;"
@@ -458,7 +494,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(mid_row)
 
         layout.addStretch()
-        return tab
+        return _scrollable_tab(tab, _DARK_BG)
 
     def _status_tile(self, label: str, value: str) -> QLabel:
         tile = QLabel(f"{label}\n{value}")
@@ -467,6 +503,9 @@ class MainWindow(QMainWindow):
             f"background:{_CARD_BG};color:#dce8df;border:1px solid #254f45;"
             "border-radius:10px;padding:10px;font-size:12px;font-weight:700;"
         )
+        tile.setWordWrap(True)
+        tile.setMinimumWidth(0)
+        tile.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         tile.setMinimumHeight(64)
         return tile
 
@@ -486,6 +525,10 @@ class MainWindow(QMainWindow):
         profile_layout.setContentsMargins(0, 0, 0, 0)
         profile_layout.setSpacing(6)
         self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(0)
+        self._profile_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         for profile_id, profile in sorted(
             self._profiles.items(),
             key=lambda item: (item[1].display_name.casefold(), item[0]),
@@ -496,6 +539,7 @@ class MainWindow(QMainWindow):
         )
         profile_layout.addWidget(self._profile_combo)
         self._profile_add_button = QPushButton("Add game")
+        self._profile_add_button.setMinimumWidth(96)
         self._profile_add_button.setToolTip(
             "Create a manually named profile. Glassless3D does not auto-classify games."
         )
@@ -503,15 +547,27 @@ class MainWindow(QMainWindow):
         layout.addRow("Profile", profile_row)
 
         self._profile_executable_edit = QLineEdit()
+        self._profile_executable_edit.setMinimumWidth(0)
+        self._profile_executable_edit.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
         self._profile_executable_edit.setPlaceholderText("C:/Games/Title/Title.exe")
         layout.addRow("Executable", self._profile_executable_edit)
 
         self._play_context_combo = QComboBox()
+        self._play_context_combo.setMinimumWidth(0)
+        self._play_context_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         for context, label in _PROFILE_CONTEXT_LABELS.items():
             self._play_context_combo.addItem(label, context.value)
         layout.addRow("Play context", self._play_context_combo)
 
         self._requested_mode_combo = QComboBox()
+        self._requested_mode_combo.setMinimumWidth(0)
+        self._requested_mode_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         for mode, label in _REQUESTED_MODE_LABELS.items():
             self._requested_mode_combo.addItem(label, mode.value)
         layout.addRow("Requested mode", self._requested_mode_combo)
@@ -519,17 +575,29 @@ class MainWindow(QMainWindow):
         self._advanced_ack_checkbox = QCheckBox(
             "I confirmed this game permits advanced integration"
         )
+        self._advanced_ack_checkbox.setMinimumWidth(0)
+        self._advanced_ack_checkbox.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self._advanced_ack_checkbox.setStyleSheet("color:#dce8df;font-size:11px;")
         layout.addRow("", self._advanced_ack_checkbox)
 
         self._profile_mode_label = QLabel()
         self._profile_mode_label.setWordWrap(True)
+        self._profile_mode_label.setMinimumWidth(0)
+        self._profile_mode_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         layout.addRow("Active", self._profile_mode_label)
 
         self._profile_disclaimer_label = QLabel(
             "Online compatibility is title-specific and subject to the game publisher and anti-cheat policy."
         )
         self._profile_disclaimer_label.setWordWrap(True)
+        self._profile_disclaimer_label.setMinimumWidth(0)
+        self._profile_disclaimer_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self._profile_disclaimer_label.setStyleSheet("color:#8ea69b;font-size:10px;")
         layout.addRow("", self._profile_disclaimer_label)
 
@@ -692,6 +760,8 @@ class MainWindow(QMainWindow):
 
     def _operator_button(self, text: str, slot: object) -> QPushButton:
         btn = QPushButton(text)
+        btn.setMinimumWidth(0)
+        btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         btn.setStyleSheet(
             "QPushButton{background:#1d3b34;color:#e6f0e9;font-weight:700;"
             "border:1px solid #315c51;border-radius:8px;padding:9px;}"
@@ -721,6 +791,8 @@ class MainWindow(QMainWindow):
             ("strong", "Strong depth"),
         ):
             btn = QPushButton(text)
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             btn.setStyleSheet(
                 "QPushButton{background:#18342e;color:#dce8df;font-weight:700;"
                 "border:1px solid #315c51;border-radius:7px;padding:7px;}"
@@ -731,12 +803,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
 
         self._comfort_status = QLabel("Balanced reduces vertical parallax for comfort")
+        self._comfort_status.setWordWrap(True)
+        self._comfort_status.setMinimumWidth(0)
+        self._comfort_status.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self._comfort_status.setStyleSheet("color:#8ea69b;font-size:10px;")
         layout.addWidget(self._comfort_status)
 
         self._depth_mode_combo = QComboBox()
         for label, code in (("Quality depth", 0), ("Balanced depth", 1), ("Fast depth", 2)):
             self._depth_mode_combo.addItem(label, code)
+        self._depth_mode_combo.setMinimumWidth(0)
+        self._depth_mode_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._depth_mode_combo.setCurrentIndex(max(0, self._depth_mode_combo.findData(self._settings.depth_mode)))
         self._depth_mode_combo.currentIndexChanged.connect(self._on_settings_change)
         self._depth_mode_combo.currentIndexChanged.connect(lambda _index: self._on_save_config())
@@ -793,10 +872,14 @@ class MainWindow(QMainWindow):
             f"background:{_CARD_BG};color:#9fe6c4;font-family:monospace;"
             "font-size:16px;font-weight:bold;border-radius:8px;padding:10px;"
         )
+        tile.setMinimumWidth(0)
+        tile.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         return tile
 
     def _make_action_button(self) -> QPushButton:
         self._action_btn = QPushButton("▶ START TRACKING")
+        self._action_btn.setMinimumWidth(0)
+        self._action_btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._action_btn.setStyleSheet(
             f"background:{_ACCENT};color:#111;font-weight:900;"
             "font-size:13px;padding:12px;border:none;border-radius:8px;"
@@ -817,7 +900,10 @@ class MainWindow(QMainWindow):
             self._tabs.setVisible(False)
             self._toggle_btn.setText("▼")
         else:
-            self.setFixedSize(_EXPANDED_W, _EXPANDED_H)
+            self.setMinimumSize(_MIN_EXPANDED_W, _MIN_EXPANDED_H)
+            self.setMaximumSize(16777215, 16777215)
+            if self.width() < _EXPANDED_W or self.height() < _EXPANDED_H:
+                self.resize(_EXPANDED_W, _EXPANDED_H)
             self._tabs.setVisible(True)
             self._toggle_btn.setText("▲")
 
@@ -1094,26 +1180,34 @@ class MainWindow(QMainWindow):
     # ── Advanced tab ───────────────────────────────────────────────────────────
 
     def _make_advanced_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea{border:none;background:#0d0d22;}")
         inner = QWidget()
-        inner.setStyleSheet("background:#0d0d22;color:#c8c8e8;")
+        inner.setStyleSheet(
+            f"background:{_ADVANCED_BG};color:#c8c8e8;"
+            "QPushButton{min-height:24px;padding:4px 10px;}"
+            "QComboBox,QDoubleSpinBox,QLineEdit{min-height:22px;}"
+            "QSlider{min-height:20px;}"
+        )
+        inner.setMinimumWidth(_MIN_EXPANDED_W - 36)
         lay = QVBoxLayout(inner)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(8)
+        lay.setContentsMargins(14, 12, 14, 14)
+        lay.setSpacing(10)
 
         # Presets
         pg = QGroupBox("Presets")
-        pg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        pg.setStyleSheet(_advanced_group_style())
         pl = QHBoxLayout(pg)
+        pl.setContentsMargins(12, 14, 12, 12)
+        pl.setSpacing(10)
         self._preset_combo = QComboBox()
+        self._preset_combo.setMinimumWidth(180)
+        self._preset_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._preset_combo.setEditable(True)
         self._refresh_presets()
         for label, slot in [("Save", self._on_preset_save),
                              ("Load", self._on_preset_load),
                              ("Delete", self._on_preset_delete)]:
             btn = QPushButton(label)
+            btn.setMinimumWidth(88)
             btn.clicked.connect(slot)
             pl.addWidget(btn)
         pl.insertWidget(0, self._preset_combo)
@@ -1121,8 +1215,9 @@ class MainWindow(QMainWindow):
 
         # Diagnostics
         dg = QGroupBox("Diagnostics")
-        dg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        dg.setStyleSheet(_advanced_group_style())
         dl = QVBoxLayout(dg)
+        dl.setContentsMargins(12, 14, 12, 12)
         debug_btn = QPushButton("Open tracking quality monitor")
         debug_btn.setToolTip(
             "Shows live jitter, loss rate, reacquisition time, and parallax shift"
@@ -1133,8 +1228,9 @@ class MainWindow(QMainWindow):
 
         # Shader
         sg = QGroupBox("Shader Tuning")
-        sg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        sg.setStyleSheet(_advanced_group_style())
         sf = QFormLayout(sg)
+        _configure_form_layout(sf)
         self._depth_curve_combo = QComboBox()
         self._depth_curve_combo.addItems(["Linear", "\u221a sqrt", "Gamma \u03b3"])
         self._depth_curve_combo.setCurrentIndex(int(self._settings.depth_curve))
@@ -1162,15 +1258,18 @@ class MainWindow(QMainWindow):
 
         # Calibration
         cg = QGroupBox("Auto-Calibration")
-        cg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        cg.setStyleSheet(_advanced_group_style())
         cf = QFormLayout(cg)
+        _configure_form_layout(cf)
         self._screen_w_spin = QDoubleSpinBox()
+        self._screen_w_spin.setMinimumWidth(120)
         self._screen_w_spin.setRange(0.0, 500.0)
         self._screen_w_spin.setDecimals(1)
         self._screen_w_spin.setSuffix(" cm")
         self._screen_w_spin.setValue(self._settings.screen_w_cm)
         self._screen_w_spin.valueChanged.connect(self._on_settings_change)
         self._screen_h_spin = QDoubleSpinBox()
+        self._screen_h_spin.setMinimumWidth(120)
         self._screen_h_spin.setRange(0.0, 500.0)
         self._screen_h_spin.setDecimals(1)
         self._screen_h_spin.setSuffix(" cm")
@@ -1179,6 +1278,7 @@ class MainWindow(QMainWindow):
         detect_btn = QPushButton("Auto-detect screen size")
         detect_btn.clicked.connect(self._on_detect_screen)
         self._head_dist_spin = QDoubleSpinBox()
+        self._head_dist_spin.setMinimumWidth(120)
         self._head_dist_spin.setRange(20.0, 200.0)
         self._head_dist_spin.setDecimals(1)
         self._head_dist_spin.setSuffix(" cm")
@@ -1199,9 +1299,11 @@ class MainWindow(QMainWindow):
 
         # Tracker
         tg = QGroupBox("Tracker Calibration")
-        tg.setStyleSheet("QGroupBox{color:#3ecfcf;}")
+        tg.setStyleSheet(_advanced_group_style())
         tf = QFormLayout(tg)
+        _configure_form_layout(tf)
         self._fov_combo = QComboBox()
+        self._fov_combo.setMinimumWidth(120)
         self._fov_combo.setEditable(True)
         for fov in ["60", "70", "78", "90", "100", "110", "120"]:
             self._fov_combo.addItem(f"{fov}\u00b0", float(fov))
@@ -1211,6 +1313,7 @@ class MainWindow(QMainWindow):
         self._fov_combo.currentIndexChanged.connect(self._on_settings_change)
         tf.addRow("Camera FOV", self._fov_combo)
         self._ipd_spin = QDoubleSpinBox()
+        self._ipd_spin.setMinimumWidth(120)
         self._ipd_spin.setRange(50.0, 80.0)
         self._ipd_spin.setDecimals(1)
         self._ipd_spin.setSuffix(" mm")
@@ -1224,6 +1327,7 @@ class MainWindow(QMainWindow):
         self._deadzone_slider.valueChanged.connect(self._on_settings_change)
         tf.addRow("Deadzone mm", self._deadzone_slider)
         self._camera_tilt_spin = QDoubleSpinBox()
+        self._camera_tilt_spin.setMinimumWidth(120)
         self._camera_tilt_spin.setRange(-45.0, 45.0)
         self._camera_tilt_spin.setSingleStep(1.0)
         self._camera_tilt_spin.setDecimals(1)
@@ -1236,6 +1340,7 @@ class MainWindow(QMainWindow):
         tilt_row_layout.setSpacing(4)
         tilt_row_layout.addWidget(self._camera_tilt_spin)
         recal_btn = QPushButton("Re-calibrate")
+        recal_btn.setMinimumWidth(110)
         recal_btn.setToolTip(
             "Reset tilt to 0° and restart tracker — auto-calibration runs continuously"
         )
@@ -1252,8 +1357,7 @@ class MainWindow(QMainWindow):
         save_cfg_btn.clicked.connect(self._on_save_config)
         lay.addWidget(save_cfg_btn)
 
-        scroll.setWidget(inner)
-        return scroll
+        return _scrollable_tab(inner, _ADVANCED_BG)
 
     # ── Settings slots ─────────────────────────────────────────────────────────
 
