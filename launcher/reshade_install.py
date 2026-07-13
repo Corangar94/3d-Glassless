@@ -10,6 +10,9 @@ from collections.abc import Generator
 from launcher.game_profiles import Backend, PolicyDecision
 
 
+_ALLOWED_PROXY_NAMES = frozenset({"dxgi.dll", "d3d11.dll", "d3d9.dll"})
+
+
 class InstallError(Exception):
     """Raised when an installation step fails."""
 
@@ -35,6 +38,7 @@ def install_steps(
     profile_name: str = "wow",
     *,
     policy: PolicyDecision,
+    proxy_name: str = "dxgi.dll",
 ) -> Generator[str, None, None]:
     """Install the experimental backend assets into game_dir.
 
@@ -47,13 +51,21 @@ def install_steps(
             f"{policy.reason or 'offline advanced acknowledgement is required'}",
         )
 
+    normalized_proxy = proxy_name.strip().lower()
+    if normalized_proxy not in _ALLOWED_PROXY_NAMES:
+        allowed = ", ".join(sorted(_ALLOWED_PROXY_NAMES))
+        raise InstallError(
+            "Selecting ReShade proxy",
+            f"unsupported proxy {proxy_name!r}; expected one of: {allowed}",
+        )
+
     base = _bundle_dir()
 
     # Step 1: Experimental ReShade DLL
     src_dll = os.path.join(base, "ReShade64.dll")
-    # Use `dxgi.dll` for this experimental DX12-oriented backend. Other proxy
-    # names can attach to the wrong swapchain or are not supported by ReShade.
-    dst_dll = os.path.join(game_dir, "dxgi.dll")
+    # Use dxgi.dll by default for DX11/DX12 games. D3D9 titles such as HL2
+    # need d3d9.dll, but keep the choice explicit and policy-gated.
+    dst_dll = os.path.join(game_dir, normalized_proxy)
     # Guard: the *standard* ReShade 5.9.2 DLL is 3,977,952 bytes and silently
     # rejects external addons with "limited add-on functionality" in its log.
     # The *addon* build is 4,155,904 bytes. If we somehow end up with the
@@ -111,9 +123,10 @@ def install(
     profile_name: str = "wow",
     *,
     policy: PolicyDecision,
+    proxy_name: str = "dxgi.dll",
 ) -> None:
     """Install the experimental backend into game_dir. Raises InstallError on failure."""
-    for _ in install_steps(game_dir, profile_name, policy=policy):
+    for _ in install_steps(game_dir, profile_name, policy=policy, proxy_name=proxy_name):
         pass
 
 
@@ -146,6 +159,7 @@ def _write_reshade_ini(game_dir: str, profile_name: str, base: str) -> None:
         ln for ln in kept
         if not ln.startswith("EffectSearchPaths=")
         and not ln.startswith("TextureSearchPaths=")
+        and not ln.startswith("PresetPath=")
     ]
     # Force Home (VK_HOME=36) as the overlay key — the launcher UI brands
     # "press Home" for ReShade. ReShade defaults to F12 (123) which nobody
@@ -162,13 +176,22 @@ def _write_reshade_ini(game_dir: str, profile_name: str, base: str) -> None:
 
     block: list[str] = [
         "[RESHADE]\n",
+        r"PresetPath=.\Glassless3D.ini" + "\n",
         r"EffectSearchPaths=.\reshade-shaders\Shaders" + "\n",
         r"TextureSearchPaths=.\reshade-shaders\Textures" + "\n",
     ]
     if depth_settings:
         block += ["[PREPROCESSOR]\n"] + [f"{k}={v}\n" for k, v in depth_settings.items()]
-    if shader_defaults:
-        block += ["[Glassless3D.fx]\n"] + [f"{k}={v}\n" for k, v in shader_defaults.items()]
 
     with open(ini_path, "w") as f:
         f.writelines(kept + block)
+
+    preset_path = os.path.join(game_dir, "Glassless3D.ini")
+    preset: list[str] = [
+        "Techniques=Glassless3D\n",
+        "TechniqueSorting=Glassless3D\n",
+    ]
+    if shader_defaults:
+        preset += ["[Glassless3D.fx]\n"] + [f"{k}={v}\n" for k, v in shader_defaults.items()]
+    with open(preset_path, "w") as f:
+        f.writelines(preset)

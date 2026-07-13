@@ -54,6 +54,38 @@ def test_install_steps_copies_reshade_dll(tmp_path):
     assert os.path.exists(os.path.join(game_dir, "dxgi.dll"))
 
 
+def test_install_steps_can_select_d3d9_proxy_for_legacy_games(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    game_dir = str(tmp_path / "game")
+    os.makedirs(game_dir)
+    with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
+        list(
+            install_steps(
+                game_dir,
+                policy=_acknowledged_offline_policy(),
+                proxy_name="d3d9.dll",
+            )
+        )
+    assert os.path.exists(os.path.join(game_dir, "d3d9.dll"))
+    assert not os.path.exists(os.path.join(game_dir, "dxgi.dll"))
+
+
+def test_install_steps_rejects_unsafe_proxy_name(tmp_path):
+    bundle = _make_bundle(tmp_path)
+    game_dir = str(tmp_path / "game")
+    os.makedirs(game_dir)
+    with patch("launcher.reshade_install._bundle_dir", return_value=bundle):
+        with pytest.raises(InstallError) as exc_info:
+            list(
+                install_steps(
+                    game_dir,
+                    policy=_acknowledged_offline_policy(),
+                    proxy_name="steam_api64.dll",
+                )
+            )
+    assert exc_info.value.step == "Selecting ReShade proxy"
+
+
 def test_install_steps_copies_shaders(tmp_path):
     bundle = _make_bundle(tmp_path)
     game_dir = str(tmp_path / "game")
@@ -73,10 +105,15 @@ def test_install_steps_writes_reshade_ini(tmp_path):
         list(install_steps(game_dir, policy=_acknowledged_offline_policy()))
     ini_path = os.path.join(game_dir, "ReShade.ini")
     content = open(ini_path).read()
+    preset_path = os.path.join(game_dir, "Glassless3D.ini")
+    preset = open(preset_path).read()
+    assert "PresetPath=.\\Glassless3D.ini" in content
     assert "[PREPROCESSOR]" in content
     assert "RESHADE_DEPTH_INPUT_IS_REVERSED" in content
-    assert "[Glassless3D.fx]" in content
-    assert "ConvergenceDist" in content
+    assert "Techniques=Glassless3D" in preset
+    assert "TechniqueSorting=Glassless3D" in preset
+    assert "[Glassless3D.fx]" in preset
+    assert "ConvergenceDist" in preset
 
 
 def test_install_steps_copies_addon(tmp_path):
