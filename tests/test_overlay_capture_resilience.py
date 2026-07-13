@@ -105,6 +105,19 @@ def test_overlay_hides_instead_of_presenting_blocked_or_black_game_capture():
     assert "CaptureState::DeviceRecovery" in source
 
 
+def test_overlay_prefers_wgc_target_window_capture_for_games():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "Windows.Graphics.Capture.Direct3D11CaptureFramePool" in source
+    assert "IGraphicsCaptureItemInterop" in source
+    assert "CreateForWindow" in source
+    assert "CreateFreeThreaded" in source
+    assert "TryGetNextFrame" in source
+    assert "IDirect3DDxgiInterfaceAccess" in source
+    assert 'SetCaptureState(CaptureState::Running, usingWgc ? "bound_wgc" : "bound")' in source
+    assert "falling back to desktop duplication" in source
+
+
 def test_depth_cleanup_releases_both_current_and_previous_depth_resources():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 

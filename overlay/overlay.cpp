@@ -17,6 +17,12 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <d3dcompiler.h>
+#include <inspectable.h>
+#include <roapi.h>
+#include <winstring.h>
+#include <windows.foundation.h>
+#include <windows.graphics.directx.h>
+#include <windows.graphics.directx.direct3d11.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +37,86 @@
 
 #include "capture_recovery.h"
 #include "depth_infer.h"
+
+namespace g3d::wgc {
+
+struct SizeInt32 {
+    INT32 Width;
+    INT32 Height;
+};
+
+MIDL_INTERFACE("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")
+IDirect3DDxgiInterfaceAccess : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void** p) = 0;
+};
+
+MIDL_INTERFACE("3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")
+IGraphicsCaptureItemInterop : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE CreateForWindow(HWND window, REFIID iid, void** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateForMonitor(HMONITOR monitor, REFIID iid, void** result) = 0;
+};
+
+MIDL_INTERFACE("79C3F95B-31F7-4EC2-A464-632EF5D30760")
+IGraphicsCaptureItem : public IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_DisplayName(HSTRING* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Size(SizeInt32* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE add_Closed(IUnknown* handler, EventRegistrationToken* token) = 0;
+    virtual HRESULT STDMETHODCALLTYPE remove_Closed(EventRegistrationToken token) = 0;
+};
+
+MIDL_INTERFACE("FA50C623-38DA-4B32-ACF3-FA9734AD800E")
+IDirect3D11CaptureFrame : public IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_Surface(
+        ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_SystemRelativeTime(ABI::Windows::Foundation::TimeSpan* value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ContentSize(SizeInt32* value) = 0;
+};
+
+MIDL_INTERFACE("814E42A9-F70F-4AD7-939B-FDDCC6EB880D")
+IGraphicsCaptureSession : public IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE StartCapture() = 0;
+};
+
+MIDL_INTERFACE("24EB6D22-1975-422E-82E7-780DBD8DDF24")
+IDirect3D11CaptureFramePool : public IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE Recreate(
+        ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice* device,
+        ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat,
+        INT32 numberOfBuffers,
+        SizeInt32 size) = 0;
+    virtual HRESULT STDMETHODCALLTYPE TryGetNextFrame(IDirect3D11CaptureFrame** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE add_FrameArrived(IUnknown* handler, EventRegistrationToken* token) = 0;
+    virtual HRESULT STDMETHODCALLTYPE remove_FrameArrived(EventRegistrationToken token) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateCaptureSession(
+        IGraphicsCaptureItem* item,
+        IGraphicsCaptureSession** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_DispatcherQueue(IUnknown** value) = 0;
+};
+
+MIDL_INTERFACE("589B103F-6BBC-5DF5-A991-02E28B3B66D5")
+IDirect3D11CaptureFramePoolStatics2 : public IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE CreateFreeThreaded(
+        ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice* device,
+        ABI::Windows::Graphics::DirectX::DirectXPixelFormat pixelFormat,
+        INT32 numberOfBuffers,
+        SizeInt32 size,
+        IDirect3D11CaptureFramePool** result) = 0;
+};
+
+using CreateDirect3D11DeviceFromDXGIDeviceFn = HRESULT (WINAPI*)(
+    IDXGIDevice* dxgiDevice,
+    IInspectable** graphicsDevice);
+
+}  // namespace g3d::wgc
+
+__CRT_UUID_DECL(g3d::wgc::IDirect3DDxgiInterfaceAccess,
+    0xA9B3D012, 0x3DF2, 0x4EE3, 0xB8, 0xD1, 0x86, 0x95, 0xF4, 0x57, 0xD3, 0xC1)
+__CRT_UUID_DECL(g3d::wgc::IGraphicsCaptureItemInterop,
+    0x3628E81B, 0x3CAC, 0x4C60, 0xB7, 0xF4, 0x23, 0xCE, 0x0E, 0x0C, 0x33, 0x56)
+__CRT_UUID_DECL(g3d::wgc::IGraphicsCaptureItem,
+    0x79C3F95B, 0x31F7, 0x4EC2, 0xA4, 0x64, 0x63, 0x2E, 0xF5, 0xD3, 0x07, 0x60)
+__CRT_UUID_DECL(g3d::wgc::IDirect3D11CaptureFramePoolStatics2,
+    0x589B103F, 0x6BBC, 0x5DF5, 0xA9, 0x91, 0x02, 0xE2, 0x8B, 0x3B, 0x66, 0xD5)
 
 // ── Logging ───────────────────────────────────────────────────────────────
 // Writes to overlay.log next to the exe. One FILE* held open for lifetime.
@@ -88,6 +174,10 @@ static void LogClose() {
 // (Windows 10 2004+). Prevents the black self-capture feedback loop.
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+#ifndef RO_E_CLOSED
+#define RO_E_CLOSED _HRESULT_TYPEDEF_(0x80000013)
 #endif
 
 static void EnablePerMonitorV2DpiAwareness() {
@@ -498,6 +588,44 @@ static int                       g_acquireLost = 0;
 static int                       g_acquireOther = 0;
 static DWORD                     g_nextBlackProbeMs = 0;
 static int                       g_blackProbeStreak = 0;
+
+enum class CaptureBackend {
+    DesktopDuplication,
+    WindowsGraphicsCapture,
+};
+
+static CaptureBackend            g_captureBackend = CaptureBackend::DesktopDuplication;
+static IInspectable*             g_wgcInspectableDevice = nullptr;
+static ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice* g_wgcDevice = nullptr;
+static g3d::wgc::IGraphicsCaptureItem* g_wgcItem = nullptr;
+static g3d::wgc::IDirect3D11CaptureFramePool* g_wgcFramePool = nullptr;
+static g3d::wgc::IGraphicsCaptureSession* g_wgcSession = nullptr;
+static HWND                      g_wgcWindow = nullptr;
+static UINT                      g_wgcWidth = 0;
+static UINT                      g_wgcHeight = 0;
+
+static void CloseWinRtObject(IUnknown* object) {
+    if (!object) return;
+    ABI::Windows::Foundation::IClosable* closable = nullptr;
+    if (SUCCEEDED(object->QueryInterface(__uuidof(ABI::Windows::Foundation::IClosable),
+                                         reinterpret_cast<void**>(&closable)))) {
+        closable->Close();
+        closable->Release();
+    }
+}
+
+static void ReleaseWgcResources() {
+    CloseWinRtObject(g_wgcSession);
+    CloseWinRtObject(g_wgcFramePool);
+    SafeRelease(g_wgcSession);
+    SafeRelease(g_wgcFramePool);
+    SafeRelease(g_wgcItem);
+    SafeRelease(g_wgcDevice);
+    SafeRelease(g_wgcInspectableDevice);
+    g_wgcWindow = nullptr;
+    g_wgcWidth = 0;
+    g_wgcHeight = 0;
+}
 
 static void ReleaseCaptureTextures() {
     SafeRelease(g_blackProbeTex);
@@ -927,6 +1055,27 @@ static void PollTargetWindow() {
     if (nowMs < g_nextTargetPollMs) return;
     g_nextTargetPollMs = nowMs + 250;
 
+    if (g_captureBackend == CaptureBackend::WindowsGraphicsCapture && IsWindow(g_wgcWindow)) {
+        RECT client = {};
+        POINT topLeft = {};
+        POINT bottomRight = {};
+        if (GetClientRect(g_wgcWindow, &client)) {
+            topLeft = { client.left, client.top };
+            bottomRight = { client.right, client.bottom };
+            if (ClientToScreen(g_wgcWindow, &topLeft) && ClientToScreen(g_wgcWindow, &bottomRight)) {
+                RECT nextRect = { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
+                const bool changed = !EqualRect(&nextRect, &g_targetRect);
+                g_targetWindow = g_wgcWindow;
+                g_targetRect = nextRect;
+                g_useTargetWindow = true;
+                if (changed) g_bindingDirty = true;
+                return;
+            }
+        }
+        g_bindingDirty = true;
+        return;
+    }
+
     const HWND oldWindow = g_targetWindow;
     const RECT oldRect = g_targetRect;
     const bool oldEnabled = g_useTargetWindow;
@@ -1108,6 +1257,46 @@ static bool CreateCaptureTextures(const DXGI_OUTDUPL_DESC& duplicationDesc) {
     return true;
 }
 
+static bool CreateWgcCaptureTextures(UINT width, UINT height) {
+    ReleaseCaptureTextures();
+    if (width == 0 || height == 0) {
+        Log("CreateWgcCaptureTextures: empty capture dimensions");
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    HRESULT hr = g_dev->CreateTexture2D(&desc, nullptr, &g_capTex);
+    if (FAILED(hr)) {
+        LogHR("CreateTexture2D(WGC capture)", hr);
+        ReleaseCaptureTextures();
+        return false;
+    }
+    hr = g_dev->CreateShaderResourceView(g_capTex, nullptr, &g_srv);
+    if (FAILED(hr)) {
+        LogHR("CreateShaderResourceView(WGC capture)", hr);
+        ReleaseCaptureTextures();
+        return false;
+    }
+    hr = g_dev->CreateRenderTargetView(g_capTex, nullptr, &g_capRtv);
+    if (FAILED(hr)) {
+        LogHR("CreateRenderTargetView(WGC capture)", hr);
+        ReleaseCaptureTextures();
+        return false;
+    }
+
+    g_captureW = width;
+    g_captureH = height;
+    return true;
+}
+
 static bool NormalizeCapturedFrame(ID3D11Texture2D* source) {
     if (!source || !g_rawCapTex || !g_rawSrv || !g_capRtv || !g_normalizePs || !g_normalizeCb) {
         return false;
@@ -1210,6 +1399,152 @@ static HRESULT InitDuplication() {
     SafeRelease(dxgiDevice);
     if (SUCCEEDED(hr)) Log("InitDuplication: complete");
     return hr;
+}
+
+static HRESULT CreateWgcItemForWindow(HWND target, g3d::wgc::IGraphicsCaptureItem** item) {
+    if (!target || !item) return E_POINTER;
+    *item = nullptr;
+
+    HSTRING className = nullptr;
+    HRESULT hr = WindowsCreateString(
+        L"Windows.Graphics.Capture.GraphicsCaptureItem",
+        static_cast<UINT32>(wcslen(L"Windows.Graphics.Capture.GraphicsCaptureItem")),
+        &className);
+    if (FAILED(hr)) return hr;
+
+    g3d::wgc::IGraphicsCaptureItemInterop* interop = nullptr;
+    hr = RoGetActivationFactory(className, __uuidof(g3d::wgc::IGraphicsCaptureItemInterop),
+        reinterpret_cast<void**>(&interop));
+    WindowsDeleteString(className);
+    if (FAILED(hr)) return hr;
+
+    hr = interop->CreateForWindow(
+        target,
+        __uuidof(g3d::wgc::IGraphicsCaptureItem),
+        reinterpret_cast<void**>(item));
+    interop->Release();
+    return hr;
+}
+
+static HRESULT CreateWgcFramePoolFactory(
+    g3d::wgc::IDirect3D11CaptureFramePoolStatics2** factory) {
+    if (!factory) return E_POINTER;
+    *factory = nullptr;
+
+    HSTRING className = nullptr;
+    HRESULT hr = WindowsCreateString(
+        L"Windows.Graphics.Capture.Direct3D11CaptureFramePool",
+        static_cast<UINT32>(wcslen(L"Windows.Graphics.Capture.Direct3D11CaptureFramePool")),
+        &className);
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory(
+        className,
+        __uuidof(g3d::wgc::IDirect3D11CaptureFramePoolStatics2),
+        reinterpret_cast<void**>(factory));
+    WindowsDeleteString(className);
+    return hr;
+}
+
+static HRESULT InitWgcCapture() {
+    Log("InitWgcCapture: begin");
+    if (!g_dev || !g_useTargetWindow || !g_targetWindow) return E_POINTER;
+
+    ReleaseWgcResources();
+    SafeRelease(g_dup);
+    g_captureBackend = CaptureBackend::WindowsGraphicsCapture;
+
+    const HRESULT roHr = RoInitialize(RO_INIT_MULTITHREADED);
+    if (FAILED(roHr) && roHr != RPC_E_CHANGED_MODE) {
+        LogHR("RoInitialize", roHr);
+        return roHr;
+    }
+
+    IDXGIDevice* dxgiDevice = nullptr;
+    HRESULT hr = g_dev->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
+    if (FAILED(hr)) return hr;
+
+    HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
+    if (!d3d11) d3d11 = LoadLibraryW(L"d3d11.dll");
+    auto createDevice = d3d11
+        ? reinterpret_cast<g3d::wgc::CreateDirect3D11DeviceFromDXGIDeviceFn>(
+            GetProcAddress(d3d11, "CreateDirect3D11DeviceFromDXGIDevice"))
+        : nullptr;
+    if (!createDevice) {
+        dxgiDevice->Release();
+        Log("InitWgcCapture: CreateDirect3D11DeviceFromDXGIDevice unavailable");
+        return HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+    }
+
+    hr = createDevice(dxgiDevice, &g_wgcInspectableDevice);
+    dxgiDevice->Release();
+    if (FAILED(hr)) {
+        LogHR("CreateDirect3D11DeviceFromDXGIDevice", hr);
+        return hr;
+    }
+    hr = g_wgcInspectableDevice->QueryInterface(
+        __uuidof(ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice),
+        reinterpret_cast<void**>(&g_wgcDevice));
+    if (FAILED(hr)) {
+        LogHR("QI IDirect3DDevice", hr);
+        return hr;
+    }
+
+    hr = CreateWgcItemForWindow(g_targetWindow, &g_wgcItem);
+    if (FAILED(hr)) {
+        LogHR("CreateForWindow(WGC item)", hr);
+        return hr;
+    }
+
+    g3d::wgc::SizeInt32 itemSize = {};
+    hr = g_wgcItem->get_Size(&itemSize);
+    if (FAILED(hr) || itemSize.Width <= 0 || itemSize.Height <= 0) {
+        const UINT fallbackW = static_cast<UINT>(g_targetRect.right - g_targetRect.left);
+        const UINT fallbackH = static_cast<UINT>(g_targetRect.bottom - g_targetRect.top);
+        itemSize.Width = static_cast<INT32>(fallbackW);
+        itemSize.Height = static_cast<INT32>(fallbackH);
+        Log("InitWgcCapture: item size unavailable, using target rect %ux%u", fallbackW, fallbackH);
+    }
+    if (itemSize.Width <= 0 || itemSize.Height <= 0) return E_INVALIDARG;
+
+    g3d::wgc::IDirect3D11CaptureFramePoolStatics2* poolFactory = nullptr;
+    hr = CreateWgcFramePoolFactory(&poolFactory);
+    if (FAILED(hr)) {
+        LogHR("RoGetActivationFactory(Direct3D11CaptureFramePool)", hr);
+        return hr;
+    }
+
+    hr = poolFactory->CreateFreeThreaded(
+        g_wgcDevice,
+        ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+        2,
+        itemSize,
+        &g_wgcFramePool);
+    poolFactory->Release();
+    if (FAILED(hr)) {
+        LogHR("Direct3D11CaptureFramePool::CreateFreeThreaded", hr);
+        return hr;
+    }
+
+    hr = g_wgcFramePool->CreateCaptureSession(g_wgcItem, &g_wgcSession);
+    if (FAILED(hr)) {
+        LogHR("CreateCaptureSession", hr);
+        return hr;
+    }
+
+    if (!CreateWgcCaptureTextures(static_cast<UINT>(itemSize.Width), static_cast<UINT>(itemSize.Height))) {
+        return E_FAIL;
+    }
+    hr = g_wgcSession->StartCapture();
+    if (FAILED(hr)) {
+        LogHR("GraphicsCaptureSession::StartCapture", hr);
+        return hr;
+    }
+
+    g_wgcWindow = g_targetWindow;
+    g_wgcWidth = static_cast<UINT>(itemSize.Width);
+    g_wgcHeight = static_cast<UINT>(itemSize.Height);
+    Log("InitWgcCapture: complete hwnd=%p size=%ux%u", g_wgcWindow, g_wgcWidth, g_wgcHeight);
+    return S_OK;
 }
 
 // Try to (re)open the tracker shared memory. Safe to call repeatedly.
@@ -1480,8 +1815,10 @@ static void SetCaptureState(CaptureState state, const char* reason) {
 static void DestroyCaptureResources() {
     g_hasFrame = false;
     if (g_depth) { delete g_depth; g_depth = nullptr; }
+    ReleaseWgcResources();
     ReleaseCaptureTextures();
     SafeRelease(g_dup);
+    g_captureBackend = CaptureBackend::DesktopDuplication;
 }
 
 static void QueueCaptureSignal(CaptureSignal signal, const char* reason) {
@@ -1603,11 +1940,26 @@ static void TickCaptureRebind() {
         EnterDeviceRecovery("capture adapter changed", DXGI_ERROR_DEVICE_RESET, "adapter_changed");
         return;
     }
-    const HRESULT hr = InitDuplication();
+    HRESULT hr = E_FAIL;
+    bool usingWgc = false;
+    if (g_useTargetWindow && g_targetWindow) {
+        hr = InitWgcCapture();
+        if (SUCCEEDED(hr)) {
+            usingWgc = true;
+        } else {
+            LogHR("InitWgcCapture failed; falling back to desktop duplication", hr);
+            ReleaseWgcResources();
+            g_captureBackend = CaptureBackend::DesktopDuplication;
+        }
+    }
+    if (!usingWgc) {
+        g_captureBackend = CaptureBackend::DesktopDuplication;
+        hr = InitDuplication();
+    }
     if (SUCCEEDED(hr)) {
         InitDepth();
         g_rebindRetry.Reset(GetTickCount64());
-        SetCaptureState(CaptureState::Running, "bound");
+        SetCaptureState(CaptureState::Running, usingWgc ? "bound_wgc" : "bound");
     } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
         QueueCaptureSignal(CaptureSignal::RebindRetry, "duplicate_retry");
     } else if (IsUnavailableDuplicationFailure(hr)) {
@@ -1675,7 +2027,96 @@ static bool CaptureIsUniformBlack() {
     return black;
 }
 
+static void UpdateWgcCapture() {
+    if (g_captureState != CaptureState::Running || !g_wgcFramePool) return;
+
+    g3d::wgc::IDirect3D11CaptureFrame* latestFrame = nullptr;
+    for (;;) {
+        g3d::wgc::IDirect3D11CaptureFrame* nextFrame = nullptr;
+        const HRESULT nextHr = g_wgcFramePool->TryGetNextFrame(&nextFrame);
+        if (FAILED(nextHr)) {
+            if (nextHr == RO_E_CLOSED) {
+                QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_closed");
+            } else if (IsDeviceLoss(nextHr)
+                || (g_dev && IsDeviceLoss(g_dev->GetDeviceRemovedReason()))) {
+                EnterDeviceRecovery("WGC TryGetNextFrame", nextHr, "device_lost");
+            } else {
+                QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_frame_failed");
+            }
+            SafeRelease(latestFrame);
+            return;
+        }
+        if (!nextFrame) break;
+        CloseWinRtObject(latestFrame);
+        SafeRelease(latestFrame);
+        latestFrame = nextFrame;
+    }
+    if (!latestFrame) {
+        ++g_acquireTimeout;
+        return;
+    }
+
+    g3d::wgc::SizeInt32 contentSize = {};
+    if (SUCCEEDED(latestFrame->get_ContentSize(&contentSize))
+        && contentSize.Width > 0 && contentSize.Height > 0
+        && (static_cast<UINT>(contentSize.Width) != g_wgcWidth
+            || static_cast<UINT>(contentSize.Height) != g_wgcHeight)) {
+        Log("WGC frame resized: %dx%d -> recreating capture", contentSize.Width, contentSize.Height);
+        CloseWinRtObject(latestFrame);
+        SafeRelease(latestFrame);
+        QueueCaptureSignal(CaptureSignal::BindingDirty, "wgc_resized");
+        return;
+    }
+
+    ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface* surface = nullptr;
+    HRESULT hr = latestFrame->get_Surface(&surface);
+    if (FAILED(hr) || !surface) {
+        LogHR("WGC frame get_Surface", hr);
+        CloseWinRtObject(latestFrame);
+        SafeRelease(latestFrame);
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_surface_failed");
+        return;
+    }
+
+    g3d::wgc::IDirect3DDxgiInterfaceAccess* access = nullptr;
+    hr = surface->QueryInterface(__uuidof(g3d::wgc::IDirect3DDxgiInterfaceAccess),
+        reinterpret_cast<void**>(&access));
+    if (SUCCEEDED(hr) && access) {
+        ID3D11Texture2D* frameTex = nullptr;
+        hr = access->GetInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&frameTex));
+        if (SUCCEEDED(hr) && frameTex && g_capTex) {
+            g_ctx->CopyResource(g_capTex, frameTex);
+            ++g_acquireOk;
+            g_blackProbeStreak = 0;
+            g_hasFrame = true;
+            UpdateOverlayVisibility();
+            if (g_depth && !g_depth->run(g_capTex)) {
+                static int depthFails = 0;
+                if (++depthFails < 5 || depthFails % 120 == 0) {
+                    Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
+                }
+            }
+        } else {
+            LogHR("WGC GetInterface(ID3D11Texture2D)", hr);
+            QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_texture_failed");
+        }
+        SafeRelease(frameTex);
+        access->Release();
+    } else {
+        LogHR("QI IDirect3DDxgiInterfaceAccess", hr);
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_access_failed");
+    }
+
+    surface->Release();
+    CloseWinRtObject(latestFrame);
+    latestFrame->Release();
+}
+
 static void UpdateCapture() {
+    if (g_captureBackend == CaptureBackend::WindowsGraphicsCapture) {
+        UpdateWgcCapture();
+        return;
+    }
     if (g_captureState != CaptureState::Running || !g_dup) return;
 
     DXGI_OUTDUPL_FRAME_INFO info = {};

@@ -49,6 +49,7 @@ target_link_libraries(Glassless3DOverlay PRIVATE
     gdi32
     shell32
     ole32
+    runtimeobject
     windowscodecs
     "${ORT_DIR}/lib/onnxruntime.lib"
     "${DML_DIR}/lib/DirectML.lib"
