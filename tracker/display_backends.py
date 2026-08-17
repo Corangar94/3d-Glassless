@@ -1,8 +1,8 @@
 """Display backend descriptors for the overlay-first architecture.
 
 This is intentionally a lightweight contract, not a renderer abstraction. It
-keeps product/runtime status explicit while future stereo and quilt backends are
-developed behind a stable ID and capability shape.
+keeps product/runtime status explicit while experimental stereo and quilt
+backends are validated behind a stable ID and capability shape.
 """
 from __future__ import annotations
 
@@ -74,14 +74,14 @@ def built_in_backends() -> list[DisplayBackend]:
             label="Stereo Autostereo",
             status="experimental",
             view_count=2,
-            description="Future two-view output path for tracked lenticular displays.",
+            description="Two-view side-by-side output path for tracked lenticular or SBS-capable displays.",
         ),
         DisplayBackend(
             id="lightfield_quilt",
             label="Light-field Quilt",
             status="experimental",
             view_count=45,
-            description="Future multiview/quilt output path for light-field displays.",
+            description="9x5 multiview quilt output path for light-field display validation.",
         ),
     ]
 

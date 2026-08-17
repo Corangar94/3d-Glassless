@@ -64,12 +64,9 @@ public:
     ID3D11ShaderResourceView* depth_srv()      const;  // latest inference
     ID3D11ShaderResourceView* depth_prev_srv() const;  // previous inference
 
-    // Blend factor [0,1] advancing from 0→1 over kBlendFrames render frames
-    // each time a new inference arrives. Read every render frame and pass to
-    // the shader so it can lerp(prev_srv, depth_srv, depth_blend()).
-    // Call advance_blend() once per render frame.
-    float depth_blend()    const;
-    void  advance_blend();               // call once per render frame
+    // Blend factor [0,1] computed from wall-clock elapsed time after each new
+    // inference. It is independent of monitor refresh and render cadence.
+    float depth_blend() const;
 
     const char* last_error() const;
 

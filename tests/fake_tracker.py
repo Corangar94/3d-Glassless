@@ -86,7 +86,7 @@ def _print_status(x: float, y: float, z: float, settings: OverlaySettings) -> No
     tag = _shift_tag(sx, sy)
     print(
         f"fake_tracker: x={x:+.2f} y={y:+.2f} z={z:.2f}"
-        f" → shiftX={sx:.2f}% shiftY={sy:.2f}% [{tag}]",
+        f" -> shiftX={sx:.2f}% shiftY={sy:.2f}% [{tag}]",
         flush=True,
     )
 
@@ -119,7 +119,7 @@ def _write_loop(gen: Callable[[], tuple[float, float, float]]) -> None:
 def _static_mode(x: float, y: float, z: float) -> None:
     if z <= 0:
         raise ValueError(f"z must be > 0, got {z}")
-    print(f"fake_tracker [static]: x={x} y={y} z={z} — Ctrl+C to stop", flush=True)
+    print(f"fake_tracker [static]: x={x} y={y} z={z} - Ctrl+C to stop", flush=True)
 
     def gen() -> tuple[float, float, float]:
         return (x, y, z)
@@ -133,7 +133,7 @@ def _sweep_mode(amp: float, period: float, z: float) -> None:
     if period <= 0:
         raise ValueError(f"period must be > 0, got {period}")
     print(
-        f"fake_tracker [sweep]: amp={amp} period={period}s z={z} — Ctrl+C to stop",
+        f"fake_tracker [sweep]: amp={amp} period={period}s z={z} - Ctrl+C to stop",
         flush=True,
     )
     t0 = time.monotonic()
@@ -146,12 +146,12 @@ def _sweep_mode(amp: float, period: float, z: float) -> None:
 
 
 def _interactive_mode() -> None:
-    """Keyboard-driven mode (Windows only — uses msvcrt)."""
+    """Keyboard-driven mode (Windows only - uses msvcrt)."""
     import msvcrt
 
     x, y, z = 0.0, 0.0, _DEFAULT_Z_CM
     print(
-        "fake_tracker [interactive]: ←→=x  ↑↓=y  +/-=z  r=reset  q=quit",
+        "fake_tracker [interactive]: left/right=x  up/down=y  +/-=z  r=reset  q=quit",
         flush=True,
     )
     settings = _read_settings()
@@ -188,7 +188,7 @@ def _interactive_mode() -> None:
                     tag = _shift_tag(sx, sy)
                     print(
                         f"  x={x:+.1f} y={y:+.1f} z={z:.1f}"
-                        f" → {sx:.2f}% {sy:.2f}% [{tag}]",
+                        f" -> {sx:.2f}% {sy:.2f}% [{tag}]",
                         flush=True,
                     )
                 w.write(x=x, y=y, z=z)

@@ -62,7 +62,8 @@ RecoveryAction AdvanceCaptureState(CaptureState state, CaptureSignal signal) {
     case CaptureSignal::RebindRetry:
         return {CaptureState::Rebinding, false, true, true, false};
     case CaptureSignal::DuplicationUnavailable:
-        return {CaptureState::Unavailable, false, true, false, false};
+        // Temporary duplication limits/protected transitions are recoverable.
+        return {CaptureState::Unavailable, false, true, true, false};
     case CaptureSignal::DeviceLost:
         return {CaptureState::DeviceRecovery, false, true, true, true};
     case CaptureSignal::DeviceRecreated:

@@ -57,7 +57,7 @@ Three processes collaborate via Windows Named Shared Memory in the primary flow:
 | Name | Size | Direction | Contents |
 |------|------|-----------|---------|
 | `G3D` | 16 bytes | Tracker → Overlay | `float x, y, z` (cm) + `uint32 timestamp_ms` |
-| `G3D_Settings` | 64 bytes | Launcher GUI -> Overlay | All tuning parameters (see Section 5) |
+| `G3D_Settings` | 88 bytes | Launcher GUI -> Overlay | All tuning and display calibration parameters (see Section 5) |
 | `FT_SharedMem` | 92 bytes | Tracker → ReShade addon / FreeTrack readers | Compatibility channel for experimental integrations |
 
 The overlay opens both `G3D` and `G3D_Settings` lazily on every frame — neither the tracker nor the GUI need to be running first. The overlay falls back gracefully to default values when either segment is absent.
@@ -178,7 +178,9 @@ Frame()
   │         ├─ CopyResource(g_capTex, acquired_texture)
   │         └─ g_depth->run(g_capTex)  ← async: hands frame to worker thread
   ├─ Update cbuffer {hx,hy,hz, strengthX,Y, screenW,H, virtualDepth,
-  │                  debugDepth, depthGamma, focusRadius, depthCurve}
+  │                  debugDepth, depthGamma, focusRadius, depthCurve,
+  │                  depth crop/blend, backend, IPD, stereo layout,
+  │                  eye order, focus plane}
   ├─ Draw fullscreen quad (4 vertices, TRIANGLESTRIP, no index buffer)
   │    t0 = g_srv        (captured desktop BGRA8)
   │    t1 = depth_srv    (518×518 R16F depth, or 1×1 fallback)
@@ -349,11 +351,11 @@ Python format string: `"<fffI"` (16 bytes)
 ### G3D_Settings (Live Tuning)
 
 **Named object:** `G3D_Settings`  
-**Size:** 64 bytes  
+**Size:** 88 bytes
 **Owner:** Launcher `SharedSettingsWriter` (one writer, created when `MainWindow` opens)  
 **Readers:** Overlay `overlay.cpp` (reads every frame), `TrackerThread` (reads per frame for `smoothing_alpha` and `deadzone_mm`)
 
-Python format string: `"<fffffIfffffffIII"` (64 bytes)
+Python format string: `"<fffffIfffffffIIIIIIIfI"` (88 bytes)
 
 | Offset | Type | Field | Default | Notes |
 |--------|------|-------|---------|-------|
@@ -373,6 +375,12 @@ Python format string: `"<fffffIfffffffIII"` (64 bytes)
 | 52 | uint32 | display_backend | 0 | 0=desktop, 1=stereo, 2=quilt |
 | 56 | uint32 | depth_mode | 1 | 0=quality, 1=balanced, 2=fast |
 | 60 | uint32 | version | monotonic | Incremented on every write |
+| 64 | uint32 | stereo_layout | 0 | 0=full_sbs, 1=half_sbs |
+| 68 | uint32 | eye_order | 0 | 0=left_right, 1=right_left |
+| 72 | uint32 | panel_width_px | 0 | 0 = unspecified |
+| 76 | uint32 | panel_height_px | 0 | 0 = unspecified |
+| 80 | float32 | focus_plane_cm | 0.0 | Convergence plane behind screen |
+| 84 | uint32 | tracking_mode | 0 | 0=glassless3d_managed, 1=vendor_managed |
 
 The overlay's `Settings` struct in `overlay.cpp` must stay byte-for-byte identical to this layout. The `#pragma pack(push, 1)` directive is required.
 
@@ -420,7 +428,7 @@ The tracker only writes `DataID`, `X`, `Y`, and `Z`; all other fields are zeroed
 - **Tracker tab** — live camera preview, X/Y/Z readout tiles, Start/Stop button
 - **Advanced tab** — scrollable settings for shader tuning, screen calibration, tracker calibration, preset management
 
-On construction, `MainWindow` creates a `SharedSettingsWriter` and writes the initial `OverlaySettings` (loaded from `config.yaml` overlay section) immediately. From that point, any slider or spin-box change calls `_on_settings_change()` → `_settings_writer.write()`, pushing the new settings to `G3D_Settings` SHM in real time.
+On construction, `MainWindow` creates a `SharedSettingsWriter` and writes the initial `OverlaySettings` from `config.yaml`, resolving runtime tuning from `overlay` and display-specific metadata from `overlay.display_calibration`. From that point, any slider or spin-box change calls `_on_settings_change()` -> `_settings_writer.write()`, pushing the new settings to `G3D_Settings` SHM in real time.
 
 Settings priority (effective values, resolved each frame by the overlay):
 ```

@@ -140,7 +140,11 @@ def test_create_support_bundle_includes_overlay_timings_when_log_has_samples(tmp
         problems=[],
         overlay_log=overlay_log,
     )
-    monkeypatch.setattr(support_bundle, "collect_diagnostics", lambda _config: report)
+    monkeypatch.setattr(
+        support_bundle,
+        "collect_diagnostics",
+        lambda _config, require_live_runtime=False: report,
+    )
     out_dir = tmp_path / "bundle"
 
     manifest = support_bundle.create_support_bundle(output_dir=out_dir)
@@ -149,6 +153,125 @@ def test_create_support_bundle_includes_overlay_timings_when_log_has_samples(tmp
     manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_data["overlay_timings"] == "overlay_timings.csv"
     assert manifest.overlay_timings_path == out_dir / "overlay_timings.csv"
+
+
+def test_create_support_bundle_includes_display_acceptance_when_observation_provided(tmp_path, monkeypatch):
+    observation = tmp_path / "hardware_observation.yaml"
+    observation.write_text(
+        "eye_order_correct: true\n"
+        "depth_direction_correct: true\n"
+        "ui_readable: true\n"
+        "head_tracking_stable: true\n"
+        "crosstalk_percent: 8.0\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        hardware_observation=observation,
+        require_live_runtime=True,
+    )
+
+    acceptance_path = out_dir / "display_acceptance" / "acceptance_report.json"
+    assert acceptance_path.exists()
+    assert (out_dir / "display_acceptance" / "hardware_observation.yaml").exists()
+    manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    acceptance_data = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    assert manifest_data["display_acceptance"] == "display_acceptance/acceptance_report.json"
+    assert manifest_data["display_acceptance_ready"] is acceptance_data["ready"]
+    assert manifest_data["display_acceptance_problems"] == acceptance_data["problems"]
+    assert manifest.display_acceptance_path == acceptance_path
+
+
+def test_create_support_bundle_includes_display_acceptance_when_live_runtime_required(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeAcceptance:
+        def __init__(self, report_path):
+            self.report_path = report_path
+
+    def fake_write_acceptance_report(output_dir, **kwargs):
+        calls.append((output_dir, kwargs))
+        output = tmp_path / output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        report_path = output / "acceptance_report.json"
+        report_path.write_text('{"ready": false, "problems": ["not target hardware"]}\n', encoding="utf-8")
+        return FakeAcceptance(report_path)
+
+    monkeypatch.setattr(support_bundle, "write_acceptance_report", fake_write_acceptance_report)
+    out_dir = tmp_path / "bundle"
+
+    manifest = support_bundle.create_support_bundle(
+        output_dir=out_dir,
+        require_live_runtime=True,
+        crosstalk_limit_percent=7.5,
+        source_stereo_path="geo11",
+        source_stereo_notes="external full SBS source",
+    )
+
+    acceptance_path = out_dir / "display_acceptance" / "acceptance_report.json"
+    assert acceptance_path.exists()
+    manifest_data = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest_data["display_acceptance"] == "display_acceptance/acceptance_report.json"
+    assert manifest_data["display_acceptance_ready"] is False
+    assert manifest_data["display_acceptance_problems"] == ["not target hardware"]
+    assert manifest_data["source_stereo"] == {
+        "path": "geo11",
+        "notes": "external full SBS source",
+    }
+    assert manifest.display_acceptance_path == acceptance_path
+    assert calls[0][1]["diagnostics_report"] is not None
+    calls[0][1]["diagnostics_report"] = None
+    assert calls == [
+        (
+            out_dir / "display_acceptance",
+            {
+                "config_path": "config.yaml",
+                "require_live_runtime": True,
+                "hardware_observation_path": None,
+                "crosstalk_limit_percent": 7.5,
+                "source_stereo_path": "geo11",
+                "source_stereo_notes": "external full SBS source",
+                "diagnostics_report": None,
+            },
+        )
+    ]
+
+
+def test_create_support_bundle_passes_live_runtime_requirement_to_diagnostics(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeAcceptance:
+        report_path = tmp_path / "bundle" / "display_acceptance" / "acceptance_report.json"
+
+    def fake_collect(config, require_live_runtime=False):
+        calls.append((config, require_live_runtime))
+        return DiagnosticsReport(
+            project_root=tmp_path,
+            python_executable=tmp_path / "python.exe",
+            overlay_exe=tmp_path / "Glassless3DOverlay.exe",
+            depth_model=tmp_path / "depth.onnx",
+            config_path=tmp_path / "config.yaml",
+            config_loaded=True,
+            ready=True,
+            problems=[],
+        )
+
+    monkeypatch.setattr(support_bundle, "collect_diagnostics", fake_collect)
+    monkeypatch.setattr(
+        support_bundle,
+        "write_acceptance_report",
+        lambda *args, **kwargs: FakeAcceptance(),
+    )
+
+    support_bundle.create_support_bundle(
+        output_dir=tmp_path / "bundle",
+        config_path="config.yaml",
+        require_live_runtime=True,
+    )
+
+    assert calls == [("config.yaml", True)]
 
 
 def test_main_writes_bundle(tmp_path, capsys):
@@ -178,3 +301,105 @@ def test_main_accepts_depth_fixture(tmp_path, capsys):
     assert code == 0
     assert (out_dir / "evaluation.json").exists()
     assert "wrote support bundle" in capsys.readouterr().out
+
+
+def test_main_accepts_hardware_observation(tmp_path, capsys):
+    observation = tmp_path / "hardware_observation.yaml"
+    observation.write_text(
+        "eye_order_correct: true\n"
+        "depth_direction_correct: true\n"
+        "ui_readable: true\n"
+        "head_tracking_stable: true\n"
+        "crosstalk_percent: 8.0\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    code = support_bundle.main([
+        "--output-dir",
+        str(out_dir),
+        "--hardware-observation",
+        str(observation),
+        "--crosstalk-limit-percent",
+        "7.5",
+        "--require-live-runtime",
+    ])
+
+    assert code == 0
+    assert (out_dir / "display_acceptance" / "acceptance_report.json").exists()
+    data = json.loads((out_dir / "display_acceptance" / "acceptance_report.json").read_text(encoding="utf-8"))
+    assert data["checklist"]["crosstalk_limit_percent"] == 7.5
+    assert data["checklist"]["hardware_observation_passed"] is False
+    output = capsys.readouterr().out
+    assert "wrote support bundle" in output
+    assert "display acceptance: NOT READY" in output
+
+
+def test_main_can_require_display_acceptance_ready(tmp_path, capsys):
+    observation = tmp_path / "hardware_observation.yaml"
+    observation.write_text(
+        "eye_order_correct: true\n"
+        "depth_direction_correct: true\n"
+        "ui_readable: true\n"
+        "head_tracking_stable: true\n"
+        "crosstalk_percent: 8.0\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "bundle"
+
+    code = support_bundle.main([
+        "--output-dir",
+        str(out_dir),
+        "--hardware-observation",
+        str(observation),
+        "--require-live-runtime",
+        "--require-display-acceptance-ready",
+    ])
+
+    assert code == 1
+    assert (out_dir / "display_acceptance" / "acceptance_report.json").exists()
+    output = capsys.readouterr().out
+    assert "display acceptance: NOT READY" in output
+    assert "display acceptance is required to be READY" in output
+
+
+def test_main_requires_display_acceptance_report_when_strict(tmp_path, capsys):
+    out_dir = tmp_path / "bundle"
+
+    code = support_bundle.main([
+        "--output-dir",
+        str(out_dir),
+        "--require-display-acceptance-ready",
+    ])
+
+    assert code == 1
+    assert (out_dir / "manifest.json").exists()
+    output = capsys.readouterr().out
+    assert "display acceptance is required but was not generated" in output
+
+
+def test_main_strict_display_acceptance_allows_ready_report(tmp_path, monkeypatch, capsys):
+    class FakeAcceptance:
+        def __init__(self, report_path):
+            self.report_path = report_path
+
+    def fake_write_acceptance_report(output_dir, **kwargs):
+        output = tmp_path / output_dir
+        output.mkdir(parents=True, exist_ok=True)
+        report_path = output / "acceptance_report.json"
+        report_path.write_text('{"ready": true, "problems": []}\n', encoding="utf-8")
+        return FakeAcceptance(report_path)
+
+    monkeypatch.setattr(support_bundle, "write_acceptance_report", fake_write_acceptance_report)
+    out_dir = tmp_path / "bundle"
+
+    code = support_bundle.main([
+        "--output-dir",
+        str(out_dir),
+        "--require-live-runtime",
+        "--require-display-acceptance-ready",
+    ])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "display acceptance: READY" in output

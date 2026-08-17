@@ -778,6 +778,23 @@ def test_parse_overlay_summary_line_extracts_gpu_timing_when_present():
     assert summary.gpu_ms == pytest.approx(0.42)
 
 
+def test_parse_overlay_summary_line_extracts_expanded_runtime_timing():
+    summary = diagnostics.parse_overlay_summary_line(
+        "Frame#131 acq[ok=131 timeout=0 lost=0 other=0] "
+        "shm[LIVE reads=131 changes=118 (57/s) ts=433652984] "
+        "depth[total=12 8Hz mode=fast] "
+        "timing[capture_cpu=0.192 draw_gpu=0.315 present_cpu=0.039 frame_cpu=0.271] "
+        "backend=0 layout=0 eye_order=0 ipd=6.20 focus=0.00 panel=0x0 tracking=0 "
+        "head=(0.00,0.00,60.00) hasFrame=1 capture=running capture_reason=bound"
+    )
+
+    assert summary is not None
+    assert summary.gpu_ms == pytest.approx(0.315)
+    assert summary.capture_cpu_ms == pytest.approx(0.192)
+    assert summary.present_cpu_ms == pytest.approx(0.039)
+    assert summary.frame_cpu_ms == pytest.approx(0.271)
+
+
 def test_parse_overlay_summary_line_extracts_backend_when_present():
     line = (
         "[15:26:00.371] Frame#3249300 acq[ok=3247868 timeout=1432 lost=0 other=0] "

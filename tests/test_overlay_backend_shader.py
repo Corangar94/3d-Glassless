@@ -169,18 +169,17 @@ def test_overlay_suppresses_parallax_when_tracker_pose_is_stale():
     assert "if (!poseFresh) { dx = 0.0f; dy = 0.0f; }" in source
 
 
-def test_depth_inferencer_masks_likely_hud_regions_before_model_input():
+def test_depth_inferencer_does_not_apply_game_specific_hud_masks():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 
-    assert "IsLikelyHudUv" in source
-    assert "return;" in source
-    assert "leave HUD-like pixels at ImageNet mean grey" in source
+    assert "IsLikelyHudUv" not in source
+    assert "leave HUD-like pixels at ImageNet mean grey" not in source
 
 
-def test_overlay_shader_reduces_parallax_in_likely_hud_regions():
+def test_overlay_shader_keeps_parallax_profile_neutral():
     source = Path("overlay/overlay.cpp").read_text(encoding="utf-8")
 
-    assert "HudParallaxScale" in source
-    assert "kHudParallaxMinScale" in source
+    assert "HudParallaxScale" not in source
+    assert "kHudParallaxMinScale" not in source
     assert "ApplyConfidenceProtectedParallax" in source
-    assert "HudParallaxScale(localUV)" in source
+    assert "ApplyConfidenceProtectedParallax(d_final" in source

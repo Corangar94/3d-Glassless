@@ -64,3 +64,14 @@ def test_set_measurement_noise_rejects_nonpositive():
         s.set_measurement_noise(0.0)
     with pytest.raises(ValueError):
         s.set_measurement_noise(-1.0)
+
+
+def test_elapsed_time_keeps_kalman_response_consistent_across_camera_fps():
+    slow = KalmanFilter1D(process_noise=0.01, measurement_noise=0.1)
+    fast = KalmanFilter1D(process_noise=0.01, measurement_noise=0.1)
+    slow_value = fast_value = 0.0
+    for _ in range(15):
+        slow_value = slow.update(10.0, dt_seconds=1.0 / 15.0)
+    for _ in range(60):
+        fast_value = fast.update(10.0, dt_seconds=1.0 / 60.0)
+    assert abs(slow_value - fast_value) < 0.15

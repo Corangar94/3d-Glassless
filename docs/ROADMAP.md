@@ -16,6 +16,19 @@ World of Warcraft is a later policy-aware feasibility gate, not a current target
 - ReShade tooling still exists in the repo, but it should no longer define the main product story
 - Video-Depth-Anything export is available as an optional offline/quality-benchmark tool, not the default low-latency runtime
 - Deep research implementation status is tracked in `docs/DEEP_RESEARCH_STATUS.md`
+- Completion evidence and remaining hardware gates are tracked in `docs/COMPLETION_AUDIT.md`
+
+## Milestone Status
+
+| Milestone | Status | Evidence or remaining gate |
+|---|---|---|
+| Calibration and tracking reliability | Done for the overlay-first software path | Calibration metadata is persisted and diagnostics validate configured-vs-runtime settings. Tracking quality is measured by the debug monitor/evaluation tools. |
+| Overlay quality and temporal stability | Partially done | Async depth inference, render-rate blending, edge-aware smoothing, crop handling, depth fixtures, and validation tooling are implemented. Real live-captured sequence fixtures still need target-runtime captures. |
+| Overlay UX and diagnostics | Done for local software gates | Readiness checks, startup errors, diagnostics, live-runtime check, support bundles, and troubleshooting docs are implemented. |
+| Performance hardening | Partially done | Depth modes, cadence logging, frame-timing export, GPU draw timing, and performance benchmarks exist. Deeper present/vsync latency instrumentation remains optional after hardware testing. |
+| Experimental backends | Hardware-gated | SBS stereo and 9x5 quilt software paths, validation images, and acceptance reports exist. Final quality needs physical autostereo/light-field hardware acceptance. |
+| WoW feasibility gate | Deferred by design | The policy/technical gate remains closed by default and is separate from the overlay-first prototype. |
+| Target-display acceptance | Hardware-gated | Connect the target display, collect a fresh live runtime, fill `hardware_observation.yaml`, then run display acceptance and a support bundle from the same setup. |
 
 ## Milestone 1: Calibration And Tracking Reliability
 

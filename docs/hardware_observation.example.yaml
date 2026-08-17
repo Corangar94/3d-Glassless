@@ -1,0 +1,13 @@
+# Example only. Copy this file to hardware_observation.yaml and replace every
+# value with observations from the connected target display before running
+# acceptance. This sample must not be used as final hardware evidence.
+
+target_display_device_id: DISPLAY\REPLACE_WITH_TARGET_DEVICE_ID
+target_display_type: autostereo
+eye_order_correct: true
+depth_direction_correct: true
+ui_readable: true
+head_tracking_stable: true
+crosstalk_percent: 8.0
+crosstalk_limit_percent: 10.0
+notes: replace with observed sweet spot, depth direction, tracking, and comfort notes

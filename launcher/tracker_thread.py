@@ -5,8 +5,9 @@ import logging
 import math
 import threading
 import time
-from collections import deque
 from typing import TYPE_CHECKING, Callable, Optional
+
+import numpy as np
 
 _log = logging.getLogger(__name__)
 
@@ -16,17 +17,11 @@ from PySide6.QtCore import QThread, Signal
 # Heavy tracker deps (mediapipe) are imported lazily inside TrackerThread.run()
 # so that importing this module doesn't block the launcher for 30+ seconds.
 from tracker.freetrack import FreetracWriter
-from tracker.shared_memory import SharedMemoryWriter
+from tracker.main import _limit_pose_step
+from tracker.shared_memory import SharedMemoryWriter, TrackingStateWriter
 from tracker.shared_settings import SharedSettingsReader
 from tracker.smoother import HeadSmoother
-from tracker.tilt import (
-    _TILT_EVERY,
-    _TILT_MIN,
-    _TILT_WINDOW,
-    _apply_camera_tilt,
-    _calibrate_tilt,
-    _save_tilt_to_config,
-)
+from tracker.tilt import _apply_camera_tilt
 
 if TYPE_CHECKING:
     from tracker.face_tracker import FaceTracker, HeadPosition
@@ -72,6 +67,7 @@ class _SignallingLoop:
         writer: FreetracWriter,
         g3d_writer: SharedMemoryWriter,
         smoother: HeadSmoother,
+        state_writer: TrackingStateWriter | None = None,
         hold_ms: int = 500,
         camera_tilt_deg: float = 0.0,
         config_path: Optional[str] = None,
@@ -84,6 +80,7 @@ class _SignallingLoop:
         self._tracker = tracker
         self._writer = writer
         self._g3d_writer = g3d_writer
+        self._state_writer = state_writer
         self._smoother = smoother
         self._hold_ms = hold_ms
         self._camera_tilt_deg = camera_tilt_deg
@@ -92,6 +89,7 @@ class _SignallingLoop:
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_face_ms: Optional[float] = None
         self._last_smoothed: tuple[float, float, float] = (0.0, 0.0, 60.0)
+        self._last_measurement_s: float | None = None
 
     def run(self, camera_index: int = 0) -> None:
         """Run the tracking loop. Raises RuntimeError if camera cannot open."""
@@ -115,9 +113,6 @@ class _SignallingLoop:
                 f"Camera {camera_index} opened but returned no frames. "
                 "Close Discord, Teams, or any other app using the camera and try again."
             )
-        tilt_buf_y: deque[float] = deque(maxlen=_TILT_WINDOW)
-        tilt_buf_z: deque[float] = deque(maxlen=_TILT_WINDOW)
-        tilt_face_count = 0
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
@@ -129,32 +124,34 @@ class _SignallingLoop:
                 pos: Optional[HeadPosition] = self._tracker.process_frame(frame)
 
                 if pos is not None:
-                    self._last_face_ms = time.monotonic() * 1000.0
+                    measurement_s = time.monotonic()
+                    self._last_face_ms = measurement_s * 1000.0
                     settings = self._settings_reader.read()
                     deadzone_cm = (settings.deadzone_mm / 10.0) if settings else 0.5
                     smoothing_r = settings.smoothing_alpha if settings else 0.1
                     self._smoother.set_measurement_noise(max(smoothing_r, 1e-6))
-                    raw = (pos.x_cm, pos.y_cm, pos.z_cm)
+                    raw = _limit_pose_step(
+                        (pos.x_cm, pos.y_cm, pos.z_cm),
+                        self._last_raw_pos,
+                    )
                     effective, self._last_raw_pos = _apply_deadzone(
                         raw, self._last_raw_pos, deadzone_cm
                     )
-                    smoothed = self._smoother.update(effective[0], effective[1], effective[2])
+                    dt_s = (
+                        measurement_s - self._last_measurement_s
+                        if self._last_measurement_s is not None else None
+                    )
+                    self._last_measurement_s = measurement_s
+                    if dt_s is None:
+                        smoothed = self._smoother.update(effective[0], effective[1], effective[2])
+                    else:
+                        smoothed = self._smoother.update(
+                            effective[0], effective[1], effective[2], dt_seconds=dt_s
+                        )
                     self._last_smoothed = smoothed
                     x, y, z = smoothed
                     status = "tracking"
 
-                    # Continuous tilt calibration: collect raw pre-tilt samples
-                    tilt_buf_y.append(pos.y_cm)
-                    tilt_buf_z.append(pos.z_cm)
-                    tilt_face_count += 1
-                    if tilt_face_count % _TILT_EVERY == 0 and len(tilt_buf_y) >= _TILT_MIN:
-                        new_tilt = _calibrate_tilt(
-                            list(tilt_buf_y), list(tilt_buf_z), _TILT_MIN
-                        )
-                        if new_tilt is not None:
-                            self._camera_tilt_deg = new_tilt
-                            if self._config_path:
-                                _save_tilt_to_config(self._config_path, new_tilt)
                 else:
                     now_ms = time.monotonic() * 1000.0
                     hold_expired = (
@@ -168,9 +165,13 @@ class _SignallingLoop:
                         x, y, z = self._last_smoothed
                         status = "hold"
 
-                x, y, z = _apply_camera_tilt(x, y, z, self._camera_tilt_deg)
+                if status != "paused":
+                    x, y, z = _apply_camera_tilt(x, y, z, self._camera_tilt_deg)
+                if self._state_writer is not None:
+                    self._state_writer.write(status)
                 self._writer.write(x=x, y=y, z=z)
-                # Also publish to the G3D shared memory that the overlay reads
+                # Publish G3D last: its timestamp is the commit marker used by
+                # the launcher when it pairs the pose with G3D_State.
                 self._g3d_writer.write(x=x, y=y, z=z)
                 self._on_position_cb(x, y, z)
                 self._on_status_cb(status)
@@ -181,6 +182,8 @@ class _SignallingLoop:
             self._settings_reader.close()
 
     def _emit_frame(self, frame: object) -> None:
+        if not isinstance(frame, np.ndarray):
+            return
         try:
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
             if ok:
@@ -247,6 +250,7 @@ class TrackerThread(QThread):
                 ) as tracker,
                 FreetracWriter() as writer,
                 SharedMemoryWriter() as g3d_writer,
+                TrackingStateWriter() as state_writer,
             ):
                 _log.debug("TrackerThread: entering tracking loop (camera_index=%d)", self._camera_index)
                 loop = _SignallingLoop(
@@ -258,6 +262,7 @@ class TrackerThread(QThread):
                     tracker=tracker,
                     writer=writer,
                     g3d_writer=g3d_writer,
+                    state_writer=state_writer,
                     smoother=smoother,
                     hold_ms=trk["hold_ms"],
                     camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)),

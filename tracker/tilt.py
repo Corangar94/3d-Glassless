@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 import statistics
+import tempfile
 
 import yaml
 
@@ -48,14 +51,34 @@ def _apply_camera_tilt(x: float, y: float, z: float, tilt_deg: float) -> tuple[f
     return x, y_screen, z_screen
 
 
-def _save_tilt_to_config(config_path: str, tilt_deg: float) -> None:
-    """Persist auto-calibrated tilt back to config.yaml."""
+def _save_tilt_to_config(config_path: str, tilt_deg: float) -> bool:
+    """Persist tilt atomically, refusing to replace malformed configuration."""
     try:
-        with open(config_path) as f:
+        path = Path(config_path)
+        with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        cfg: dict = data if isinstance(data, dict) else {}
-        cfg.setdefault("tracking", {})["camera_tilt_deg"] = round(tilt_deg, 2)
-        with open(config_path, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False)
-    except OSError as e:
+        if not isinstance(data, dict):
+            raise ValueError("configuration root must be a mapping")
+        tracking = data.setdefault("tracking", {})
+        if not isinstance(tracking, dict):
+            raise ValueError("tracking configuration must be a mapping")
+        tracking["camera_tilt_deg"] = round(tilt_deg, 2)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent), text=True
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+        return True
+    except (OSError, ValueError, yaml.YAMLError) as e:
         print(f"[tracker] Warning: could not save tilt to config: {e}")
+        return False

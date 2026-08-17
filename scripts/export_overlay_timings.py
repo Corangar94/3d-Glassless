@@ -2,6 +2,11 @@
 """Convenience wrapper for exporting overlay.log cadence to timing CSV."""
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from tracker import performance_capture
 
 

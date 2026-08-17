@@ -12,6 +12,8 @@ tests mock subprocess.Popen and filesystem lookups. We verify:
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -117,6 +119,30 @@ def test_start_passes_configured_game_executable_to_overlay(tmp_path, monkeypatc
         str(exe),
         "--target-exe",
         r"C:\Games\Example\game.exe",
+    ]
+
+
+def test_start_retires_stale_exact_overlay_and_passes_live_pid(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    monkeypatch.setattr(overlay_process, "find_depth_model", lambda: None)
+    retire = MagicMock(return_value=1)
+    monkeypatch.setattr(overlay_process, "_retire_stale_overlay_instances", retire)
+    fake_popen = MagicMock()
+    fake_popen.return_value.poll.return_value = None
+
+    with patch.object(overlay_process.subprocess, "Popen", fake_popen):
+        OverlayProcess().start(r"C:\Games\Example\game.exe", target_pid=4321)
+
+    retire.assert_called_once_with(exe)
+    assert fake_popen.call_args.args[0] == [
+        str(exe),
+        "--target-exe",
+        r"C:\Games\Example\game.exe",
+        "--target-pid",
+        "4321",
     ]
 
 
@@ -236,3 +262,37 @@ def test_is_running_false_after_exit(tmp_path, monkeypatch):
         p.start()
     assert not p.is_running()
     assert p.poll_exit_code() == 0
+
+
+def test_restart_async_reaps_old_process_before_spawning_new_target(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    monkeypatch.setattr(overlay_process, "find_depth_model", lambda: None)
+    monkeypatch.setattr(overlay_process, "_project_root", lambda: tmp_path)
+    allow_exit = threading.Event()
+    old_proc = MagicMock()
+    old_proc.poll.return_value = None
+    old_proc.wait.side_effect = lambda timeout: allow_exit.wait(timeout)
+    new_proc = MagicMock()
+    new_proc.poll.return_value = None
+
+    with patch.object(
+        overlay_process.subprocess, "Popen", side_effect=[old_proc, new_proc]
+    ) as popen:
+        process = OverlayProcess()
+        process.start(r"C:\Games\Old\old.exe")
+        process.restart_async(r"C:\Games\New\new.exe", target_pid=9876)
+        deadline = time.monotonic() + 1.0
+        while not old_proc.terminate.called and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert popen.call_count == 1
+        allow_exit.set()
+        deadline = time.monotonic() + 1.0
+        while popen.call_count < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+
+    assert popen.call_count == 2
+    assert popen.call_args_list[1].args[0][-4:] == [
+        "--target-exe", r"C:\Games\New\new.exe", "--target-pid", "9876"
+    ]

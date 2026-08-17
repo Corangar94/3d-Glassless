@@ -5,6 +5,11 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import statistics
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 _log = logging.getLogger(__name__)
 
@@ -49,11 +54,8 @@ def detect_screen_cm() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | None:
-    """Run MediaPipe on one BGR frame, return head distance in cm or None."""
-    import cv2
-    import numpy as np
-    import mediapipe as mp
+def _create_face_landmarker():
+    """Create one IMAGE-mode landmarker for a calibration sampling session."""
     from mediapipe import tasks
     import pathlib
 
@@ -68,10 +70,21 @@ def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | Non
         min_face_detection_confidence=0.5,
         min_face_presence_confidence=0.5,
     )
-    with tasks.vision.FaceLandmarker.create_from_options(options) as lmk:
-        h, w = frame_bgr.shape[:2]
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        result = lmk.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+    return tasks.vision.FaceLandmarker.create_from_options(options)
+
+
+def _detect_face_distance_with_landmarker(
+    frame_bgr: "np.ndarray", ipd_mm: float, landmarker: object
+) -> float | None:
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+
+    h, w = frame_bgr.shape[:2]
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    result = landmarker.detect(  # type: ignore[attr-defined]
+        mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    )
 
     if not result.face_landmarks:
         return None
@@ -87,17 +100,37 @@ def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | Non
     return (focal_px * (ipd_mm / 10.0)) / ipd_px
 
 
-def measure_head_distance_or_none(ipd_mm: float = 64.0) -> float | None:
-    """Return estimated head distance in cm, or None when measurement fails."""
+def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | None:
+    """Run MediaPipe on one BGR frame, return head distance in cm or None."""
+    with _create_face_landmarker() as landmarker:
+        return _detect_face_distance_with_landmarker(frame_bgr, ipd_mm, landmarker)
+
+
+def measure_head_distance_or_none(
+    ipd_mm: float = 64.0,
+    camera_index: int = 0,
+    sample_count: int = 7,
+) -> float | None:
+    """Return a robust multi-frame estimate from the selected camera."""
     import cv2
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(camera_index)
     try:
         if not cap.isOpened():
             return None
-        ok, frame = cap.read()
-        if not ok:
-            return None
-        return _detect_face_distance(frame, ipd_mm)
+        distances: list[float] = []
+        with _create_face_landmarker() as landmarker:
+            for _ in range(max(1, sample_count) * 3):
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                distance = _detect_face_distance_with_landmarker(
+                    frame, ipd_mm, landmarker
+                )
+                if distance is not None and 20.0 <= distance <= 200.0:
+                    distances.append(distance)
+                    if len(distances) >= max(1, sample_count):
+                        break
+        return statistics.median(distances) if distances else None
     except Exception:  # noqa: BLE001
         _log.warning("measure_head_distance_or_none failed", exc_info=True)
         return None
@@ -105,7 +138,7 @@ def measure_head_distance_or_none(ipd_mm: float = 64.0) -> float | None:
         cap.release()
 
 
-def measure_head_distance(ipd_mm: float = 64.0) -> float:
+def measure_head_distance(ipd_mm: float = 64.0, camera_index: int = 0) -> float:
     """Return estimated head distance in cm (60.0 fallback on any failure)."""
-    result = measure_head_distance_or_none(ipd_mm)
+    result = measure_head_distance_or_none(ipd_mm, camera_index=camera_index)
     return result if result is not None else 60.0

@@ -15,7 +15,7 @@ class KalmanFilter1D:
         self._x = 0.0                # state estimate
         self._p = 1.0                # error covariance
 
-    def update(self, measurement: float) -> float:
+    def update(self, measurement: float, dt_seconds: float | None = None) -> float:
         """Update the filter with a new measurement and return the smoothed estimate.
 
         Args:
@@ -24,8 +24,11 @@ class KalmanFilter1D:
         Returns:
             The smoothed state estimate.
         """
-        # Prediction step
-        self._p += self._q
+        # Scale process uncertainty by elapsed time so smoothing does not change
+        # when the camera switches between (for example) 15 and 60 FPS. Calls
+        # without dt retain the historical one-sample behaviour.
+        dt_scale = 1.0 if dt_seconds is None else max(0.05, min(10.0, dt_seconds * 30.0))
+        self._p += self._q * dt_scale
         # Update step
         k = self._p / (self._p + self._r)   # Kalman gain
         self._x += k * (measurement - self._x)
@@ -57,7 +60,13 @@ class HeadSmoother:
         self._kf_z = KalmanFilter1D(process_noise, measurement_noise)
         self._kf_z.reset(60.0)  # seed Z at nominal head distance
 
-    def update(self, x: float, y: float, z: float) -> tuple[float, float, float]:
+    def update(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        dt_seconds: float | None = None,
+    ) -> tuple[float, float, float]:
         """Update all three axes with new measurements.
 
         Args:
@@ -69,9 +78,9 @@ class HeadSmoother:
             A tuple of (smoothed_x, smoothed_y, smoothed_z).
         """
         return (
-            self._kf_x.update(x),
-            self._kf_y.update(y),
-            self._kf_z.update(z),
+            self._kf_x.update(x, dt_seconds),
+            self._kf_y.update(y, dt_seconds),
+            self._kf_z.update(z, dt_seconds),
         )
 
     def reset(self) -> None:

@@ -24,6 +24,7 @@ from tracker.display_backends import (
     build_display_layout,
     built_in_backends,
 )
+from tracker.shared_memory import TrackingStateReader
 
 _DEPTH_HZ_READY_MIN = 3
 _OVERLAY_LOG_FRESH_SECONDS = 30.0
@@ -50,6 +51,9 @@ class OverlayRuntimeSummary:
     head_z_cm: float
     has_frame: bool
     gpu_ms: float | None = None
+    capture_cpu_ms: float | None = None
+    present_cpu_ms: float | None = None
+    frame_cpu_ms: float | None = None
     backend: int | None = None
     depth_mode: str | None = None
     stereo_layout: int | None = None
@@ -111,6 +115,8 @@ class DiagnosticsReport:
     requested_profile_mode: str | None = None
     active_profile_mode: str | None = None
     profile_reason: str | None = None
+    tracking_state: str | None = None
+    tracking_state_fresh: bool = False
 
 
 _SUMMARY_RE = re.compile(
@@ -119,7 +125,11 @@ _SUMMARY_RE = re.compile(
     r"shm\[(?P<shm_status>.*?)\s+reads=\d+\s+changes=\d+\s+\((?P<changes_sec>-?\d+)/s\)\s+ts=\d+\]\s+"
     r"depth\[total=(?P<depth_total>\d+)\s+(?P<depth_hz>-?\d+)Hz"
     r"(?:\s+mode=(?P<depth_mode>[A-Za-z0-9_\-]+))?\]\s+"
-    r"(?:gpu_ms=(?P<gpu_ms>-?\d+(?:\.\d+)?)\s+)?"
+    r"(?:(?:gpu_ms=(?P<gpu_ms>-?\d+(?:\.\d+)?)\s+)"
+    r"|(?:timing\[capture_cpu=(?P<capture_cpu>-?\d+(?:\.\d+)?)\s+"
+    r"draw_gpu=(?P<draw_gpu>-?\d+(?:\.\d+)?)\s+"
+    r"present_cpu=(?P<present_cpu>-?\d+(?:\.\d+)?)\s+"
+    r"frame_cpu=(?P<frame_cpu>-?\d+(?:\.\d+)?)\]\s+))?"
     r"(?:backend=(?P<backend>\d+)\s+)?"
     r"(?:(?:layout=(?P<layout>\d+)\s+)?"
     r"(?:eye_order=(?P<eye_order>\d+)\s+)?"
@@ -136,6 +146,7 @@ _SUMMARY_RE = re.compile(
 def collect_diagnostics(
     config_path: str | Path = "config.yaml",
     require_live_runtime: bool = False,
+    require_face_tracking: bool = False,
 ) -> DiagnosticsReport:
     """Return a single overlay-readiness diagnostic report."""
     root = _project_root()
@@ -186,6 +197,7 @@ def collect_diagnostics(
     display_calibration = _display_calibration(config)
     display_inventory = _collect_display_inventory()
     vendor_managed_tracking = _calibration_tracking_mode(display_calibration) == "vendor_managed"
+    tracking_state, tracking_state_fresh = _read_tracking_state()
     camera_index = _configured_camera_index(config)
     camera = (
         CameraProbe(index=camera_index, opened=True, frame_ok=True, inferred_from_tracker=True)
@@ -242,6 +254,13 @@ def collect_diagnostics(
         _check_runtime_calibration_matches(display_calibration, overlay_summary, problems)
     elif require_live_runtime:
         problems.append("fresh overlay runtime summary missing")
+    if require_face_tracking and not vendor_managed_tracking:
+        if tracking_state is None:
+            problems.append("face-tracking state is unavailable")
+        elif not tracking_state_fresh:
+            problems.append("face-tracking state is stale")
+        elif tracking_state != "tracking":
+            problems.append(f"face tracking is {tracking_state}; look toward the camera")
     ready = not problems
 
     return DiagnosticsReport(
@@ -268,6 +287,8 @@ def collect_diagnostics(
         requested_profile_mode=requested_profile_mode,
         active_profile_mode=active_profile_mode,
         profile_reason=profile_reason,
+        tracking_state=tracking_state,
+        tracking_state_fresh=tracking_state_fresh,
     )
 
 
@@ -287,6 +308,10 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
         f"Overlay executable: {report.overlay_exe or 'missing'}",
         f"Depth model: {report.depth_model or 'missing'}",
         f"Camera: {_format_camera(report.camera)}",
+        (
+            f"Face tracking: {report.tracking_state or 'unavailable'}"
+            f"{'' if report.tracking_state_fresh else ' (stale)'}"
+        ),
         f"Overlay log: {report.overlay_log or 'not found'}",
         f"Default backend: {report.default_backend_id}",
         f"Configured backend: {report.configured_backend_id}",
@@ -387,6 +412,8 @@ def format_diagnostics_json(report: DiagnosticsReport) -> str:
         "configured_backend_layout": report.configured_backend_layout,
         "display_calibration": report.display_calibration,
         "camera": _camera_to_dict(report.camera),
+        "tracking_state": report.tracking_state,
+        "tracking_state_fresh": report.tracking_state_fresh,
         "display_inventory": [_display_inventory_to_dict(item) for item in report.display_inventory],
         "overlay_summary": _summary_to_dict(report.overlay_summary),
     }
@@ -403,9 +430,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Fail unless a fresh overlay log summary is available and healthy",
     )
+    parser.add_argument(
+        "--require-face-tracking",
+        action="store_true",
+        help="Fail unless G3D_State reports a fresh detected face",
+    )
     args = parser.parse_args(argv)
 
-    report = collect_diagnostics(args.config, require_live_runtime=args.require_live_runtime)
+    collect_kwargs = {"require_live_runtime": args.require_live_runtime}
+    if args.require_face_tracking:
+        collect_kwargs["require_face_tracking"] = True
+    report = collect_diagnostics(args.config, **collect_kwargs)
     text = (
         format_diagnostics_json(report)
         if args.format == "json"
@@ -605,6 +640,20 @@ def _calibration_tracking_mode(calibration: dict[str, object]) -> str:
     return str(calibration.get("tracking_mode", "glassless3d_managed"))
 
 
+def _read_tracking_state() -> tuple[str | None, bool]:
+    try:
+        with TrackingStateReader() as reader:
+            sample = reader.read()
+    except OSError:
+        return None, False
+    if sample is None:
+        return None, False
+    state, timestamp_ms = sample
+    now_ms = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
+    age_ms = (now_ms - timestamp_ms) & 0xFFFF_FFFF
+    return state, age_ms <= 800
+
+
 def _configured_camera_index(config: dict[str, object] | None) -> int:
     camera = config.get("camera", {}) if config is not None else {}
     if not isinstance(camera, dict):
@@ -802,6 +851,9 @@ def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object]
         "depth_hz": summary.depth_hz,
         "depth_mode": summary.depth_mode,
         "gpu_ms": summary.gpu_ms,
+        "capture_cpu_ms": summary.capture_cpu_ms,
+        "present_cpu_ms": summary.present_cpu_ms,
+        "frame_cpu_ms": summary.frame_cpu_ms,
         "backend": summary.backend,
         "stereo_layout": summary.stereo_layout,
         "eye_order": summary.eye_order,
@@ -832,7 +884,18 @@ def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:
         depth_total=int(match.group("depth_total")),
         depth_hz=int(match.group("depth_hz")),
         depth_mode=match.group("depth_mode"),
-        gpu_ms=float(match.group("gpu_ms")) if match.group("gpu_ms") is not None else None,
+        gpu_ms=float(match.group("gpu_ms") or match.group("draw_gpu"))
+        if (match.group("gpu_ms") or match.group("draw_gpu")) is not None
+        else None,
+        capture_cpu_ms=float(match.group("capture_cpu"))
+        if match.group("capture_cpu") is not None
+        else None,
+        present_cpu_ms=float(match.group("present_cpu"))
+        if match.group("present_cpu") is not None
+        else None,
+        frame_cpu_ms=float(match.group("frame_cpu"))
+        if match.group("frame_cpu") is not None
+        else None,
         backend=int(match.group("backend")) if match.group("backend") is not None else None,
         stereo_layout=int(match.group("layout")) if match.group("layout") is not None else None,
         eye_order=int(match.group("eye_order")) if match.group("eye_order") is not None else None,

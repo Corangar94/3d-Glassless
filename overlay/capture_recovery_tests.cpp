@@ -82,7 +82,7 @@ static bool TestTransitionsKeepTimeoutAndHideUnavailable() {
         CaptureState::Running, CaptureSignal::DuplicationUnavailable);
     CHECK(unavailable.next_state == CaptureState::Unavailable);
     CHECK(unavailable.hide_overlay);
-    CHECK(!unavailable.arm_retry);
+    CHECK(unavailable.arm_retry);
 
     const auto dirty = g3d::capture::AdvanceCaptureState(
         CaptureState::Unavailable, CaptureSignal::BindingDirty);

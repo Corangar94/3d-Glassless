@@ -1,6 +1,7 @@
 // overlay/depth_infer.cpp — see depth_infer.h for pipeline overview.
 
 #include "depth_infer.h"
+#include <d3dcompiler.h>
 
 // DirectML.h (via dml_provider_factory.h) and onnxruntime_c_api.h use MSVC
 // SAL source annotations that MinGW's sal.h does not define. Stub every
@@ -67,6 +68,7 @@
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -126,37 +128,39 @@ static inline float half_to_float(uint16_t h) {
     return f;
 }
 
-static inline bool IsLikelyHudUv(float u, float v) {
-    // Conservative static HUD mask for screen-capture fallback depth.
-    // Monocular depth models treat UI as scene geometry, which creates false
-    // near planes and watery parallax around action bars, quest panes, chat,
-    // minimaps, and unit frames. Leave these pixels at ImageNet mean grey so
-    // the model gets the game view as the dominant signal.
-    if (v < 0.08f) return true;                         // top bars/unit frames
-    if (v > 0.78f) return true;                         // action bars/chat
-    if (u < 0.18f && v > 0.30f) return true;            // left chat/quest stack
-    if (u > 0.82f && (v < 0.28f || v > 0.62f)) return true; // minimap/side UI
-    return false;
-}
-
 // ── Impl ─────────────────────────────────────────────────────────────────────
 struct DepthInferImpl {
     // D3D11 resources (device/context NOT owned; borrowed from overlay).
     ID3D11Device*         dev          = nullptr;
     ID3D11DeviceContext*  ctx          = nullptr;
 
-    // Full-resolution staging texture for CPU readback of the captured frame.
-    ID3D11Texture2D*      stage_bgra   = nullptr;
+    // GPU letterbox/tile reduction followed by a nonblocking staging ring.
+    // For 5120x1440 this copies/maps 1036x518 instead of 5120x1440.
+    static constexpr int kReadbackRingSize = 3;
+    ID3D11Texture2D*      compact_bgra = nullptr;
+    ID3D11RenderTargetView* compact_rtv = nullptr;
+    ID3D11Texture2D*      stage_bgra[kReadbackRingSize] = {};
+    bool                  stage_pending[kReadbackRingSize] = {};
+    int                   stage_write = 0;
+    int                   stage_read = 0;
+    int                   stage_count = 0;
+    ID3D11ShaderResourceView* compact_input_srv = nullptr;
+    ID3D11Texture2D*      compact_input_tex = nullptr;
+    ID3D11VertexShader*   compact_vs = nullptr;
+    ID3D11PixelShader*    compact_ps = nullptr;
+    ID3D11SamplerState*   compact_sampler = nullptr;
+    ID3D11Buffer*         compact_cb = nullptr;
     int                   cap_w        = 0;
     int                   cap_h        = 0;
 
-    // Horizontal center-crop applied before letterboxing to limit the input
-    // aspect ratio fed to the depth model. Depth Anything V2 was trained on
-    // ~16:9 or closer-to-square images; feeding a 32:9 ultrawide (5120×1440)
-    // as a thin letterboxed strip (518×145 content in 518×518) gives nearly
-    // flat depth. We crop the center at most 16:9 of the capture first.
-    int                   crop_x0      = 0;   // left pixel of the center crop
-    int                   crop_w_eff   = 0;   // width of the crop (≤ cap_w)
+    // Ultrawide captures are split into adjacent <=16:9 tiles. Each tile keeps
+    // useful vertical model resolution; their depth maps are stitched into a
+    // full-width texture so peripheral pixels never reuse a clamped center edge.
+    int                   tile_count   = 1;
+    int                   tile_w       = 0;
+    int                   tile_overlap = 0;
+    int                   crop_x0      = 0;
+    int                   crop_w_eff   = 0;
 
     // Letterbox dimensions: the content region inside the kModelSize×kModelSize
     // model input that holds the aspect-ratio-correct resize of crop_w_eff×cap_h.
@@ -166,29 +170,22 @@ struct DepthInferImpl {
     int                   lb_w         = 0;
     int                   lb_h         = 0;
 
-    // Two R16F depth textures for render-rate interpolation.
+    // Two R16F depth textures for time-based interpolation.
     // When a new inference arrives, the old texture becomes "prev" and the new
     // one becomes "current". The shader lerps between them using depth_blend,
-    // which advances 0→1 over kBlendFrames render frames (~200 ms at 60 fps)
+    // which advances 0→1 over a fixed wall-clock interval
     // — slightly wider than one full ~100 ms inference cycle so successive
     // inferences' blend windows overlap and there is never a discontinuity at
     // the transition. depth_blend() additionally applies smoothstep to `t`
     // so the depth update has zero first-derivative at both endpoints, hiding
     // the discrete update in the middle of head motion.
-    // Crossfade window between successive inferences, in render frames.
-    // 14 render frames at 60 Hz ≈ 230 ms. Wider than the inference interval
-    // (≥100 ms at 10 Hz, currently 200-300 ms at 3-5 Hz) so consecutive
-    // 0→1 transitions still overlap — no discrete "snap" moment — but
-    // significantly tighter than the 400 ms we had, which introduced
-    // perceptible lag between head motion and depth response ("wobbly
-    // when I move my head"). Combined with smoothstep endpoints this
-    // still reads as a continuous morph.
-    static constexpr int kBlendFrames = 14;
+    static constexpr float kBlendDurationSec = 0.20f;
     ID3D11Texture2D*          depth_tex      = nullptr;
     ID3D11ShaderResourceView* depth_srv      = nullptr;
     ID3D11Texture2D*          depth_prev_tex = nullptr;
     ID3D11ShaderResourceView* depth_prev_srv = nullptr;
-    float                     blend_t        = 1.0f;  // 1.0 = fully on current tex
+    std::chrono::steady_clock::time_point blend_started{};
+    bool                      blend_active = false;
 
     // ORT state
     std::unique_ptr<Ort::Env>            env;
@@ -221,6 +218,7 @@ struct DepthInferImpl {
     // Worker-owned previous normalized depth, kept between runs so postprocess
     // can EMA-smooth the new inference against it. Empty on first run.
     std::vector<float>                   prev_norm_f32;
+    std::vector<std::vector<float>>      prev_norm_tiles;
     // Scratch buffer for separable Gaussian blur of the depth map (worker-local).
     std::vector<float>                   blur_tmp_f32;
 
@@ -234,6 +232,7 @@ struct DepthInferImpl {
     std::mutex                           m;                 // guards flags + pending/ready buffers
     std::condition_variable              cv_work;           // main → worker wakeup
     bool                                 input_pending = false;   // new input waiting for worker
+    bool                                 worker_running = false;
     bool                                 output_ready  = false;   // new depth waiting for main to upload
     std::atomic<bool>                    stop{false};
     std::atomic<uint64_t>                inferences{0};    // completed Run calls (for diagnostics)
@@ -243,14 +242,115 @@ struct DepthInferImpl {
     static constexpr float kMean[3] = {0.485f, 0.456f, 0.406f};
     static constexpr float kStd[3]  = {0.229f, 0.224f, 0.225f};
 
+    struct CompactCB {
+        float cap_w, cap_h, tile_w, tile_count;
+        float lb_off_x, lb_off_y, lb_w, lb_h;
+        float model_size, overlap, padding[2];
+    };
+
+    bool create_compact_pipeline() {
+        static constexpr const char* vs_src = R"(
+struct O { float4 p:SV_Position; float2 uv:TEXCOORD0; };
+O main(uint id:SV_VertexID) {
+    O o; o.uv=float2((id&1)?1:0,(id&2)?1:0);
+    o.p=float4(o.uv.x*2-1,1-o.uv.y*2,0,1); return o;
+})";
+        static constexpr const char* ps_src = R"(
+Texture2D Src:register(t0); SamplerState Smp:register(s0);
+cbuffer C:register(b0) {
+ float capW,capH,tileW,tileCount;
+ float lbOffX,lbOffY,lbW,lbH;
+ float modelSize,overlap; float2 padding;
+};
+struct I { float4 p:SV_Position; float2 uv:TEXCOORD0; };
+float4 main(I i):SV_Target {
+ float scaledX=i.uv.x*tileCount;
+ float tile=min(floor(scaledX),tileCount-1);
+ float2 local=float2(frac(scaledX),i.uv.y);
+ float2 pixel=local*modelSize;
+ if(pixel.x<lbOffX || pixel.x>=lbOffX+lbW ||
+    pixel.y<lbOffY || pixel.y>=lbOffY+lbH)
+   return float4(0.485,0.456,0.406,1);
+ float logicalStart=tile*tileW;
+ float logicalEnd=min(capW,logicalStart+tileW);
+ float srcStart=max(0.0,logicalStart-overlap);
+ float srcEnd=min(capW,logicalEnd+overlap);
+ float actualW=srcEnd-srcStart;
+ float2 content=(pixel-float2(lbOffX,lbOffY))/float2(lbW,lbH);
+ float2 srcUv=float2((srcStart+content.x*actualW)/capW,content.y);
+ return Src.SampleLevel(Smp,saturate(srcUv),0);
+})";
+        ID3DBlob* vs_blob = nullptr; ID3DBlob* ps_blob = nullptr; ID3DBlob* errors = nullptr;
+        HRESULT hr = D3DCompile(vs_src, std::strlen(vs_src), "depth_compact_vs", nullptr,
+            nullptr, "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vs_blob, &errors);
+        if (errors) errors->Release();
+        if (FAILED(hr)) { last_err = "Compile compact VS failed"; return false; }
+        hr = D3DCompile(ps_src, std::strlen(ps_src), "depth_compact_ps", nullptr,
+            nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ps_blob, &errors);
+        if (errors) errors->Release();
+        if (FAILED(hr)) { vs_blob->Release(); last_err = "Compile compact PS failed"; return false; }
+        hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &compact_vs);
+        if (SUCCEEDED(hr)) hr = dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &compact_ps);
+        vs_blob->Release(); ps_blob->Release();
+        if (FAILED(hr)) { last_err = "Create compact shaders failed"; return false; }
+        D3D11_SAMPLER_DESC sm = {};
+        sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sm.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = dev->CreateSamplerState(&sm, &compact_sampler);
+        if (FAILED(hr)) { last_err = "Create compact sampler failed"; return false; }
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = sizeof(CompactCB); bd.Usage = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        hr = dev->CreateBuffer(&bd, nullptr, &compact_cb);
+        if (FAILED(hr)) { last_err = "Create compact constants failed"; return false; }
+        return true;
+    }
+
+    int resolve_dml_device_id() const {
+        IDXGIDevice* dxgi_device = nullptr;
+        IDXGIAdapter* selected = nullptr;
+        DXGI_ADAPTER_DESC selected_desc = {};
+        if (!dev || FAILED(dev->QueryInterface(__uuidof(IDXGIDevice),
+                reinterpret_cast<void**>(&dxgi_device)))) return 0;
+        HRESULT hr = dxgi_device->GetAdapter(&selected);
+        dxgi_device->Release();
+        if (FAILED(hr) || !selected || FAILED(selected->GetDesc(&selected_desc))) {
+            if (selected) selected->Release();
+            return 0;
+        }
+        selected->Release();
+
+        IDXGIFactory1* factory = nullptr;
+        if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                reinterpret_cast<void**>(&factory)))) return 0;
+        int result = 0;
+        for (UINT index = 0;; ++index) {
+            IDXGIAdapter1* candidate = nullptr;
+            if (factory->EnumAdapters1(index, &candidate) == DXGI_ERROR_NOT_FOUND) break;
+            if (!candidate) continue;
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(candidate->GetDesc1(&desc))
+                && desc.AdapterLuid.HighPart == selected_desc.AdapterLuid.HighPart
+                && desc.AdapterLuid.LowPart == selected_desc.AdapterLuid.LowPart) {
+                result = static_cast<int>(index);
+                candidate->Release();
+                break;
+            }
+            candidate->Release();
+        }
+        factory->Release();
+        return result;
+    }
+
     bool create_d3d_resources() {
-        // Center-crop the capture to at most 16:9 aspect ratio before letterboxing.
-        // For 5120×1440 (32:9): crop_w = 2560, crop_x0 = 1280.
-        //   Old: 518×145 content strip (28% fill) → flat depth map.
-        //   New: 518×291 content region  (56% fill) → proper depth variation.
-        // Narrower displays (≤16:9) are unaffected (crop_w == cap_w).
-        crop_w_eff = std::min(cap_w, cap_h * 16 / 9);
-        crop_x0    = (cap_w - crop_w_eff) / 2;
+        const int max_tile_w = std::max(1, cap_h * 16 / 9);
+        tile_count = std::max(1, (cap_w + max_tile_w - 1) / max_tile_w);
+        tile_w = (cap_w + tile_count - 1) / tile_count;
+        tile_overlap = tile_count > 1 ? std::max(1, tile_w / 10) : 0;
+        crop_w_eff = tile_w;
+        crop_x0 = 0;
+        prev_norm_tiles.resize(tile_count);
 
         // Compute letterbox dimensions: aspect-ratio-correct resize of the crop
         // into kModelSize×kModelSize. Uniform 0.0f padding (ImageNet-normalised grey).
@@ -264,22 +364,33 @@ struct DepthInferImpl {
             lb_off_y = (N - lb_h) / 2;
         }
 
-        // Staging for full-res capture readback (CPU read).
+        if (!create_compact_pipeline()) return false;
+
+        // Exact model-sized stitched render target and nonblocking staging ring.
         D3D11_TEXTURE2D_DESC sd = {};
-        sd.Width = cap_w;
-        sd.Height = cap_h;
+        sd.Width = DepthInferencer::kModelSize * tile_count;
+        sd.Height = DepthInferencer::kModelSize;
         sd.MipLevels = 1;
         sd.ArraySize = 1;
         sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         sd.SampleDesc.Count = 1;
+        sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &compact_bgra);
+        if (FAILED(hr)) { last_err = "CreateTexture2D(compact BGRA) failed"; return false; }
+        hr = dev->CreateRenderTargetView(compact_bgra, nullptr, &compact_rtv);
+        if (FAILED(hr)) { last_err = "CreateRenderTargetView(compact BGRA) failed"; return false; }
         sd.Usage = D3D11_USAGE_STAGING;
+        sd.BindFlags = 0;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &stage_bgra);
-        if (FAILED(hr)) { last_err = "CreateTexture2D(staging BGRA) failed"; return false; }
+        for (auto& stage : stage_bgra) {
+            hr = dev->CreateTexture2D(&sd, nullptr, &stage);
+            if (FAILED(hr)) { last_err = "CreateTexture2D(staging ring) failed"; return false; }
+        }
 
         // Two R16F depth textures for render-rate interpolation.
         D3D11_TEXTURE2D_DESC dd = {};
-        dd.Width = DepthInferencer::kModelSize;
+        dd.Width = DepthInferencer::kModelSize * tile_count;
         dd.Height = DepthInferencer::kModelSize;
         dd.MipLevels = 1;
         dd.ArraySize = 1;
@@ -303,11 +414,13 @@ struct DepthInferImpl {
         if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth prev) failed"; return false; }
 
         // Initialise both textures to 0.5 (flat depth = no parallax on first frame).
-        const int N = DepthInferencer::kModelSize * DepthInferencer::kModelSize;
+        const int N = DepthInferencer::kModelSize * DepthInferencer::kModelSize * tile_count;
         std::vector<uint16_t> half_filled(N, float_to_half(0.5f));
-        ctx->UpdateSubresource(depth_tex,      0, nullptr, half_filled.data(), DepthInferencer::kModelSize * sizeof(uint16_t), 0);
-        ctx->UpdateSubresource(depth_prev_tex, 0, nullptr, half_filled.data(), DepthInferencer::kModelSize * sizeof(uint16_t), 0);
-        blend_t = 1.0f;
+        ctx->UpdateSubresource(depth_tex, 0, nullptr, half_filled.data(),
+                               DepthInferencer::kModelSize * tile_count * sizeof(uint16_t), 0);
+        ctx->UpdateSubresource(depth_prev_tex, 0, nullptr, half_filled.data(),
+                               DepthInferencer::kModelSize * tile_count * sizeof(uint16_t), 0);
+        blend_active = false;
         return true;
     }
 
@@ -319,7 +432,8 @@ struct DepthInferImpl {
             // DirectML EP — GPU inference on NVIDIA/AMD/Intel.
             // device_id 0 is the default adapter; matches our D3D11 device.
             OrtApi const& api = Ort::GetApi();
-            OrtStatus* st = OrtSessionOptionsAppendExecutionProvider_DML(*opts, 0);
+            const int dml_device_id = resolve_dml_device_id();
+            OrtStatus* st = OrtSessionOptionsAppendExecutionProvider_DML(*opts, dml_device_id);
             if (st != nullptr) {
                 last_err = std::string("Append DML EP failed: ") + api.GetErrorMessage(st);
                 api.ReleaseStatus(st);
@@ -367,37 +481,65 @@ struct DepthInferImpl {
     // via the postprocess stretch. The outer horizontal bands beyond the crop
     // use the edge depth value (clamped sampling) — acceptable for peripheral
     // areas of an ultrawide display.
-    void preprocess(const uint8_t* src, int src_pitch) {
+    void preprocess_compact(const uint8_t* src, int src_pitch) {
         const int N = DepthInferencer::kModelSize;
-        scratch_input_f32.assign(3 * N * N, 0.0f);   // 0.0f = ImageNet mean grey
-        float* dstR = scratch_input_f32.data() + 0 * N * N;
-        float* dstG = scratch_input_f32.data() + 1 * N * N;
-        float* dstB = scratch_input_f32.data() + 2 * N * N;
-
-        for (int oy = 0; oy < lb_h; ++oy) {
-            int sy = (oy * cap_h) / lb_h;
-            if (sy >= cap_h) sy = cap_h - 1;
-            const uint8_t* row = src + sy * src_pitch;
-            for (int ox = 0; ox < lb_w; ++ox) {
-                // Sample from the center-cropped horizontal region.
-                int sx = crop_x0 + (ox * crop_w_eff) / lb_w;
-                if (sx >= cap_w) sx = cap_w - 1;
-                float u = (float)sx / (float)std::max(1, cap_w - 1);
-                float v = (float)sy / (float)std::max(1, cap_h - 1);
-                if (IsLikelyHudUv(u, v)) {
-                    // leave HUD-like pixels at ImageNet mean grey
-                    continue;
+        const size_t tile_stride = 3ull * N * N;
+        scratch_input_f32.assign(tile_stride * tile_count, 0.0f);
+        for (int tile = 0; tile < tile_count; ++tile) {
+            float* tile_base = scratch_input_f32.data() + tile * tile_stride;
+            float* dstR = tile_base + 0 * N * N;
+            float* dstG = tile_base + 1 * N * N;
+            float* dstB = tile_base + 2 * N * N;
+            for (int y = 0; y < N; ++y) {
+                const uint8_t* row = src + y * src_pitch;
+                for (int x = 0; x < N; ++x) {
+                    const uint8_t* px = row + (tile * N + x) * 4;
+                    int idx = y * N + x;
+                    dstR[idx] = (px[2] / 255.0f - kMean[0]) / kStd[0];
+                    dstG[idx] = (px[1] / 255.0f - kMean[1]) / kStd[1];
+                    dstB[idx] = (px[0] / 255.0f - kMean[2]) / kStd[2];
                 }
-                const uint8_t* px = row + sx * 4;   // BGRA8
-                float b = px[0] / 255.0f;
-                float g = px[1] / 255.0f;
-                float r = px[2] / 255.0f;
-                int idx = (lb_off_y + oy) * N + (lb_off_x + ox);
-                dstR[idx] = (r - kMean[0]) / kStd[0];
-                dstG[idx] = (g - kMean[1]) / kStd[1];
-                dstB[idx] = (b - kMean[2]) / kStd[2];
             }
         }
+    }
+
+    bool render_compact(ID3D11Texture2D* captured) {
+        if (captured != compact_input_tex) {
+            if (compact_input_srv) { compact_input_srv->Release(); compact_input_srv = nullptr; }
+            if (compact_input_tex) { compact_input_tex->Release(); compact_input_tex = nullptr; }
+            HRESULT hr = dev->CreateShaderResourceView(captured, nullptr, &compact_input_srv);
+            if (FAILED(hr)) { last_err = "Create compact input SRV failed"; return false; }
+            compact_input_tex = captured;
+            compact_input_tex->AddRef();
+        }
+        const int N = DepthInferencer::kModelSize;
+        const CompactCB constants = {
+            static_cast<float>(cap_w), static_cast<float>(cap_h),
+            static_cast<float>(tile_w), static_cast<float>(tile_count),
+            static_cast<float>(lb_off_x), static_cast<float>(lb_off_y),
+            static_cast<float>(lb_w), static_cast<float>(lb_h),
+            static_cast<float>(N), static_cast<float>(tile_overlap), {0,0}
+        };
+        ctx->UpdateSubresource(compact_cb, 0, nullptr, &constants, 0, 0);
+        UINT viewport_count = 1;
+        D3D11_VIEWPORT old_viewport = {};
+        ctx->RSGetViewports(&viewport_count, &old_viewport);
+        const D3D11_VIEWPORT viewport = {0, 0, static_cast<float>(N * tile_count),
+            static_cast<float>(N), 0, 1};
+        ctx->RSSetViewports(1, &viewport);
+        ctx->OMSetRenderTargets(1, &compact_rtv, nullptr);
+        ctx->VSSetShader(compact_vs, nullptr, 0);
+        ctx->PSSetShader(compact_ps, nullptr, 0);
+        ctx->PSSetConstantBuffers(0, 1, &compact_cb);
+        ctx->PSSetShaderResources(0, 1, &compact_input_srv);
+        ctx->PSSetSamplers(0, 1, &compact_sampler);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        ctx->Draw(4, 0);
+        ID3D11ShaderResourceView* null_srv = nullptr;
+        ctx->PSSetShaderResources(0, 1, &null_srv);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        if (viewport_count) ctx->RSSetViewports(1, &old_viewport);
+        return true;
     }
 
     // CPU: normalize raw depth to [0,1] fp16 for the parallax shader.
@@ -421,7 +563,11 @@ struct DepthInferImpl {
     // from kModelSize we rescale with nearest-neighbor into a kModelSize^2
     // buffer so the shader SRV stays fixed-size.
     // Runs on the worker thread. Writes into `dst` (kModelSize^2 fp16).
-    void postprocess(std::vector<uint16_t>& dst) {
+    void postprocess(std::vector<uint16_t>& dst,
+                     float shared_vlo = std::numeric_limits<float>::quiet_NaN(),
+                     float shared_vhi = std::numeric_limits<float>::quiet_NaN(),
+                     bool apply_contrast = true,
+                     int tile_index = 0) {
         const int pixels = out_h * out_w;
         if (pixels <= 0) return;
 
@@ -441,7 +587,10 @@ struct DepthInferImpl {
             }
         }
         float vlo, vhi;
-        if (samples.empty()) {
+        if (std::isfinite(shared_vlo) && std::isfinite(shared_vhi)) {
+            vlo = shared_vlo;
+            vhi = shared_vhi;
+        } else if (samples.empty()) {
             vlo = 0.0f;
             vhi = 1.0f;
         } else {
@@ -462,6 +611,13 @@ struct DepthInferImpl {
         // We pull values only from the letterbox content region so the grey
         // padding bars don't bleed into the depth map used by the shader.
         const int N = DepthInferencer::kModelSize;
+        const float logical_start = static_cast<float>(tile_index * tile_w);
+        const float logical_end = std::min(static_cast<float>(cap_w), logical_start + tile_w);
+        const float source_start = std::max(0.0f, logical_start - tile_overlap);
+        const float source_end = std::min(static_cast<float>(cap_w), logical_end + tile_overlap);
+        const float source_width = std::max(1.0f, source_end - source_start);
+        const float tile_crop_x = (logical_start - source_start) / source_width;
+        const float tile_crop_w = (logical_end - logical_start) / source_width;
         std::vector<float> new_norm_f32(N * N);
         for (int oy = 0; oy < N; ++oy) {
             // Map depth-texture row → content row in model output (clamped).
@@ -472,7 +628,8 @@ struct DepthInferImpl {
             const float* in_row = output_f32.data() + sy * out_w;
             float* out_row = new_norm_f32.data() + oy * N;
             for (int ox = 0; ox < N; ++ox) {
-                int sx = cx0 + (ox * lb_w) / N;
+                const float logical_u = tile_crop_x + (static_cast<float>(ox) / N) * tile_crop_w;
+                int sx = cx0 + static_cast<int>(logical_u * lb_w);
                 if (sx < cx0) sx = cx0;
                 if (sx >= cx1) sx = cx1 - 1;
                 if (sx >= out_w) sx = out_w - 1;
@@ -637,7 +794,7 @@ struct DepthInferImpl {
         // Target std 0.22 was picked as ~σ of well-layered outdoor scenes —
         // enough to resolve wall depth variation without amplifying noise
         // on flat regions past the kMaxGain ceiling.
-        if (mode <= 2) {
+        if (apply_contrast && mode <= 2) {
             const int N2 = DepthInferencer::kModelSize;
 
             // Mean + variance on 1/4 subsample (single pass, Welford-style
@@ -704,7 +861,7 @@ struct DepthInferImpl {
                 last_err = "DepthInferencer is stopping";
                 return false;
             }
-            worker_busy = input_pending;
+            worker_busy = input_pending || worker_running;
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
                 output_ready = false;
@@ -712,15 +869,15 @@ struct DepthInferImpl {
         }
         if (!drained_upload.empty()) {
             // New inference arrived: copy current → prev, upload new → current,
-            // then reset blend_t to 0 so the shader interpolates from prev to
-            // current over kBlendFrames render frames (~167ms at 60fps).
-            // This hides the 10Hz depth update as a smooth 60Hz transition.
+            // then restart a wall-clock crossfade. This stays 200 ms at 60,
+            // 144, or 240 Hz and also remains correct when rendering is idle.
             const int N = DepthInferencer::kModelSize;
             ctx->CopyResource(depth_prev_tex, depth_tex);
             ctx->UpdateSubresource(depth_tex, 0, nullptr,
                                    drained_upload.data(),
-                                   N * sizeof(uint16_t), 0);
-            blend_t = 0.0f;
+                                   N * tile_count * sizeof(uint16_t), 0);
+            blend_started = std::chrono::steady_clock::now();
+            blend_active = true;
             has_valid_depth = true;
         }
 
@@ -728,15 +885,30 @@ struct DepthInferImpl {
         //    This prevents a D3D11_MAP_READ GPU-pipeline stall at 60fps.
         if (worker_busy) return true;
 
-        // 3. GPU -> CPU staging copy + map. Runs only at inference cadence (~10Hz).
-        //    Map(D3D11_MAP_READ) stalls until the copy completes — acceptable at
-        //    10Hz (~100ms budget) but fatal for game perf at 60Hz.
-        ctx->CopyResource(stage_bgra, captured);
+        // 3. Reduce on GPU, enqueue into a three-slot staging ring, then map the
+        // oldest copy without waiting. A busy GPU drops this inference input
+        // rather than stalling the game's immediate context.
+        // Keep at most one queued input while inference is idle. Enqueuing all
+        // three slots before the worker starts would make subsequent runs use
+        // frames captured ~100 ms ago instead of the newest game frame.
+        if (stage_count == 0) {
+            if (!render_compact(captured)) return false;
+            ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
+            stage_pending[stage_write] = true;
+            stage_write = (stage_write + 1) % kReadbackRingSize;
+            ++stage_count;
+        }
+        if (stage_count == 0 || !stage_pending[stage_read]) return true;
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        HRESULT hr = ctx->Map(stage_bgra, 0, D3D11_MAP_READ, 0, &mapped);
-        if (FAILED(hr)) { last_err = "Map(staging) failed"; return false; }
-        preprocess(static_cast<const uint8_t*>(mapped.pData), int(mapped.RowPitch));
-        ctx->Unmap(stage_bgra, 0);
+        HRESULT hr = ctx->Map(stage_bgra[stage_read], 0, D3D11_MAP_READ,
+                              D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
+        if (FAILED(hr)) { last_err = "Map(staging ring) failed"; return false; }
+        preprocess_compact(static_cast<const uint8_t*>(mapped.pData), int(mapped.RowPitch));
+        ctx->Unmap(stage_bgra[stage_read], 0);
+        stage_pending[stage_read] = false;
+        stage_read = (stage_read + 1) % kReadbackRingSize;
+        --stage_count;
 
         // 4. Hand off freshest input to worker.
         {
@@ -766,6 +938,7 @@ struct DepthInferImpl {
                 if (stop.load()) return;
                 running_input_f32.swap(pending_input_f32);
                 input_pending = false;
+                worker_running = true;
             }
 
             // --- ORT Run (slow, ~100ms). OFF the critical path. ---
@@ -774,20 +947,25 @@ struct DepthInferImpl {
             std::string err_copy;
             try {
                 const int N = DepthInferencer::kModelSize;
-                std::array<int64_t, 4> in_shape = {1, 3, N, N};
-                Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
-                    mem, running_input_f32.data(), running_input_f32.size(),
-                    in_shape.data(), in_shape.size());
+                const size_t tile_input_count = 3ull * N * N;
+                produced_upload.assign(static_cast<size_t>(N) * N * tile_count, 0);
+                std::vector<std::vector<float>> raw_tiles(tile_count);
+                for (int tile = 0; tile < tile_count && ok; ++tile) {
+                    std::array<int64_t, 4> in_shape = {1, 3, N, N};
+                    Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
+                        mem, running_input_f32.data() + tile * tile_input_count,
+                        tile_input_count, in_shape.data(), in_shape.size());
 
-                const char* in_names[]  = {input_name.c_str()};
-                const char* out_names[] = {output_name.c_str()};
-                auto outs = session->Run(*run_options,
-                                         in_names, &in_tensor, 1,
-                                         out_names, 1);
-                if (outs.size() != 1) {
-                    err_copy = "Run returned no outputs";
-                    ok = false;
-                } else {
+                    const char* in_names[]  = {input_name.c_str()};
+                    const char* out_names[] = {output_name.c_str()};
+                    auto outs = session->Run(*run_options,
+                                             in_names, &in_tensor, 1,
+                                             out_names, 1);
+                    if (outs.size() != 1) {
+                        err_copy = "Run returned no outputs";
+                        ok = false;
+                        break;
+                    }
                     auto& o = outs[0];
                     auto ti = o.GetTensorTypeAndShapeInfo();
                     auto shape = ti.GetShape();
@@ -805,11 +983,64 @@ struct DepthInferImpl {
                     }
                     if (ok) {
                         const size_t count = static_cast<size_t>(out_h) * out_w;
-                        output_f32.assign(count, 0.0f);
-                        std::memcpy(output_f32.data(),
+                        raw_tiles[tile].assign(count, 0.0f);
+                        std::memcpy(raw_tiles[tile].data(),
                                     o.GetTensorData<float>(),
                                     count * sizeof(float));
-                        postprocess(produced_upload);
+                    }
+                }
+                if (ok) {
+                    // One percentile range for every tile prevents adjacent
+                    // views from assigning different depths to the same scene.
+                    std::vector<float> global_samples;
+                    for (const auto& raw : raw_tiles) {
+                        for (int y = lb_off_y; y < lb_off_y + lb_h && y < out_h; y += 2) {
+                            for (int x = lb_off_x; x < lb_off_x + lb_w && x < out_w; x += 2) {
+                                global_samples.push_back(raw[static_cast<size_t>(y) * out_w + x]);
+                            }
+                        }
+                    }
+                    float global_lo = 0.0f, global_hi = 1.0f;
+                    if (!global_samples.empty()) {
+                        const size_t n = global_samples.size();
+                        const size_t lo = std::min<size_t>(n - 1, n * 2 / 100);
+                        const size_t hi = std::min<size_t>(n - 1, n * 98 / 100);
+                        std::nth_element(global_samples.begin(), global_samples.begin() + lo, global_samples.end());
+                        global_lo = global_samples[lo];
+                        std::nth_element(global_samples.begin() + lo + 1, global_samples.begin() + hi, global_samples.end());
+                        global_hi = global_samples[hi];
+                    }
+                    for (int tile = 0; tile < tile_count; ++tile) {
+                        output_f32 = std::move(raw_tiles[tile]);
+                        std::vector<uint16_t> tile_upload;
+                        prev_norm_f32.swap(prev_norm_tiles[tile]);
+                        postprocess(tile_upload, global_lo, global_hi, tile_count == 1, tile);
+                        prev_norm_f32.swap(prev_norm_tiles[tile]);
+                        for (int y = 0; y < N; ++y) {
+                            std::copy_n(tile_upload.data() + static_cast<size_t>(y) * N, N,
+                                produced_upload.data() + static_cast<size_t>(y) * N * tile_count
+                                    + static_cast<size_t>(tile) * N);
+                        }
+                    }
+                    if (tile_count > 1) {
+                        // Apply one contrast transform over the stitched frame.
+                        double sum = 0.0, sum_sq = 0.0; size_t count = 0;
+                        for (size_t i = 0; i < produced_upload.size(); i += 4) {
+                            const double v = half_to_float(produced_upload[i]);
+                            sum += v; sum_sq += v * v; ++count;
+                        }
+                        const float mean = count ? static_cast<float>(sum / count) : 0.5f;
+                        const float var = count ? std::max(0.0f,
+                            static_cast<float>(sum_sq / count - (sum / count) * (sum / count))) : 0.0f;
+                        const uint32_t mode = performance_mode.load(std::memory_order_relaxed);
+                        const float target = mode == 2 ? 0.20f : (mode == 1 ? 0.18f : 0.22f);
+                        const float max_gain = mode == 2 ? 2.2f : (mode == 1 ? 2.5f : 3.5f);
+                        const float gain = std::min(max_gain, std::max(1.0f,
+                            target / std::max(1e-4f, std::sqrt(var))));
+                        for (auto& h : produced_upload) {
+                            const float v = std::clamp((half_to_float(h) - mean) * gain + mean, 0.0f, 1.0f);
+                            h = float_to_half(v);
+                        }
                     }
                 }
             } catch (const Ort::Exception& e) {
@@ -823,6 +1054,7 @@ struct DepthInferImpl {
             // Publish result (or error) back to main thread.
             {
                 std::lock_guard<std::mutex> lk(m);
+                worker_running = false;
                 if (ok) {
                     ready_upload_fp16 = std::move(produced_upload);
                     output_ready = true;
@@ -860,12 +1092,23 @@ struct DepthInferImpl {
         if (depth_srv) { depth_srv->Release(); depth_srv = nullptr; }
         if (depth_prev_tex) { depth_prev_tex->Release(); depth_prev_tex = nullptr; }
         if (depth_tex) { depth_tex->Release(); depth_tex = nullptr; }
-        if (stage_bgra) { stage_bgra->Release(); stage_bgra = nullptr; }
+        if (compact_input_srv) { compact_input_srv->Release(); compact_input_srv = nullptr; }
+        if (compact_input_tex) { compact_input_tex->Release(); compact_input_tex = nullptr; }
+        if (compact_cb) { compact_cb->Release(); compact_cb = nullptr; }
+        if (compact_sampler) { compact_sampler->Release(); compact_sampler = nullptr; }
+        if (compact_ps) { compact_ps->Release(); compact_ps = nullptr; }
+        if (compact_vs) { compact_vs->Release(); compact_vs = nullptr; }
+        if (compact_rtv) { compact_rtv->Release(); compact_rtv = nullptr; }
+        if (compact_bgra) { compact_bgra->Release(); compact_bgra = nullptr; }
+        for (auto& stage : stage_bgra) {
+            if (stage) { stage->Release(); stage = nullptr; }
+        }
         session.reset();
         run_options.reset();
         opts.reset();
         env.reset();
         input_pending = false;
+        worker_running = false;
         output_ready = false;
         pending_input_f32.clear();
         running_input_f32.clear();
@@ -950,16 +1193,13 @@ float DepthInferencer::depth_blend() const {
     // Smoothstep: 3t² − 2t³. Zero first-derivative at t=0 and t=1, so the
     // depth texture morph starts and ends with no visible velocity — the
     // discrete 10 Hz update slides past the eye instead of snapping.
-    float t = impl_->blend_t;
+    if (!impl_->blend_active) return 1.0f;
+    const auto elapsed = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - impl_->blend_started).count();
+    float t = elapsed / DepthInferImpl::kBlendDurationSec;
     if (t < 0.0f) t = 0.0f;
     else if (t > 1.0f) t = 1.0f;
     return t * t * (3.0f - 2.0f * t);
-}
-
-void DepthInferencer::advance_blend() {
-    if (!impl_) return;
-    impl_->blend_t += 1.0f / DepthInferImpl::kBlendFrames;
-    if (impl_->blend_t > 1.0f) impl_->blend_t = 1.0f;
 }
 
 const char* DepthInferencer::last_error() const {
@@ -971,11 +1211,9 @@ uint64_t DepthInferencer::inferences_completed() const {
 }
 
 float DepthInferencer::depth_crop_x0_uv() const {
-    if (!impl_ || impl_->cap_w <= 0) return 0.0f;
-    return (float)impl_->crop_x0 / (float)impl_->cap_w;
+    return 0.0f;
 }
 
 float DepthInferencer::depth_crop_w_uv() const {
-    if (!impl_ || impl_->cap_w <= 0) return 1.0f;
-    return (float)impl_->crop_w_eff / (float)impl_->cap_w;
+    return 1.0f;
 }

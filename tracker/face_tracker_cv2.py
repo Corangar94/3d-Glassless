@@ -45,7 +45,8 @@ class FaceTracker:
         self._real_ipd_cm = real_ipd_cm
         self._camera_fov_deg = camera_fov_deg
 
-        data = cv2.data.haarcascades
+        cv2_data = getattr(cv2, "data", None)
+        data = str(getattr(cv2_data, "haarcascades", ""))
         self._face_cc = cv2.CascadeClassifier(
             data + "haarcascade_frontalface_default.xml"
         )

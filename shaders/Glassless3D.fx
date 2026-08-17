@@ -67,7 +67,12 @@ float4 PS_Glassless3D(float4 pos : SV_Position, float2 uv : TEXCOORD) : SV_Targe
     );
 
     float2 offset    = G3D_ParallaxOffset(head_uv, depth, ConvergenceDist, EffectStrength);
-    float2 sampleUV  = saturate(uv + offset);
+    float2 sampleUV  = uv + offset;
+
+    // Clamping stretches a single edge pixel across the displaced region.
+    // Outside samples instead fall back to the original pixel.
+    if (any(sampleUV < 0.0) || any(sampleUV > 1.0))
+        sampleUV = uv;
 
     return tex2D(ReShade::BackBuffer, sampleUV);
 }

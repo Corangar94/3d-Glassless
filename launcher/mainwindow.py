@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import time
+import statistics
+import os
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +16,7 @@ import dataclasses
 import logging
 import re
 import yaml
-from PySide6.QtCore import Qt, QPoint, QTimer
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal
 from PySide6.QtGui import QPixmap
 
 _log = logging.getLogger(__name__)
@@ -20,6 +24,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -37,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
+from tracker.tilt import _save_tilt_to_config
 from tracker.display_backends import backend_code, normalize_backend_id
 from launcher.presets import (
     PresetConfigError,
@@ -53,6 +59,7 @@ from launcher.diagnostics import (
 )
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
+from launcher.window_discovery import RunningGameWindow, discover_running_game_windows
 from launcher.auto_tune import TrackingAutoTuner
 from launcher.tracker_process import TrackerProcess
 from launcher.game_profile_store import ProfileStoreError, load_profiles, save_profiles
@@ -78,6 +85,16 @@ _STATUS_TEXT = {
     "restarting":   "⟳ RESTARTING",
     "error":        "✕ ERROR",
 }
+
+
+def _same_executable_path(left: str, right: str) -> bool:
+    if not left.strip() or not right.strip():
+        return False
+    return os.path.normcase(os.path.abspath(os.path.expanduser(left))) == os.path.normcase(
+        os.path.abspath(os.path.expanduser(right))
+    )
+
+
 _STATUS_COLOR = {
     "tracking":     "#28c840",
     "hold":         "#febc2e",
@@ -276,6 +293,8 @@ def _configure_form_layout(form: QFormLayout) -> None:
 
 
 class MainWindow(QMainWindow):
+    _head_measurement_finished = Signal(object)
+
     def __init__(
         self,
         config: dict,
@@ -287,8 +306,11 @@ class MainWindow(QMainWindow):
         self._config_path = config_path
         self._compact: bool = config.get("gui", {}).get("compact_mode", False)
         self._thread: Optional[TrackerProcess] = None
+        self._tracker_stop_pending = False
+        self._live_tracking_distances: deque[float] = deque(maxlen=30)
         self._overlay = OverlayProcess()
         self._overlay_started = False
+        self._selected_running_target: RunningGameWindow | None = None
         self._hidden_for_overlay = False
         self._capture_loss_count = 0
         self._debug_monitor_proc: Optional[subprocess.Popen[bytes]] = None
@@ -340,7 +362,6 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
@@ -352,6 +373,7 @@ class MainWindow(QMainWindow):
         self._health_timer.timeout.connect(self._safe_refresh_runtime_health)
         self._health_timer.start()
         self._safe_refresh_runtime_health()
+        self._head_measurement_finished.connect(self._on_head_measurement_finished)
 
     def _initialize_game_profiles(self) -> None:
         self._profile_store_error: str | None = None
@@ -552,13 +574,44 @@ class MainWindow(QMainWindow):
         profile_layout.addWidget(self._profile_add_button)
         layout.addRow("Profile", profile_row)
 
+        running_row = QWidget()
+        running_layout = QHBoxLayout(running_row)
+        running_layout.setContentsMargins(0, 0, 0, 0)
+        running_layout.setSpacing(6)
+        self._running_game_combo = QComboBox()
+        self._running_game_combo.setMinimumWidth(0)
+        self._running_game_combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        self._running_game_combo.setToolTip(
+            "Select the exact open game window. This is more reliable than browsing to an executable."
+        )
+        running_layout.addWidget(self._running_game_combo, 1)
+        self._running_game_refresh_button = QPushButton("Refresh")
+        self._running_game_refresh_button.setMinimumWidth(86)
+        running_layout.addWidget(self._running_game_refresh_button)
+        layout.addRow("Open game", running_row)
+
+        executable_row = QWidget()
+        executable_layout = QHBoxLayout(executable_row)
+        executable_layout.setContentsMargins(0, 0, 0, 0)
+        executable_layout.setSpacing(6)
         self._profile_executable_edit = QLineEdit()
         self._profile_executable_edit.setMinimumWidth(0)
         self._profile_executable_edit.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
         )
         self._profile_executable_edit.setPlaceholderText("C:/Games/Title/Title.exe")
-        layout.addRow("Executable", self._profile_executable_edit)
+        executable_layout.addWidget(self._profile_executable_edit, 1)
+        self._profile_browse_button = QPushButton("Browse…")
+        self._profile_browse_button.setMinimumWidth(86)
+        executable_layout.addWidget(self._profile_browse_button)
+        layout.addRow("Executable", executable_row)
+
+        self._profile_target_label = QLabel()
+        self._profile_target_label.setWordWrap(True)
+        self._profile_target_label.setStyleSheet("font-size:10px;")
+        layout.addRow("Target", self._profile_target_label)
 
         self._play_context_combo = QComboBox()
         self._play_context_combo.setMinimumWidth(0)
@@ -609,10 +662,14 @@ class MainWindow(QMainWindow):
 
         self._profile_combo.currentIndexChanged.connect(self._on_profile_selection_changed)
         self._profile_add_button.clicked.connect(self._add_game_profile)
+        self._running_game_combo.activated.connect(self._on_running_game_selected)
+        self._running_game_refresh_button.clicked.connect(self._refresh_running_games)
         self._profile_executable_edit.editingFinished.connect(self._on_profile_controls_changed)
+        self._profile_browse_button.clicked.connect(self._browse_game_executable)
         self._play_context_combo.currentIndexChanged.connect(self._on_profile_controls_changed)
         self._requested_mode_combo.currentIndexChanged.connect(self._on_profile_controls_changed)
         self._advanced_ack_checkbox.toggled.connect(self._on_profile_controls_changed)
+        self._refresh_running_games()
         self._sync_profile_controls()
         return panel
 
@@ -625,6 +682,9 @@ class MainWindow(QMainWindow):
             self._requested_mode_combo,
             self._advanced_ack_checkbox,
             self._profile_executable_edit,
+            self._profile_browse_button,
+            self._running_game_combo,
+            self._running_game_refresh_button,
         )
         for control in controls:
             control.blockSignals(True)
@@ -653,8 +713,102 @@ class MainWindow(QMainWindow):
         self._requested_mode_combo.setEnabled(advanced_controls_enabled)
         self._advanced_ack_checkbox.setEnabled(advanced_controls_enabled)
         self._profile_executable_edit.setEnabled(editable)
+        self._profile_browse_button.setEnabled(editable)
+        self._running_game_combo.setEnabled(editable)
+        self._running_game_refresh_button.setEnabled(editable)
         self._profile_add_button.setEnabled(editable)
+        self._update_target_feedback()
         self._update_profile_mode_label()
+
+    def _update_target_feedback(self) -> None:
+        if not hasattr(self, "_profile_target_label"):
+            return
+        raw = self._active_profile.executable_path.strip()
+        live_target = self._selected_running_target
+        if live_target is not None and _same_executable_path(
+            raw, live_target.executable_path
+        ):
+            self._profile_target_label.setText(
+                f"Selected live window: {live_target.title} (PID {live_target.pid})"
+            )
+            self._profile_target_label.setStyleSheet("color:#79d99b;font-size:10px;")
+            return
+        if not raw:
+            text, color = "No game selected — desktop capture will be used", "#f0c15a"
+        else:
+            path = Path(raw).expanduser()
+            if path.is_file() and path.suffix.casefold() == ".exe":
+                text, color = f"Ready: {path.name}", "#79d99b"
+            elif path.suffix.casefold() != ".exe":
+                text, color = "Invalid target — select a Windows .exe", "#ff9b9b"
+            else:
+                text, color = "Executable not found — browse to the installed game", "#ff9b9b"
+        self._profile_target_label.setText(text)
+        self._profile_target_label.setStyleSheet(f"color:{color};font-size:10px;")
+
+    def _browse_game_executable(self) -> None:
+        current = self._profile_executable_edit.text().strip()
+        start_dir = str(Path(current).parent) if current else str(Path.home())
+        selected, _filter = QFileDialog.getOpenFileName(
+            self, "Select game executable", start_dir, "Windows games (*.exe)"
+        )
+        if not selected:
+            return
+        self._selected_running_target = None
+        self._running_game_combo.setCurrentIndex(0)
+        self._profile_executable_edit.setText(str(Path(selected).resolve()))
+        self._on_profile_controls_changed()
+
+    def _refresh_running_games(self) -> None:
+        if not hasattr(self, "_running_game_combo"):
+            return
+        candidates = discover_running_game_windows()
+        combo = self._running_game_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(
+                "Select an open game window…" if candidates else "No open game windows found",
+                None,
+            )
+            selected_index = 0
+            selected_target: RunningGameWindow | None = None
+            active_path = self._active_profile.executable_path.strip()
+            for candidate in candidates:
+                combo.addItem(candidate.label, candidate)
+                if _same_executable_path(candidate.executable_path, active_path):
+                    selected_index = combo.count() - 1
+                    selected_target = candidate
+            combo.setCurrentIndex(selected_index)
+            self._selected_running_target = selected_target
+        finally:
+            combo.blockSignals(False)
+        self._update_target_feedback()
+
+    def _on_running_game_selected(self, index: int) -> None:
+        candidate = self._running_game_combo.itemData(index)
+        if not isinstance(candidate, RunningGameWindow):
+            return
+        self._selected_running_target = candidate
+        self._profile_executable_edit.setText(candidate.executable_path)
+        self._on_profile_controls_changed()
+
+    def _rebind_overlay_for_active_profile(self) -> None:
+        if not self._overlay_started or not self._tracker_is_running():
+            return
+        kwargs = self._overlay_target_kwargs()
+        self._overlay.restart_async(self._active_profile.executable_path, **kwargs)
+        self._overlay_tile.setText("Overlay\nRebinding")
+
+    def _overlay_target_kwargs(self) -> dict[str, int]:
+        target = self._selected_running_target
+        if target is None:
+            return {}
+        if not _same_executable_path(
+            target.executable_path, self._active_profile.executable_path
+        ):
+            return {}
+        return {"target_pid": target.pid}
 
     def _update_profile_mode_label(self) -> None:
         if not hasattr(self, "_profile_mode_label"):
@@ -680,6 +834,7 @@ class MainWindow(QMainWindow):
             return
         previous_profile_id = self._active_profile_id
         previous_profile = self._active_profile
+        self._selected_running_target = None
         self._active_profile_id = profile_id
         self._active_profile = self._profiles[profile_id]
         self._policy_decision = evaluate_profile(self._active_profile)
@@ -687,7 +842,10 @@ class MainWindow(QMainWindow):
             self._active_profile_id = previous_profile_id
             self._active_profile = previous_profile
             self._policy_decision = evaluate_profile(previous_profile)
+        self._refresh_running_games()
         self._sync_profile_controls()
+        if self._active_profile_id != previous_profile_id:
+            self._rebind_overlay_for_active_profile()
 
     def _on_profile_controls_changed(self, *_: object) -> None:
         if self._profile_store_error is not None:
@@ -705,13 +863,22 @@ class MainWindow(QMainWindow):
             requested_mode = RequestedMode.NON_INJECTING_DESKTOP
             advanced_acknowledged = False
 
+        edited_executable = self._profile_executable_edit.text().strip()
+        if (
+            self._selected_running_target is not None
+            and not _same_executable_path(
+                edited_executable, self._selected_running_target.executable_path
+            )
+        ):
+            self._selected_running_target = None
+            self._running_game_combo.setCurrentIndex(0)
         previous_profile = self._active_profile
         updated_profile = dataclasses.replace(
             previous_profile,
             play_context=play_context,
             requested_mode=requested_mode,
             advanced_acknowledged=advanced_acknowledged,
-            executable_path=self._profile_executable_edit.text().strip(),
+            executable_path=edited_executable,
         )
         self._profiles[self._active_profile_id] = updated_profile
         self._active_profile = updated_profile
@@ -723,6 +890,8 @@ class MainWindow(QMainWindow):
             self._sync_profile_controls()
             return
         self._sync_profile_controls()
+        if updated_profile != previous_profile:
+            self._rebind_overlay_for_active_profile()
 
     def _add_game_profile(self) -> None:
         if self._profile_store_error is not None:
@@ -944,6 +1113,8 @@ class MainWindow(QMainWindow):
             self._start_tracking()
 
     def _start_tracking(self) -> None:
+        if self._tracker_stop_pending:
+            return
         self._policy_decision = evaluate_profile(self._active_profile)
         self._update_profile_mode_label()
         if not self._policy_decision.allows(Backend.DESKTOP_OVERLAY):
@@ -964,6 +1135,7 @@ class MainWindow(QMainWindow):
         tracker.frame_ready.connect(self._on_frame)
         tracker.status_changed.connect(self._on_status)
         tracker.status_changed.connect(self._on_tracker_status_for_overlay)
+        tracker.stopped.connect(self._on_tracker_stopped)
         if not tracker.start():
             self._overlay_started = False
             self._thread = None
@@ -984,7 +1156,10 @@ class MainWindow(QMainWindow):
         if self._thread:
             self._thread.status_changed.disconnect(self._on_tracker_status_for_overlay)
         try:
-            self._overlay.start(self._active_profile.executable_path)
+            self._overlay.start(
+                self._active_profile.executable_path,
+                **self._overlay_target_kwargs(),
+            )
             self._overlay_tile.setText("Overlay\nRunning")
             self._hidden_for_overlay = True
             self.showMinimized()
@@ -997,19 +1172,30 @@ class MainWindow(QMainWindow):
 
     def _stop_tracking(self) -> None:
         if self._thread:
+            self._tracker_stop_pending = True
             self._thread.stop()
-            self._thread = None
-        self._overlay.stop()
+        self._overlay.stop_async()
+        self._overlay_started = False
         if self._hidden_for_overlay:
             self._hidden_for_overlay = False
             self.showNormal()
         self._on_status("stopped")
-        self._action_btn.setText("▶ START TRACKING")
+        self._action_btn.setText("Stopping…" if self._tracker_stop_pending else "▶ START TRACKING")
+        self._action_btn.setEnabled(not self._tracker_stop_pending)
         self._action_btn.setStyleSheet(
             f"background:{_ACCENT};color:#111;font-weight:900;"
             "font-size:13px;padding:12px;border:none;border-radius:8px;"
         )
         self._overlay_tile.setText("Overlay\nIdle")
+        self._apply_runtime_health(None)
+
+    def _on_tracker_stopped(self, tracker: TrackerProcess | None = None) -> None:
+        """Release lifecycle ownership only after the camera child has exited."""
+        if tracker is None or self._thread is tracker:
+            self._thread = None
+        self._tracker_stop_pending = False
+        self._action_btn.setEnabled(True)
+        self._action_btn.setText("▶ START TRACKING")
 
     # ── Signal slots ───────────────────────────────────────────────────────────
 
@@ -1017,6 +1203,8 @@ class MainWindow(QMainWindow):
         self._label_x.setText(f"X\n{x:+.1f}")
         self._label_y.setText(f"Y\n{y:+.1f}")
         self._label_z.setText(f"Z\n{z:.1f}")
+        if self._tracking_status == "tracking" and 20.0 <= z <= 200.0:
+            self._live_tracking_distances.append(float(z))
         if not self._auto_tune_enabled or self._tracking_status != "tracking":
             return
 
@@ -1027,20 +1215,25 @@ class MainWindow(QMainWindow):
         self._last_auto_tune_write_s = now_s
         self._settings = dataclasses.replace(
             self._settings,
+            head_dist_cm=tuned.head_dist_cm,
             smoothing_alpha=tuned.smoothing_alpha,
             deadzone_mm=tuned.deadzone_mm,
         )
         self._settings_writer.write(self._settings)
 
         for widget, value in (
+            (getattr(self, "_head_dist_spin", None), tuned.head_dist_cm),
             (getattr(self, "_smoothing_slider", None), tuned.smoothing_alpha),
             (getattr(self, "_deadzone_slider", None), tuned.deadzone_mm),
         ):
             if widget is not None:
-                lo = float(widget.property("_lo"))
-                step = float(widget.property("_step"))
                 widget.blockSignals(True)
-                widget.setValue(round((value - lo) / step))
+                if isinstance(widget, QDoubleSpinBox):
+                    widget.setValue(value)
+                else:
+                    lo = float(widget.property("_lo"))
+                    step = float(widget.property("_step"))
+                    widget.setValue(round((value - lo) / step))
                 widget.blockSignals(False)
         if hasattr(self, "_auto_tune_status"):
             mode = "responsive" if tuned.speed_cm_s >= 8.0 else "stable"
@@ -1074,14 +1267,17 @@ class MainWindow(QMainWindow):
             self._tracker_tile.setText(f"Tracker\n{text.replace('● ', '').replace('⟳ ', '').replace('✕ ', '')}")
         if status == "error":
             if self._thread:
+                self._tracker_stop_pending = True
                 self._thread.stop()
-                self._thread = None
-            self._overlay.stop()
+            self._overlay.stop_async()
             self._overlay_started = False
             if self._hidden_for_overlay:
                 self._hidden_for_overlay = False
                 self.showNormal()
-            self._action_btn.setText("▶ START TRACKING")
+            self._action_btn.setText(
+                "Stopping…" if self._tracker_stop_pending else "▶ START TRACKING"
+            )
+            self._action_btn.setEnabled(not self._tracker_stop_pending)
             self._action_btn.setStyleSheet(
                 f"background:{_ACCENT};color:#111;font-weight:900;"
                 "font-size:13px;padding:12px;border:none;border-radius:8px;"
@@ -1113,6 +1309,15 @@ class MainWindow(QMainWindow):
         return _latest_overlay_summary(overlay_log) if overlay_log else None
 
     def _apply_runtime_health(self, summary: OverlayRuntimeSummary | None) -> None:
+        # A fresh log line may belong to a just-finished diagnostic or an older
+        # launcher instance. Never show it as current while this window is
+        # explicitly stopped.
+        if not self._overlay_started:
+            self._shm_tile.setText("SHM\nIdle")
+            self._depth_tile.setText("Depth\nIdle")
+            self._capture_tile.setText("Capture\nIdle")
+            self._update_target_feedback()
+            return
         if summary is None:
             self._shm_tile.setText("SHM\nWaiting")
             self._depth_tile.setText("Depth\nWaiting")
@@ -1120,6 +1325,30 @@ class MainWindow(QMainWindow):
             return
 
         self._maybe_recover_overlay(summary)
+
+        target_path = self._active_profile.executable_path.strip()
+        if target_path and hasattr(self, "_profile_target_label"):
+            target_name = Path(target_path).name
+            target_capture_reasons = {
+                "bound_target_wgc",
+                "bound_target_duplication",
+                # Compatibility with native builds that predate the explicit
+                # target/desktop capture status contract.
+                "bound_wgc",
+            }
+            if (
+                summary.has_frame
+                and summary.capture_state == "running"
+                and summary.capture_reason in target_capture_reasons
+            ):
+                self._profile_target_label.setText(f"Captured: {target_name}")
+                self._profile_target_label.setStyleSheet("color:#79d99b;font-size:10px;")
+            elif Path(target_path).is_file():
+                waiting_text = f"Waiting for game window: {target_name}"
+                if summary.has_frame and summary.capture_reason == "desktop_fallback":
+                    waiting_text += " (desktop preview active)"
+                self._profile_target_label.setText(waiting_text)
+                self._profile_target_label.setStyleSheet("color:#f0c15a;font-size:10px;")
 
         self._shm_tile.setText(f"SHM\n{summary.shm_status} {summary.shm_changes_per_sec}/s")
         depth_status = f"{summary.depth_hz} Hz"
@@ -1157,6 +1386,10 @@ class MainWindow(QMainWindow):
             self._capture_loss_count = 0
             return
 
+        if self._overlay.is_transitioning() is True:
+            self._capture_loss_count = 0
+            return
+
         if not self._overlay.is_running():
             self._restart_overlay_from_health("process exited")
             return
@@ -1175,21 +1408,14 @@ class MainWindow(QMainWindow):
 
     def _restart_overlay_from_health(self, reason: str) -> None:
         self._capture_loss_count = 0
-        try:
-            self._overlay.stop()
-            self._overlay.start()
-            self._overlay_started = True
-            if hasattr(self, "_overlay_tile"):
-                self._overlay_tile.setText("Overlay\nRestarted")
-            _log.warning("overlay restarted after runtime health failure: %s", reason)
-        except OverlayStartError as e:
-            self._overlay_started = False
-            self._on_status("error")
-            if hasattr(self, "_overlay_tile"):
-                self._overlay_tile.setText("Overlay\nError")
-            self._status_label.setText("✕ OVERLAY ERROR")
-            self._status_label.setToolTip(str(e))
-            _log.warning("overlay restart failed after %s: %s", reason, e)
+        self._overlay.restart_async(
+            self._active_profile.executable_path,
+            **self._overlay_target_kwargs(),
+        )
+        self._overlay_started = True
+        if hasattr(self, "_overlay_tile"):
+            self._overlay_tile.setText("Overlay\nRestarting")
+        _log.warning("overlay restart queued after runtime health failure: %s", reason)
 
     # ── Drag to move ───────────────────────────────────────────────────────────
 
@@ -1394,7 +1620,7 @@ class MainWindow(QMainWindow):
         recal_btn = QPushButton("Re-calibrate")
         recal_btn.setMinimumWidth(110)
         recal_btn.setToolTip(
-            "Reset tilt to 0° and restart tracker — auto-calibration runs continuously"
+            "Reset the explicit camera-mount tilt correction to 0°"
         )
         recal_btn.clicked.connect(self._on_recalibrate_tilt)
         tilt_row_layout.addWidget(recal_btn)
@@ -1514,22 +1740,13 @@ class MainWindow(QMainWindow):
         self._camera_tilt_deg = float(value)
 
     def _on_recalibrate_tilt(self) -> None:
-        """Reset tilt to 0 and restart tracker — it will auto-detect continuously."""
-        import yaml  # local import to avoid shadowing module-level yaml
-        try:
-            cfg = _load_yaml_mapping(self._config_path)
-            _ensure_mapping_child(cfg, "tracking")["camera_tilt_deg"] = 0.0
-            with open(self._config_path, "w") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
-        except (ConfigMappingError, OSError, yaml.YAMLError) as e:
-            self._tilt_status.setText(f"Error: {e}")
+        """Reset the explicit mount correction; never infer it from posture."""
+        if not _save_tilt_to_config(self._config_path, 0.0):
+            self._tilt_status.setText("Error: configuration could not be updated")
             return
         self._config.setdefault("tracking", {})["camera_tilt_deg"] = 0.0
         self._camera_tilt_spin.setValue(0.0)
-        if self._thread and self._thread.isRunning():
-            self._stop_tracking()
-        self._start_tracking()
-        self._tilt_status.setText("Auto-calibrating\u2026 (updates every ~30 s)")
+        self._tilt_status.setText("Reset to 0° — adjust only for the physical camera mount")
 
     def _on_detect_screen(self) -> None:
         self._calib_status.setText("Detecting\u2026")
@@ -1550,14 +1767,40 @@ class MainWindow(QMainWindow):
             self._calib_status.setText("Detection failed \u2014 enter manually")
 
     def _on_measure_head(self) -> None:
-        # Disable button to prevent re-entrant calls while the webcam grab runs.
+        """Measure on a worker so model loading and camera I/O never freeze Qt."""
         self._measure_btn.setEnabled(False)
         self._calib_status.setText("Measuring (hold still 3 s)\u2026")
+        if self._tracking_status == "tracking" and len(self._live_tracking_distances) >= 5:
+            self._on_head_measurement_finished(
+                statistics.median(self._live_tracking_distances)
+            )
+            return
+        ipd_mm = float(self._ipd_spin.value())
+        camera_index = int(self._config.get("camera", {}).get("index", 0))
+
+        def measure() -> None:
+            try:
+                result = measure_head_distance_or_none(
+                    ipd_mm=ipd_mm,
+                    camera_index=camera_index,
+                )
+            except Exception:  # noqa: BLE001
+                _log.warning("head-distance measurement failed", exc_info=True)
+                result = None
+            self._head_measurement_finished.emit(result)
+
+        threading.Thread(
+            target=measure,
+            name="g3d-head-calibration",
+            daemon=True,
+        ).start()
+
+    def _on_head_measurement_finished(self, result: object) -> None:
         try:
-            dist = measure_head_distance_or_none(ipd_mm=self._ipd_spin.value())
-            if dist is None:
+            if not isinstance(result, (int, float)):
                 self._calib_status.setText("Measurement failed \u2014 keeping current value")
                 return
+            dist = float(result)
             self._head_dist_spin.blockSignals(True)
             self._head_dist_spin.setValue(dist)
             self._head_dist_spin.blockSignals(False)
@@ -1662,7 +1905,11 @@ class MainWindow(QMainWindow):
             values["display_backend"] = self._display_backend_id
             values["depth_performance_mode"] = _depth_mode_name(s.depth_mode)
             overlay.update(values)
-            _ensure_mapping_child(cfg, "tracking")["camera_tilt_deg"] = self._camera_tilt_deg
+            tracking = _ensure_mapping_child(cfg, "tracking")
+            tracking["camera_tilt_deg"] = self._camera_tilt_deg
+            tracking["ipd_cm"] = s.ipd_mm / 10.0
+            display_calibration = _ensure_mapping_child(overlay, "display_calibration")
+            display_calibration["ipd_mm"] = s.ipd_mm
             self._persist_game_profiles(base_config=cfg)
         except (ConfigMappingError, OSError, yaml.YAMLError):
             pass
@@ -1713,6 +1960,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: object) -> None:
         if self._thread and self._thread.isRunning():
             self._thread.stop()
+        # The interpreter can exit as soon as this event is accepted. Reap the
+        # detached native child synchronously so it cannot become an orphan.
         self._overlay.stop()
         proc = self._debug_monitor_proc
         if proc is not None and proc.poll() is None:

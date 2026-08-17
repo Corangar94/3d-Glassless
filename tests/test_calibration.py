@@ -56,7 +56,14 @@ def test_measure_head_distance_no_face():
     mock_cap.read.return_value = (True, fake_frame)
     mock_cv2 = _make_mock_cv2(mock_cap)
     with patch.dict("sys.modules", {"cv2": mock_cv2}):
-        with patch("launcher.calibration._detect_face_distance", return_value=None):
+        with (
+            patch("launcher.calibration._create_face_landmarker") as create,
+            patch(
+                "launcher.calibration._detect_face_distance_with_landmarker",
+                return_value=None,
+            ),
+        ):
+            create.return_value.__enter__.return_value = MagicMock()
             assert measure_head_distance(ipd_mm=64.0) == 60.0
 
 

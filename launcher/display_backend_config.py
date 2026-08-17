@@ -15,9 +15,10 @@ def set_display_backend(config_path: str | Path, backend_id: str) -> DisplayBack
     backend = _find_backend(registry, backend_id)
     path = Path(config_path)
     cfg = _load_config(path)
-    cfg.setdefault("overlay", {})["display_backend"] = backend.id
+    overlay = _ensure_mapping_child(cfg, "overlay")
+    overlay["display_backend"] = backend.id
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    path.write_text(str(yaml.safe_dump(cfg, sort_keys=False)), encoding="utf-8")
     return backend
 
 
@@ -46,6 +47,15 @@ def _load_config(path: Path) -> dict[str, object]:
     if not isinstance(data, dict):
         raise ValueError("config top-level YAML must be a mapping")
     return data
+
+
+def _ensure_mapping_child(data: dict[str, object], key: str) -> dict[str, object]:
+    child = data.get(key)
+    if isinstance(child, dict):
+        return child
+    child = {}
+    data[key] = child
+    return child
 
 
 if __name__ == "__main__":

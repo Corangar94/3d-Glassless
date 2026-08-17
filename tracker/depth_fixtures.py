@@ -10,6 +10,7 @@ from typing import Sequence
 from tracker.depth_benchmark import DepthBenchmarkResult, format_benchmark_result, run_benchmark
 
 DEFAULT_FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "fixtures" / "depth"
+_QUALITY_RANK = {"GOOD": 0, "WARN": 1, "DANGER": 2}
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,13 @@ def benchmark_fixture(name: str, root: str | Path = DEFAULT_FIXTURE_ROOT) -> Dep
     return DepthFixtureBenchmark(fixture=fixture, result=run_benchmark(fixture.path))
 
 
+def fixture_meets_expected_quality(item: DepthFixtureBenchmark) -> bool:
+    expected = item.fixture.expected_quality
+    if expected is None:
+        return item.result.quality != "DANGER"
+    return _QUALITY_RANK[item.result.quality] <= _QUALITY_RANK[expected]
+
+
 def format_fixture_list(fixtures: Sequence[DepthFixture]) -> str:
     lines = ["Depth benchmark fixtures:"]
     for fixture in fixtures:
@@ -94,7 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         item = benchmark_fixture(args.benchmark, args.root)
         print(f"Fixture: {item.fixture.name}")
         print(format_benchmark_result(item.result))
-        return 1 if item.result.quality == "DANGER" else 0
+        if item.fixture.expected_quality:
+            print(f"expected={item.fixture.expected_quality}")
+        return 0 if fixture_meets_expected_quality(item) else 1
 
     if args.benchmark_all:
         exit_code = 0
@@ -102,7 +112,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             item = benchmark_fixture(fixture.name, args.root)
             print(f"Fixture: {item.fixture.name}")
             print(format_benchmark_result(item.result))
-            if item.result.quality == "DANGER":
+            if item.fixture.expected_quality:
+                print(f"expected={item.fixture.expected_quality}")
+            if not fixture_meets_expected_quality(item):
                 exit_code = 1
         return exit_code
 

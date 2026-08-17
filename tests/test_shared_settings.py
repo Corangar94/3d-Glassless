@@ -4,8 +4,8 @@ from tracker.shared_settings import (
     SharedSettingsWriter, SharedSettingsReader,
 )
 
-def test_struct_size_is_64():
-    assert STRUCT_SIZE == 64
+def test_struct_size_is_88():
+    assert STRUCT_SIZE == 88
 
 def test_struct_format_roundtrip():
     s = OverlaySettings(
@@ -14,6 +14,8 @@ def test_struct_format_roundtrip():
         depth_gamma=1.0, focus_radius=0.1, head_dist_cm=60.0,
         camera_fov_deg=90.0, ipd_mm=64.0, smoothing_alpha=0.1,
         deadzone_mm=5.0, display_backend=1, depth_mode=2,
+        stereo_layout=1, eye_order=1, panel_width_px=3840,
+        panel_height_px=1080, focus_plane_cm=12.0, tracking_mode=1,
     )
     data = struct.pack(
         STRUCT_FORMAT,
@@ -21,14 +23,20 @@ def test_struct_format_roundtrip():
         s.screen_h_cm, s.depth_curve, s.depth_gamma, s.focus_radius,
         s.head_dist_cm, s.camera_fov_deg, s.ipd_mm, s.smoothing_alpha,
         s.deadzone_mm, s.display_backend, s.depth_mode, 1,
+        s.stereo_layout, s.eye_order, s.panel_width_px, s.panel_height_px,
+        s.focus_plane_cm, s.tracking_mode,
     )
-    assert len(data) == 64
+    assert len(data) == 88
     out = struct.unpack(STRUCT_FORMAT, data)
     assert abs(out[0] - 1.5) < 1e-5
     assert out[5] == 1       # depth_curve uint32
     assert abs(out[11] - 0.1) < 1e-5  # smoothing_alpha
     assert out[13] == 1       # display_backend uint32
     assert out[14] == 2       # depth_mode uint32
+    assert out[16] == 1       # stereo_layout uint32
+    assert out[17] == 1       # eye_order uint32
+    assert out[18] == 3840    # panel_width_px uint32
+    assert abs(out[20] - 12.0) < 1e-5  # focus_plane_cm
 
 
 def test_reader_returns_none_when_no_writer():
@@ -48,6 +56,8 @@ def test_writer_reader_roundtrip():
         depth_gamma=0.8, focus_radius=0.15, head_dist_cm=55.0,
         camera_fov_deg=75.0, ipd_mm=63.0, smoothing_alpha=0.05,
         deadzone_mm=3.0, display_backend=2, depth_mode=2,
+        stereo_layout=1, eye_order=1, panel_width_px=3840,
+        panel_height_px=1080, focus_plane_cm=12.0, tracking_mode=1,
     )
     with SharedSettingsWriter(name="G3D_SETTINGS_ROUNDTRIP_TEST") as writer:
         writer.write(settings)
@@ -62,6 +72,12 @@ def test_writer_reader_roundtrip():
             assert abs(result.deadzone_mm - 3.0) < 1e-5
             assert result.display_backend == 2
             assert result.depth_mode == 2
+            assert result.stereo_layout == 1
+            assert result.eye_order == 1
+            assert result.panel_width_px == 3840
+            assert result.panel_height_px == 1080
+            assert abs(result.focus_plane_cm - 12.0) < 1e-5
+            assert result.tracking_mode == 1
         finally:
             reader.close()
 

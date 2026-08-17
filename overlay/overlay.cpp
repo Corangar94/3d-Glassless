@@ -16,6 +16,8 @@
 #include <wincodec.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
+#include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #include <inspectable.h>
 #include <roapi.h>
@@ -27,6 +29,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <chrono>
 #include <ctime>
 #include <cstdarg>
 #include <cwctype>
@@ -199,9 +202,12 @@ static void EnablePerMonitorV2DpiAwareness() {
 
 // ── Shared-memory layout (must match tracker/shared_memory.py) ────────────
 static const wchar_t* SHM_NAME      = L"G3D";            // head pose (tracker -> us)
+static const wchar_t* SHM_SEQ       = L"G3D_Seq";        // optional pose seqlock companion
+static const wchar_t* SHM_STATE     = L"G3D_State";      // face-validity state (tracker -> us)
 static const wchar_t* SHM_SETTINGS  = L"G3D_Settings";   // live tuning (settings GUI -> us)
 #pragma pack(push, 1)
 struct HeadPose { float x, y, z; uint32_t ts; };
+struct TrackerState { uint32_t state; uint32_t ts; }; // 0=paused, 1=tracking, 2=hold
 // Must match tracker/shared_settings.py STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI" (88 bytes)
 struct Settings {
     float     strengthX;
@@ -229,6 +235,38 @@ struct Settings {
 };  // 88 bytes
 static_assert(sizeof(Settings) == 88, "Settings SHM layout must match tracker.shared_settings");
 #pragma pack(pop)
+
+template <typename T>
+static bool ReadStableSnapshot(const void* view, T* out) {
+    if (!view || !out) return false;
+    T first = {}, second = {};
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        memcpy(&first, view, sizeof(T));
+        MemoryBarrier();
+        memcpy(&second, view, sizeof(T));
+        if (memcmp(&first, &second, sizeof(T)) == 0) {
+            *out = second;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ReadStableSettings(const void* view, Settings* out) {
+    if (!view || !out) return false;
+    Settings first = {}, second = {};
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        memcpy(&first, view, sizeof(first));
+        MemoryBarrier();
+        memcpy(&second, view, sizeof(second));
+        if ((first.version & 1u) == 0 && first.version == second.version
+            && memcmp(&first, &second, sizeof(first)) == 0) {
+            *out = second;
+            return true;
+        }
+    }
+    return false;
+}
 
 // ── Shader source ─────────────────────────────────────────────────────────
 static const char VS_SRC[] = R"hlsl(
@@ -350,23 +388,6 @@ float2 ApplyConfidenceProtectedParallax(DepthSample d_final, float hz, float sw,
     return ParallaxShift(d_final.depth, hz, sw, sh, vd, eyeX, eyeY) * confidenceScale;
 }
 
-static const float kHudParallaxMinScale = 0.08;
-
-float HudParallaxScale(float2 uv) {
-    // Static HUD protection for screen-capture fallback depth. UI is not scene
-    // geometry, so keep it near screen plane while allowing full parallax in
-    // the central gameplay region.
-    float scale = 1.0;
-    scale *= smoothstep(0.02, 0.10, uv.y);             // top unit/buff bars
-    scale *= 1.0 - smoothstep(0.76, 0.98, uv.y);       // bottom action/chat bars
-    float leftUi = (1.0 - smoothstep(0.16, 0.24, uv.x)) * smoothstep(0.28, 0.40, uv.y);
-    float rightTop = smoothstep(0.76, 0.86, uv.x) * (1.0 - smoothstep(0.28, 0.42, uv.y));
-    float rightBottom = smoothstep(0.78, 0.88, uv.x) * smoothstep(0.62, 0.74, uv.y);
-    float rightUi = saturate(rightTop + rightBottom);
-    scale *= lerp(1.0, kHudParallaxMinScale, saturate(leftUi + rightUi));
-    return max(scale, kHudParallaxMinScale);
-}
-
 float4 main(PS_IN i) : SV_Target {
     float dCropW = max(depthCropW, 0.01);
     float2 localUV = i.uv;
@@ -452,7 +473,7 @@ float4 main(PS_IN i) : SV_Target {
         return float4(edge, edge, edge, 1.0);
     }
 
-    float2 uv_final = localUV + ApplyConfidenceProtectedParallax(d_final, hz, sw, sh, vd, eyeX, eyeY) * fade * HudParallaxScale(localUV);
+    float2 uv_final = localUV + ApplyConfidenceProtectedParallax(d_final, hz, sw, sh, vd, eyeX, eyeY) * fade;
 
     // OOB safety (fade should have already prevented it — this is belt &
     // suspenders). saturate() would stretch the edge pixel and cause image
@@ -473,7 +494,8 @@ struct NormalizeCB {
     float cropW;
     float cropH;
     float rotation;
-    float padding[3];
+    float hdrInput;
+    float padding[2];
 };
 static_assert(sizeof(NormalizeCB) % 16 == 0, "normalize buffer must be 16-byte aligned");
 
@@ -486,7 +508,8 @@ cbuffer NormalizeCB : register(b0) {
     float cropW;
     float cropH;
     float rotation;
-    float3 padding;
+    float hdrInput;
+    float2 padding;
 };
 struct VS_OUT { float4 pos : SV_Position; float2 uv : TEXCOORD; };
 float2 UprightToRaw(float2 uv) {
@@ -497,7 +520,23 @@ float2 UprightToRaw(float2 uv) {
 }
 float4 main(VS_OUT input) : SV_Target {
     float2 upright = float2(cropX, cropY) + input.uv * float2(cropW, cropH);
-    return RawFrame.SampleLevel(RawSampler, UprightToRaw(upright), 0.0);
+    float4 color = RawFrame.SampleLevel(RawSampler, UprightToRaw(upright), 0.0);
+    if (hdrInput > 1.5) {
+        const float m1=0.1593017578, m2=78.84375;
+        const float c1=0.8359375, c2=18.8515625, c3=18.6875;
+        float3 p=pow(saturate(color.rgb),1.0/m2);
+        color.rgb=pow(max(p-c1,0.0)/max(c2-c3*p,1e-5),1.0/m1)*49.26;
+        color.rgb=color.rgb/(1.0+color.rgb);
+        color.rgb=pow(color.rgb,1.0/2.2);
+    } else if (hdrInput > 0.5) {
+        // Desktop Duplication exposes HDR desktops as linear scRGB. Apply a
+        // conservative Reinhard mapping before the SDR overlay back buffer so
+        // highlights do not simply clamp to white.
+        color.rgb = max(color.rgb, 0.0);
+        color.rgb = color.rgb / (1.0 + color.rgb);
+        color.rgb = pow(color.rgb, 1.0 / 2.2);
+    }
+    return color;
 }
 )hlsl";
 
@@ -517,6 +556,10 @@ struct CaptureBinding {
     wchar_t deviceName[32] = {};
     RECT desktopRect = {};
     DXGI_MODE_ROTATION rotation = DXGI_MODE_ROTATION_IDENTITY;
+    DXGI_COLOR_SPACE_TYPE colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+    UINT bitsPerColor = 8;
+    float minLuminance = 0.0f;
+    float maxLuminance = 0.0f;
     g3d::capture::Region region = {};
 };
 
@@ -524,6 +567,7 @@ enum class BindingStatus {
     Ready,
     NoOutput,
     TargetSpansOutput,
+    TargetUnavailable,
 };
 
 // ── Globals ───────────────────────────────────────────────────────────────
@@ -531,6 +575,8 @@ static HWND                      g_hwnd    = nullptr;
 static ID3D11Device*             g_dev     = nullptr;
 static ID3D11DeviceContext*      g_ctx     = nullptr;
 static IDXGISwapChain*           g_swap    = nullptr;
+static HANDLE                    g_frameLatencyWaitable = nullptr; // owned by swap chain
+static bool                      g_flipModelSwap = false;
 static ID3D11RenderTargetView*   g_rtv     = nullptr;
 static ID3D11VertexShader*       g_vs      = nullptr;
 static ID3D11PixelShader*        g_ps      = nullptr;
@@ -548,6 +594,10 @@ static ID3D11RenderTargetView*   g_capRtv = nullptr;
 static ID3D11ShaderResourceView* g_srv     = nullptr;
 static HANDLE                    g_shmH    = nullptr;
 static const void*               g_shmView = nullptr;
+static HANDLE                    g_seqH    = nullptr;
+static const void*               g_seqView = nullptr;
+static HANDLE                    g_stateH    = nullptr;
+static const void*               g_stateView = nullptr;
 // Monocular depth inferencer (Depth Anything V2 Small via ONNX Runtime + DirectML).
 // When null / failed to init, the overlay falls back to a uniform 0.5 depth texture
 // so the parallax math still runs (effectively the old flat-plane behavior).
@@ -559,9 +609,28 @@ static ID3D11Query*              g_gpuStart    = nullptr;
 static ID3D11Query*              g_gpuEnd      = nullptr;
 static bool                      g_gpuTimingPending = false;
 static double                    g_lastGpuMs = -1.0;
+static double                    g_lastCaptureCpuMs = 0.0;
+static double                    g_lastPresentCpuMs = 0.0;
+static double                    g_lastFrameCpuMs = 0.0;
 static int                       g_gpuTimingSamples = 0;
+
+class ScopedCpuTimer {
+public:
+    explicit ScopedCpuTimer(double* destination)
+        : destination_(destination), started_(std::chrono::steady_clock::now()) {}
+    ~ScopedCpuTimer() {
+        if (destination_) {
+            *destination_ = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started_).count();
+        }
+    }
+private:
+    double* destination_;
+    std::chrono::steady_clock::time_point started_;
+};
 static HWND                      g_targetWindow = nullptr;
 static std::wstring              g_targetExePath;
+static DWORD                     g_targetPid = 0;
 static RECT                      g_targetRect = {};
 static bool                      g_useTargetWindow = false;
 static CaptureBinding            g_binding = {};
@@ -603,6 +672,9 @@ static g3d::wgc::IGraphicsCaptureSession* g_wgcSession = nullptr;
 static HWND                      g_wgcWindow = nullptr;
 static UINT                      g_wgcWidth = 0;
 static UINT                      g_wgcHeight = 0;
+static uint64_t                  g_captureFrameSerial = 0;
+static uint64_t                  g_lastCaptureFrameMs = 0;
+static bool                      g_presentRetryPending = false;
 
 static void CloseWinRtObject(IUnknown* object) {
     if (!object) return;
@@ -852,6 +924,7 @@ static std::wstring NormalizeExePath(std::wstring path) {
 
 struct TargetWindowSearch {
     std::wstring normalizedPath;
+    DWORD targetPid = 0;
     HWND best = nullptr;
     uint64_t bestScore = 0;
 };
@@ -864,6 +937,7 @@ static BOOL CALLBACK FindTargetWindowProc(HWND hwnd, LPARAM lparam) {
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
+    if (search->targetPid != 0 && pid != search->targetPid) return TRUE;
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) return TRUE;
     wchar_t imagePath[32768] = {};
@@ -891,7 +965,9 @@ static BOOL CALLBACK FindTargetWindowProc(HWND hwnd, LPARAM lparam) {
 
 static HWND FindTargetWindow() {
     if (g_targetExePath.empty()) return nullptr;
-    TargetWindowSearch search = { NormalizeExePath(g_targetExePath) };
+    TargetWindowSearch search = {};
+    search.normalizedPath = NormalizeExePath(g_targetExePath);
+    search.targetPid = g_targetPid;
     EnumWindows(FindTargetWindowProc, reinterpret_cast<LPARAM>(&search));
     return search.best;
 }
@@ -936,6 +1012,8 @@ static bool SameLuid(const LUID& left, const LUID& right) {
     return left.HighPart == right.HighPart && left.LowPart == right.LowPart;
 }
 
+static bool AutodetectScreenSizeCm(float* outW, float* outH, const wchar_t* deviceName = nullptr);
+
 static HMONITOR DesiredCaptureMonitor() {
     if (g_useTargetWindow && g_targetWindow) {
         return MonitorFromWindow(g_targetWindow, MONITOR_DEFAULTTONULL);
@@ -970,7 +1048,6 @@ static BindingStatus FindCaptureBinding(HMONITOR monitor, CaptureBinding* bindin
 
                 DXGI_OUTPUT_DESC desc = {};
                 const HRESULT outputDescHr = output->GetDesc(&desc);
-                output->Release();
                 if (SUCCEEDED(outputDescHr) && desc.AttachedToDesktop && desc.Monitor == monitor) {
                     binding->adapterLuid = adapterDesc.AdapterLuid;
                     binding->monitor = desc.Monitor;
@@ -978,10 +1055,24 @@ static BindingStatus FindCaptureBinding(HMONITOR monitor, CaptureBinding* bindin
                         desc.DeviceName, _TRUNCATE);
                     binding->desktopRect = desc.DesktopCoordinates;
                     binding->rotation = desc.Rotation;
+                    IDXGIOutput6* output6 = nullptr;
+                    if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6),
+                            reinterpret_cast<void**>(&output6)))) {
+                        DXGI_OUTPUT_DESC1 desc1 = {};
+                        if (SUCCEEDED(output6->GetDesc1(&desc1))) {
+                            binding->colorSpace = desc1.ColorSpace;
+                            binding->bitsPerColor = desc1.BitsPerColor;
+                            binding->minLuminance = desc1.MinLuminance;
+                            binding->maxLuminance = desc1.MaxLuminance;
+                        }
+                        output6->Release();
+                    }
+                    output->Release();
                     adapter->Release();
                     factory->Release();
                     return BindingStatus::Ready;
                 }
+                output->Release();
             }
         }
         adapter->Release();
@@ -1009,13 +1100,22 @@ static BindingStatus RefreshCaptureBinding() {
     next.region = *region;
     g_binding = next;
     g_bindingDirty = false;
-    Log("Capture binding: output=%ls rect=(%ld,%ld)-(%ld,%ld) region=%u,%u %ux%u rotation=%u",
+    float monitorW = 0.0f, monitorH = 0.0f;
+    if (AutodetectScreenSizeCm(&monitorW, &monitorH, g_binding.deviceName)) {
+        g_autoScreenW = monitorW;
+        g_autoScreenH = monitorH;
+    }
+    Log("Capture binding: output=%ls rect=(%ld,%ld)-(%ld,%ld) region=%u,%u %ux%u rotation=%u color_space=%u bpc=%u luminance=%.3f..%.1f",
         g_binding.deviceName,
         g_binding.desktopRect.left, g_binding.desktopRect.top,
         g_binding.desktopRect.right, g_binding.desktopRect.bottom,
         g_binding.region.left, g_binding.region.top,
         g_binding.region.width, g_binding.region.height,
-        static_cast<unsigned>(g_binding.rotation));
+        static_cast<unsigned>(g_binding.rotation), static_cast<unsigned>(g_binding.colorSpace),
+        g_binding.bitsPerColor, g_binding.minLuminance, g_binding.maxLuminance);
+    if (!g_targetExePath.empty() && (!g_useTargetWindow || !g_targetWindow)) {
+        return BindingStatus::TargetUnavailable;
+    }
     return BindingStatus::Ready;
 }
 
@@ -1064,11 +1164,25 @@ static void PollTargetWindow() {
             bottomRight = { client.right, client.bottom };
             if (ClientToScreen(g_wgcWindow, &topLeft) && ClientToScreen(g_wgcWindow, &bottomRight)) {
                 RECT nextRect = { topLeft.x, topLeft.y, bottomRight.x, bottomRight.y };
-                const bool changed = !EqualRect(&nextRect, &g_targetRect);
+                const LONG oldWidth = g_targetRect.right - g_targetRect.left;
+                const LONG oldHeight = g_targetRect.bottom - g_targetRect.top;
+                const LONG newWidth = nextRect.right - nextRect.left;
+                const LONG newHeight = nextRect.bottom - nextRect.top;
+                const bool sizeChanged = oldWidth != newWidth || oldHeight != newHeight;
+                const bool monitorChanged = MonitorFromWindow(g_wgcWindow, MONITOR_DEFAULTTONULL)
+                    != g_binding.monitor;
+                const bool positionChanged = nextRect.left != g_targetRect.left
+                    || nextRect.top != g_targetRect.top;
                 g_targetWindow = g_wgcWindow;
                 g_targetRect = nextRect;
                 g_useTargetWindow = true;
-                if (changed) g_bindingDirty = true;
+                if (sizeChanged || monitorChanged) {
+                    g_bindingDirty = true;
+                } else if (positionChanged) {
+                    // WGC captures the HWND independently of desktop position;
+                    // moving it only requires repositioning our presentation.
+                    SyncOverlayWindowToBinding();
+                }
                 return;
             }
         }
@@ -1096,6 +1210,7 @@ static float g_cliDepth     = -1.0f;  // -1 = not provided
 static bool  g_running        = true;
 static bool  g_hasFrame       = false;  // true once we have at least one captured frame
 static bool  g_overlayRevealed = false; // alpha stays zero until first successful present
+static bool  g_overlayVisible = false;
 static bool  g_wantScreenshot = false;  // Ctrl+Shift+S: save next rendered frame
 
 static const int  HOTKEY_QUIT       = 1;
@@ -1306,13 +1421,21 @@ static bool NormalizeCapturedFrame(ID3D11Texture2D* source) {
     if (outputWidth <= 0 || outputHeight <= 0) return false;
 
     g_ctx->CopyResource(g_rawCapTex, source);
+    D3D11_TEXTURE2D_DESC sourceDesc = {};
+    source->GetDesc(&sourceDesc);
+    const bool pqOutput = g_binding.colorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+        || g_binding.colorSpace == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020;
+    const bool linearHdr = sourceDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    const bool packedHdr = sourceDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM && pqOutput;
+    const float hdrMode = packedHdr ? 2.0f : (linearHdr ? 1.0f : 0.0f);
     const NormalizeCB constants = {
         static_cast<float>(g_binding.region.left) / outputWidth,
         static_cast<float>(g_binding.region.top) / outputHeight,
         static_cast<float>(g_binding.region.width) / outputWidth,
         static_cast<float>(g_binding.region.height) / outputHeight,
         NormalizeRotationValue(g_binding.rotation),
-        {0.0f, 0.0f, 0.0f},
+        hdrMode,
+        {0.0f, 0.0f},
     };
     g_ctx->UpdateSubresource(g_normalizeCb, 0, nullptr, &constants, 0, 0);
     const D3D11_VIEWPORT captureViewport = {
@@ -1563,6 +1686,54 @@ static void TryAttachShm() {
     (void)newHandle; (void)newView;
 }
 
+static void TryAttachPoseSequence() {
+    if (g_seqView) return;
+    if (!g_seqH) {
+        g_seqH = OpenFileMappingW(FILE_MAP_READ, FALSE, SHM_SEQ);
+        if (g_seqH) Log("SHM: OpenFileMapping(G3D_Seq) succeeded, handle=%p", g_seqH);
+    }
+    if (g_seqH && !g_seqView) {
+        g_seqView = MapViewOfFile(g_seqH, FILE_MAP_READ, 0, 0, sizeof(uint32_t));
+        if (g_seqView) Log("SHM: MapViewOfFile(G3D_Seq) succeeded, view=%p", g_seqView);
+        else Log("SHM: MapViewOfFile(G3D_Seq) FAILED, GLE=%lu", GetLastError());
+    }
+}
+
+static bool ReadStablePose(HeadPose* out) {
+    if (!g_shmView || !out) return false;
+    if (!g_seqView) return ReadStableSnapshot(g_shmView, out);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        uint32_t before = 0, after = 0;
+        memcpy(&before, g_seqView, sizeof(before));
+        if (before & 1u) continue;
+        MemoryBarrier();
+        HeadPose snapshot = {};
+        memcpy(&snapshot, g_shmView, sizeof(snapshot));
+        MemoryBarrier();
+        memcpy(&after, g_seqView, sizeof(after));
+        if (before == after && (after & 1u) == 0) {
+            *out = snapshot;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Optional face-validity channel. Older trackers do not publish it, so the
+// overlay gracefully falls back to pose timestamp freshness when absent.
+static void TryAttachTrackerState() {
+    if (g_stateView) return;
+    if (!g_stateH) {
+        g_stateH = OpenFileMappingW(FILE_MAP_READ, FALSE, SHM_STATE);
+        if (g_stateH) Log("SHM: OpenFileMapping(G3D_State) succeeded, handle=%p", g_stateH);
+    }
+    if (g_stateH && !g_stateView) {
+        g_stateView = MapViewOfFile(g_stateH, FILE_MAP_READ, 0, 0, sizeof(TrackerState));
+        if (g_stateView) Log("SHM: MapViewOfFile(G3D_State) succeeded, view=%p", g_stateView);
+        else Log("SHM: MapViewOfFile(G3D_State) FAILED, GLE=%lu", GetLastError());
+    }
+}
+
 // Try to (re)open the settings shared memory (G3D_Settings). Optional:
 // if the GUI isn't running, we just keep the CLI/autodetect defaults.
 static void TryAttachSettings() {
@@ -1597,7 +1768,8 @@ static void ApplySettings() {
     float dz_cm = 0.5f;   // default 5 mm
 
     if (g_setView) {
-        Settings s; memcpy(&s, g_setView, sizeof(s));
+        Settings s = {};
+        if (!ReadStableSettings(g_setView, &s)) return;
         if (s.strengthX    > 0.0f)    sx = s.strengthX;
         if (s.strengthY    > 0.0f)    sy = s.strengthY;
         if (s.virtualDepthCm >= 0.0f) dp = s.virtualDepthCm;
@@ -1653,8 +1825,10 @@ static void ApplySettings() {
 //      monitors; a small number report 0 or a generic 320x240mm fallback.
 //   2. Fallback: DPI-based estimate — resolution / effective DPI * 2.54.
 //      Less accurate but always returns something plausible.
-static bool AutodetectScreenSizeCm(float* outW, float* outH) {
-    HDC hdc = GetDC(nullptr);
+static bool AutodetectScreenSizeCm(float* outW, float* outH, const wchar_t* deviceName) {
+    HDC hdc = deviceName && *deviceName
+        ? CreateDCW(L"DISPLAY", deviceName, nullptr, nullptr)
+        : GetDC(nullptr);
     if (!hdc) return false;
 
     int wmm = GetDeviceCaps(hdc, HORZSIZE);
@@ -1663,7 +1837,8 @@ static bool AutodetectScreenSizeCm(float* outW, float* outH) {
     int pxH = GetDeviceCaps(hdc, VERTRES);
     int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
     int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(nullptr, hdc);
+    if (deviceName && *deviceName) DeleteDC(hdc);
+    else ReleaseDC(nullptr, hdc);
 
     Log("Autodetect: HORZSIZE=%dmm VERTSIZE=%dmm HORZRES=%d VERTRES=%d DPI=%dx%d",
         wmm, hmm, pxW, pxH, dpiX, dpiY);
@@ -1801,8 +1976,31 @@ static const char* CaptureStateName(CaptureState state) {
 
 static void UpdateOverlayVisibility() {
     if (!g_hwnd) return;
-    const bool visible = g_captureState == CaptureState::Running && g_hasFrame;
+    bool targetForeground = true;
+    if (!g_targetExePath.empty()) {
+        targetForeground = false;
+        const HWND foreground = GetForegroundWindow();
+        DWORD foregroundPid = 0;
+        DWORD selectedPid = g_targetPid;
+        if (foreground) GetWindowThreadProcessId(foreground, &foregroundPid);
+        if (selectedPid == 0 && g_targetWindow) {
+            GetWindowThreadProcessId(g_targetWindow, &selectedPid);
+        }
+        targetForeground = selectedPid != 0 && foregroundPid == selectedPid;
+    }
+
+    const uint64_t nowMs = GetTickCount64();
+    static constexpr uint64_t kCaptureFrameStaleMs = 1000;
+    const bool captureFresh = g_lastCaptureFrameMs != 0
+        && nowMs - g_lastCaptureFrameMs <= kCaptureFrameStaleMs;
+    const bool visible = g_captureState == CaptureState::Running
+        && g_hasFrame
+        && (g_targetExePath.empty() || (targetForeground && captureFresh));
+    if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+    g_overlayVisible = visible;
+    Log("Overlay visibility: %s target_foreground=%d capture_fresh=%d",
+        visible ? "shown" : "hidden", targetForeground ? 1 : 0, captureFresh ? 1 : 0);
 }
 
 static void SetCaptureState(CaptureState state, const char* reason) {
@@ -1814,6 +2012,8 @@ static void SetCaptureState(CaptureState state, const char* reason) {
 
 static void DestroyCaptureResources() {
     g_hasFrame = false;
+    g_lastCaptureFrameMs = 0;
+    g_presentRetryPending = false;
     if (g_depth) { delete g_depth; g_depth = nullptr; }
     ReleaseWgcResources();
     ReleaseCaptureTextures();
@@ -1890,11 +2090,14 @@ static void TickCaptureRebind() {
         const BindingStatus recoveryBinding = RefreshCaptureBinding();
         if (recoveryBinding == BindingStatus::TargetSpansOutput) {
             g_bindingDirty = false;
+            g_rebindRetry.RecordFailure(GetTickCount64());
             SetCaptureState(CaptureState::Unavailable, "target_spans_output");
             return;
         }
-        if (recoveryBinding != BindingStatus::Ready) {
+        if (recoveryBinding != BindingStatus::Ready
+            && recoveryBinding != BindingStatus::TargetUnavailable) {
             g_bindingDirty = false;
+            g_rebindRetry.RecordFailure(GetTickCount64());
             SetCaptureState(CaptureState::Unavailable, "no_matching_output");
             return;
         }
@@ -1906,12 +2109,26 @@ static void TickCaptureRebind() {
             return;
         }
         g_rebindRetry.Reset(GetTickCount64());
+        if (recoveryBinding == BindingStatus::TargetUnavailable) {
+            g_bindingDirty = false;
+            g_rebindRetry.RecordFailure(GetTickCount64());
+            SetCaptureState(CaptureState::Unavailable, "target_not_running");
+            return;
+        }
         SetCaptureState(CaptureState::Rebinding, "device_recreated");
         return;
     }
     if (g_captureState == CaptureState::Unavailable) {
-        if (!g_bindingDirty) return;
-        QueueCaptureSignal(CaptureSignal::BindingDirty, "binding_changed");
+        // Unavailable is a degraded state, not a terminal state. Protected
+        // content, fullscreen transitions, and temporary duplication limits
+        // routinely clear without a display/binding notification.
+        if (g_bindingDirty) {
+            QueueCaptureSignal(CaptureSignal::BindingDirty, "binding_changed");
+        } else if (g_rebindRetry.CanAttempt(GetTickCount64())) {
+            SetCaptureState(CaptureState::Rebinding, "retry_scheduled");
+        } else {
+            return;
+        }
     }
     if (g_captureState != CaptureState::Rebinding
         || !g_rebindRetry.CanAttempt(GetTickCount64())) {
@@ -1921,11 +2138,19 @@ static void TickCaptureRebind() {
     const BindingStatus bindingStatus = RefreshCaptureBinding();
     if (bindingStatus == BindingStatus::TargetSpansOutput) {
         g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "target_spans_output");
+        return;
+    }
+    if (bindingStatus == BindingStatus::TargetUnavailable) {
+        g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
+        SetCaptureState(CaptureState::Unavailable, "target_not_running");
         return;
     }
     if (bindingStatus != BindingStatus::Ready) {
         g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "no_matching_output");
         return;
     }
@@ -1947,9 +2172,17 @@ static void TickCaptureRebind() {
         if (SUCCEEDED(hr)) {
             usingWgc = true;
         } else {
-            LogHR("InitWgcCapture failed; falling back to desktop duplication", hr);
-            ReleaseWgcResources();
-            g_captureBackend = CaptureBackend::DesktopDuplication;
+            LogHR("InitWgcCapture failed; target capture will retry", hr);
+            if (IsDeviceLoss(hr)
+                || (g_dev && IsDeviceLoss(g_dev->GetDeviceRemovedReason()))) {
+                EnterDeviceRecovery("InitWgcCapture", hr, "device_lost");
+                return;
+            }
+            DestroyCaptureResources();
+            g_bindingDirty = false;
+            g_rebindRetry.RecordFailure(GetTickCount64());
+            SetCaptureState(CaptureState::Unavailable, "target_capture_unavailable");
+            return;
         }
     }
     if (!usingWgc) {
@@ -1959,12 +2192,14 @@ static void TickCaptureRebind() {
     if (SUCCEEDED(hr)) {
         InitDepth();
         g_rebindRetry.Reset(GetTickCount64());
-        SetCaptureState(CaptureState::Running, usingWgc ? "bound_wgc" : "bound");
+        const char* boundReason = usingWgc ? "bound_target_wgc" : "bound_desktop";
+        SetCaptureState(CaptureState::Running, boundReason);
     } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
         QueueCaptureSignal(CaptureSignal::RebindRetry, "duplicate_retry");
     } else if (IsUnavailableDuplicationFailure(hr)) {
         DestroyCaptureResources();
         g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "duplicate_unavailable");
     } else if (IsDeviceLoss(hr)
         || (g_dev && IsDeviceLoss(g_dev->GetDeviceRemovedReason()))) {
@@ -2027,6 +2262,58 @@ static bool CaptureIsUniformBlack() {
     return black;
 }
 
+static bool RejectUniformBlackTargetFrame() {
+    if (!g_useTargetWindow || !g_targetWindow) return false;
+
+    DWORD foregroundPid = 0;
+    DWORD targetPid = 0;
+    const HWND foreground = GetForegroundWindow();
+    if (foreground) GetWindowThreadProcessId(foreground, &foregroundPid);
+    GetWindowThreadProcessId(g_targetWindow, &targetPid);
+    if (foregroundPid == 0 || foregroundPid != targetPid) return false;
+    if (!CaptureIsUniformBlack()) {
+        g_blackProbeStreak = 0;
+        return false;
+    }
+
+    ++g_blackProbeStreak;
+    g_hasFrame = false;
+    SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA);
+    g_overlayRevealed = false;
+    UpdateOverlayVisibility();
+    if (g_blackProbeStreak >= 3) {
+        Log("Capture safety: repeated uniform-black game frames; scheduling retry");
+        g_rebindRetry.RecordFailure(GetTickCount64());
+        SetCaptureState(CaptureState::Unavailable, "black_capture");
+    }
+    return true;
+}
+
+static bool RecreateWgcFramePool(UINT width, UINT height) {
+    if (!g_wgcFramePool || !g_wgcDevice || width == 0 || height == 0) return false;
+    g3d::wgc::SizeInt32 size = {
+        static_cast<INT32>(width), static_cast<INT32>(height)
+    };
+    const HRESULT hr = g_wgcFramePool->Recreate(
+        g_wgcDevice,
+        ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+        2, size);
+    if (FAILED(hr)) {
+        LogHR("Direct3D11CaptureFramePool::Recreate", hr);
+        return false;
+    }
+    g_hasFrame = false;
+    g_lastCaptureFrameMs = 0;
+    if (g_depth) { delete g_depth; g_depth = nullptr; }
+    if (!CreateWgcCaptureTextures(width, height)) return false;
+    g_wgcWidth = width;
+    g_wgcHeight = height;
+    InitDepth();
+    Log("WGC frame pool recreated in-place: %ux%u", width, height);
+    UpdateOverlayVisibility();
+    return true;
+}
+
 static void UpdateWgcCapture() {
     if (g_captureState != CaptureState::Running || !g_wgcFramePool) return;
 
@@ -2061,10 +2348,13 @@ static void UpdateWgcCapture() {
         && contentSize.Width > 0 && contentSize.Height > 0
         && (static_cast<UINT>(contentSize.Width) != g_wgcWidth
             || static_cast<UINT>(contentSize.Height) != g_wgcHeight)) {
-        Log("WGC frame resized: %dx%d -> recreating capture", contentSize.Width, contentSize.Height);
+        Log("WGC frame resized: %dx%d -> recreating frame pool", contentSize.Width, contentSize.Height);
         CloseWinRtObject(latestFrame);
         SafeRelease(latestFrame);
-        QueueCaptureSignal(CaptureSignal::BindingDirty, "wgc_resized");
+        if (!RecreateWgcFramePool(static_cast<UINT>(contentSize.Width),
+                                  static_cast<UINT>(contentSize.Height))) {
+            QueueCaptureSignal(CaptureSignal::RebindRetry, "wgc_resize_failed");
+        }
         return;
     }
 
@@ -2087,13 +2377,16 @@ static void UpdateWgcCapture() {
         if (SUCCEEDED(hr) && frameTex && g_capTex) {
             g_ctx->CopyResource(g_capTex, frameTex);
             ++g_acquireOk;
-            g_blackProbeStreak = 0;
-            g_hasFrame = true;
-            UpdateOverlayVisibility();
-            if (g_depth && !g_depth->run(g_capTex)) {
-                static int depthFails = 0;
-                if (++depthFails < 5 || depthFails % 120 == 0) {
-                    Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
+            if (!RejectUniformBlackTargetFrame()) {
+                g_hasFrame = true;
+                g_lastCaptureFrameMs = GetTickCount64();
+                ++g_captureFrameSerial;
+                UpdateOverlayVisibility();
+                if (g_depth && !g_depth->run(g_capTex)) {
+                    static int depthFails = 0;
+                    if (++depthFails < 5 || depthFails % 120 == 0) {
+                        Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
+                    }
                 }
             }
         } else {
@@ -2142,6 +2435,7 @@ static void UpdateCapture() {
         ++g_acquireOther;
         DestroyCaptureResources();
         g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "duplicate_unavailable");
         return;
     }
@@ -2152,10 +2446,14 @@ static void UpdateCapture() {
     }
 
     if (info.ProtectedContentMaskedOut) {
-        Log("Capture blocked: ProtectedContentMaskedOut=TRUE; hiding overlay");
-        g_hasFrame = false;
-        SetCaptureState(CaptureState::Unavailable, "protected_content");
-        return;
+        // This means *some pixels* were replaced, not that the duplication
+        // object or the whole frame is unusable. WDA_EXCLUDEFROMCAPTURE can
+        // itself trigger the flag on otherwise valid desktops. Keep the frame;
+        // the uniform-black probe below remains the whole-frame safety gate.
+        static uint64_t protectedFrames = 0;
+        if (++protectedFrames <= 3 || protectedFrames % 600 == 0) {
+            Log("Capture notice: ProtectedContentMaskedOut=TRUE; accepting usable frame");
+        }
     }
 
     ++g_acquireOk;
@@ -2164,24 +2462,11 @@ static void UpdateCapture() {
         return;
     }
 
-    if (g_useTargetWindow && GetForegroundWindow() == g_targetWindow) {
-        if (CaptureIsUniformBlack()) {
-            ++g_blackProbeStreak;
-            g_hasFrame = false;
-            SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA);
-            g_overlayRevealed = false;
-            UpdateOverlayVisibility();
-            if (g_blackProbeStreak >= 3) {
-                Log("Capture safety: repeated uniform-black game frames; hiding overlay");
-                SetCaptureState(CaptureState::Unavailable, "black_capture");
-            }
-            return;
-        } else {
-            g_blackProbeStreak = 0;
-        }
-    }
+    if (RejectUniformBlackTargetFrame()) return;
 
     g_hasFrame = true;
+    g_lastCaptureFrameMs = GetTickCount64();
+    ++g_captureFrameSerial;
     UpdateOverlayVisibility();
     if (g_depth && !g_depth->run(g_capTex)) {
         static int depthFails = 0;
@@ -2192,12 +2477,18 @@ static void UpdateCapture() {
 }
 
 static DWORD CaptureIdleWaitMs() {
-    if (g_captureState == CaptureState::Running) return 0;
+    if (g_captureState == CaptureState::Running) {
+        // WGC TryGetNextFrame is non-blocking. A short message-aware wait avoids
+        // spinning at hundreds of iterations/s when neither capture nor tracker
+        // produced a sample. Desktop Duplication already blocks up to 16 ms.
+        return 4;
+    }
 
     const uint64_t nowMs = GetTickCount64();
     uint64_t deadlineMs = g_nextTargetPollMs;
     if (g_captureState == CaptureState::Rebinding
-        || g_captureState == CaptureState::DeviceRecovery) {
+        || g_captureState == CaptureState::DeviceRecovery
+        || g_captureState == CaptureState::Unavailable) {
         const uint64_t retryMs = g_rebindRetry.next_attempt_ms();
         if (deadlineMs == 0 || retryMs < deadlineMs) deadlineMs = retryMs;
     }
@@ -2235,6 +2526,8 @@ static void DestroyDeviceResources() {
         g_ctx->Flush();
     }
     DestroyRendererResources();
+    g_frameLatencyWaitable = nullptr;
+    g_flipModelSwap = false;
     SafeRelease(g_swap);
     SafeRelease(g_ctx);
     SafeRelease(g_dev);
@@ -2331,7 +2624,7 @@ static HRESULT CreateDeviceAndRenderer() {
     }
 
     DXGI_SWAP_CHAIN_DESC scd = {};
-    scd.BufferCount = 1;
+    scd.BufferCount = 2;
     scd.BufferDesc.Width = clientWidth;
     scd.BufferDesc.Height = clientHeight;
     scd.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -2339,16 +2632,40 @@ static HRESULT CreateDeviceAndRenderer() {
     scd.OutputWindow = g_hwnd;
     scd.SampleDesc.Count = 1;
     scd.Windowed = TRUE;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
     D3D_FEATURE_LEVEL featureLevel = {};
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
         selectedAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
         &scd, &g_swap, &g_dev, &featureLevel, &g_ctx);
+    LogHR("D3D11CreateDeviceAndSwapChain(flip waitable)", hr);
+    g_flipModelSwap = SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        SafeRelease(g_swap); SafeRelease(g_ctx); SafeRelease(g_dev);
+        scd.BufferCount = 1;
+        scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        scd.Flags = 0;
+        hr = D3D11CreateDeviceAndSwapChain(
+            selectedAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+            &scd, &g_swap, &g_dev, &featureLevel, &g_ctx);
+        LogHR("D3D11CreateDeviceAndSwapChain(legacy fallback)", hr);
+        g_flipModelSwap = false;
+    }
     selectedAdapter->Release();
-    LogHR("D3D11CreateDeviceAndSwapChain(selected adapter)", hr);
     if (FAILED(hr)) return hr;
+
+    IDXGISwapChain2* swap2 = nullptr;
+    if (SUCCEEDED(g_swap->QueryInterface(__uuidof(IDXGISwapChain2),
+                                         reinterpret_cast<void**>(&swap2)))) {
+        if (SUCCEEDED(swap2->SetMaximumFrameLatency(1))) {
+            g_frameLatencyWaitable = swap2->GetFrameLatencyWaitableObject();
+        }
+        swap2->Release();
+    }
+    Log("Swap pacing: flip=%d waitable=%p", g_flipModelSwap ? 1 : 0, g_frameLatencyWaitable);
 
     // Keep the transparent desktop overlay from queuing multiple full-resolution
     // frames ahead of the game.  The default DXGI latency is three frames, which
@@ -2376,7 +2693,8 @@ static HRESULT ResizeSwapChain(UINT width, UINT height) {
     g_ctx->ClearState();
     g_ctx->Flush();
     SafeRelease(g_rtv);
-    HRESULT hr = g_swap->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    const UINT flags = g_flipModelSwap ? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT : 0;
+    HRESULT hr = g_swap->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, flags);
     if (FAILED(hr)) return hr;
     return CreateRenderTargetAndViewport(width, height);
 }
@@ -2423,9 +2741,13 @@ static bool Init(HINSTANCE hInst) {
 
     // Shared memory: try once now, retry each frame if tracker / GUI isn't up yet.
     TryAttachShm();
+    TryAttachPoseSequence();
+    TryAttachTrackerState();
     TryAttachSettings();
-    Log("SHM initial attach: pose=%s settings=%s",
+    Log("SHM initial attach: pose=%s pose_seq=%s state=%s settings=%s",
         g_shmView ? "ATTACHED" : "(tracker not running?)",
+        g_seqView ? "ATTACHED" : "(legacy snapshot fallback)",
+        g_stateView ? "ATTACHED" : "(legacy tracker fallback)",
         g_setView ? "ATTACHED" : "(settings GUI not running — OK)");
 
     WNDCLASSEXW wc = { sizeof(wc) };
@@ -2451,6 +2773,8 @@ static bool Init(HINSTANCE hInst) {
         overlayH = (int)(g_targetRect.bottom - g_targetRect.top);
         Log("Target window active: configured game overlay=(%d,%d) %dx%d",
             overlayX, overlayY, overlayW, overlayH);
+    } else if (!g_targetExePath.empty()) {
+        Log("Target window not available yet: renderer will remain hidden and wait");
     } else {
         Log("Target window inactive: using full primary desktop capture");
     }
@@ -2459,7 +2783,7 @@ static bool Init(HINSTANCE hInst) {
     // click-through across processes. HTTRANSPARENT only works same-thread.
     // Set styles AFTER CreateWindowExW too — more reliable across Windows versions.
     g_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"G3DOverlay", L"Glassless3D Overlay",
         WS_POPUP, overlayX, overlayY, overlayW, overlayH, nullptr, nullptr, hInst, nullptr);
 
@@ -2472,8 +2796,9 @@ static bool Init(HINSTANCE hInst) {
     // captured. This is the formula used by Discord/OBS/MSI Afterburner overlays.
     LONG exStyle = GetWindowLongW(g_hwnd, GWL_EXSTYLE);
     Log("Pre-style: exStyle=0x%08lX", exStyle);
-    SetWindowLongW(g_hwnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT);
-    Log("Post-style: exStyle=0x%08lX (LAYERED|TRANSPARENT applied)",
+    SetWindowLongW(g_hwnd, GWL_EXSTYLE,
+        exStyle | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+    Log("Post-style: exStyle=0x%08lX (LAYERED|TRANSPARENT|NOACTIVATE|TOOLWINDOW applied)",
         GetWindowLongW(g_hwnd, GWL_EXSTYLE));
 
     // Start fully transparent. The window is revealed only after the first
@@ -2485,8 +2810,9 @@ static bool Init(HINSTANCE hInst) {
     BOOL wda = SetWindowDisplayAffinity(g_hwnd, WDA_EXCLUDEFROMCAPTURE);
     Log("SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE): ok=%d GLE=%lu", wda ? 1 : 0, wda ? 0 : GetLastError());
 
-    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    Log("ShowWindow called");
+    ShowWindow(g_hwnd, SW_HIDE);
+    g_overlayVisible = false;
+    Log("Overlay window created hidden until a fresh target frame is ready");
 
     // Global hotkey: Ctrl+Shift+G to quit (works even when game has focus)
     BOOL hk = RegisterHotKey(g_hwnd, HOTKEY_QUIT, MOD_CONTROL | MOD_SHIFT, 'G');
@@ -2509,6 +2835,7 @@ static bool Init(HINSTANCE hInst) {
     const BindingStatus initialBinding = RefreshCaptureBinding();
     if (initialBinding == BindingStatus::NoOutput) {
         g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "no_matching_output");
         return true;
     }
@@ -2522,7 +2849,13 @@ static bool Init(HINSTANCE hInst) {
     }
     g_rebindRetry.Reset(GetTickCount64());
     if (initialBinding == BindingStatus::TargetSpansOutput) {
+        g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
         SetCaptureState(CaptureState::Unavailable, "target_spans_output");
+    } else if (initialBinding == BindingStatus::TargetUnavailable) {
+        g_bindingDirty = false;
+        g_rebindRetry.RecordFailure(GetTickCount64());
+        SetCaptureState(CaptureState::Unavailable, "target_not_running");
     } else {
         SetCaptureState(CaptureState::Rebinding, "startup");
     }
@@ -2530,16 +2863,21 @@ static bool Init(HINSTANCE hInst) {
 }
 
 static void Frame() {
+    ScopedCpuTimer frameCpuTimer(&g_lastFrameCpuMs);
     static int frameCount = 0;
     static uint32_t lastShmTs = 0;
     static bool seenPose = false;
     static DWORD lastPoseChangeMs = 0;
     static int shmReads = 0, shmChanges = 0;
+    static float filteredHx = 0.0f, filteredHy = 0.0f, filteredHz = 60.0f;
+    static DWORD lastFilteredWallMs = 0;
     frameCount++;
     ResolveGpuTiming();
 
     // Lazy (re)connect to both shared-memory channels — either side may start late
     TryAttachShm();
+    TryAttachPoseSequence();
+    TryAttachTrackerState();
     TryAttachSettings();
     ApplySettings();   // CLI > GUI > autodetect → publishes to g_screenW, g_strength, etc.
 
@@ -2560,11 +2898,14 @@ static void Frame() {
     uint32_t ts = 0;
     DWORD nowMs = GetTickCount();
     bool poseFresh = false;
+    bool newPoseSample = false;
     if (g_shmView) {
-        HeadPose p; memcpy(&p, g_shmView, sizeof(p));
+        HeadPose p;
+        if (!ReadStablePose(&p)) return;
         hx = p.x; hy = p.y; hz = p.z; ts = p.ts;
         shmReads++;
         if (!seenPose || ts != lastShmTs) {
+            newPoseSample = true;
             shmChanges++;
             lastShmTs = ts;
             lastPoseChangeMs = nowMs;
@@ -2573,25 +2914,48 @@ static void Frame() {
         poseFresh = seenPose && (nowMs - lastPoseChangeMs <= kPoseStaleMs);
     }
 
+    uint32_t trackerStateTs = 0;
+    uint32_t trackerState = 1; // legacy tracker fallback: pose freshness is validity
+    bool trackerStateFresh = true;
+    if (g_stateView) {
+        TrackerState stateSnapshot;
+        if (!ReadStableSnapshot(g_stateView, &stateSnapshot)) return;
+        trackerState = stateSnapshot.state;
+        trackerStateTs = stateSnapshot.ts;
+        trackerStateFresh = (nowMs - trackerStateTs) <= kPoseStaleMs;
+        poseFresh = poseFresh && trackerStateFresh && trackerState == 1;
+    }
+
     // One-Euro pre-filter on raw head pose (cm). The tracker already runs a
     // Kalman stage, but residual sub-cm jitter is multiplied by the parallax
     // shift magnitude and appears as visible "watery" ripple during motion.
     // One-Euro lets us kill that still-held jitter hard without adding lag
     // when the user actually moves (cutoff adapts with estimated velocity).
+    if (poseFresh && newPoseSample) {
+        // Use the producer timestamp and update each filter exactly once per
+        // camera sample. Re-filtering a 10-30 Hz sample at 240 Hz makes the
+        // response refresh-rate dependent and collapses motion toward rest.
+        double t_sec = (double)ts / 1000.0;
+        filteredHx = OneEuroFilter(g_oeX, hx, t_sec);
+        filteredHy = OneEuroFilter(g_oeY, hy, t_sec);
+        filteredHz = OneEuroFilter(g_oeZ, hz, t_sec);
+        lastFilteredWallMs = nowMs;
+    }
     if (poseFresh) {
-        double t_sec = (double)nowMs / 1000.0;
-        hx = OneEuroFilter(g_oeX, hx, t_sec);
-        hy = OneEuroFilter(g_oeY, hy, t_sec);
-        hz = OneEuroFilter(g_oeZ, hz, t_sec);
+        hx = filteredHx;
+        hy = filteredHy;
+        hz = filteredHz;
 
         // Forward-prediction by the measured motion-to-photon latency. The
         // filter gives us a low-noise velocity estimate (`dx_prev`) — use it
         // to extrapolate where the head will be when the current frame lights
         // up on the panel.  Clamped so that rapid direction reversals cannot
         // over-shoot and create a counter-phase wobble.
-        hx += ClampAbs(OneEuroPredictedVelocity(g_oeX) * kPredictHorizonSec, kPredictMaxDeltaCm);
-        hy += ClampAbs(OneEuroPredictedVelocity(g_oeY) * kPredictHorizonSec, kPredictMaxDeltaCm);
-        hz += ClampAbs(OneEuroPredictedVelocity(g_oeZ) * kPredictHorizonSec, kPredictMaxDeltaCm);
+        const float sampleAgeSec = std::min(0.050f, (nowMs - lastFilteredWallMs) / 1000.0f);
+        const float predictSec = kPredictHorizonSec + sampleAgeSec;
+        hx += ClampAbs(OneEuroPredictedVelocity(g_oeX) * predictSec, kPredictMaxDeltaCm);
+        hy += ClampAbs(OneEuroPredictedVelocity(g_oeY) * predictSec, kPredictMaxDeltaCm);
+        hz += ClampAbs(OneEuroPredictedVelocity(g_oeZ) * predictSec, kPredictMaxDeltaCm);
     }
 
     // Drift correction: the camera is rarely perfectly centered on the user,
@@ -2612,7 +2976,7 @@ static void Frame() {
     static int   g_emaFrames = 0;
     static bool  g_emaInit = false;
 
-    if (poseFresh) {
+    if (poseFresh && newPoseSample) {
         if (!g_emaInit) {
             g_emaX = hx; g_emaY = hy;
             g_emaInit = true;
@@ -2624,6 +2988,11 @@ static void Frame() {
 
         if (g_emaFrames == 300)
             Log("DriftEMA calibrated: restX=%.2f restY=%.2f (will now use relative head position)", g_emaX, g_emaY);
+    } else if (g_stateView && (!trackerStateFresh || trackerState != 1)) {
+        // Face loss is an explicit neutral/recenter boundary. Do not retain a
+        // stale rest position and create a jump when the viewer returns.
+        g_emaInit = false;
+        g_emaFrames = 0;
     }
 
     // Relative displacement from rest — what the shader actually uses.
@@ -2649,8 +3018,12 @@ static void Frame() {
         hx += wobble;
     }
 
-    TickCaptureRebind();
-    UpdateCapture();
+    {
+        ScopedCpuTimer captureCpuTimer(&g_lastCaptureCpuMs);
+        TickCaptureRebind();
+        UpdateCapture();
+    }
+    UpdateOverlayVisibility();
 
     // Periodic summary based on wall time. Capture recovery can intentionally
     // throttle the loop, so frame counts are not a reliable one-second clock.
@@ -2677,12 +3050,13 @@ static void Frame() {
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
         else                            shmStatus = "LIVE";
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
-            "depth[total=%llu %dHz mode=%s] gpu_ms=%.3f backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
+            "depth[total=%llu %dHz mode=%s] timing[capture_cpu=%.3f draw_gpu=%.3f present_cpu=%.3f frame_cpu=%.3f] backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
             "head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f "
             "hasFrame=%d capture=%s capture_reason=%s",
             frameCount, g_acquireOk, g_acquireTimeout, g_acquireLost, g_acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
-            (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode), g_lastGpuMs, g_displayBackend,
+            (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode),
+            g_lastCaptureCpuMs, g_lastGpuMs, g_lastPresentCpuMs, g_lastFrameCpuMs, g_displayBackend,
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx - wobble, hy, hz, g_emaX, g_emaY, dx - wobble, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
@@ -2694,6 +3068,37 @@ static void Frame() {
             Log("Frame#%d: no captured frame yet, skipping render", frameCount);
         return;
     }
+    if (!g_overlayVisible) return;
+
+    // Event-driven rendering for WGC: draw immediately for new game/tracker
+    // samples, and at up to 120 Hz while prediction or a depth crossfade is
+    // visibly changing. A stationary unchanged frame is not redrawn at the
+    // monitor's full refresh rate.
+    static uint64_t lastRenderedCaptureSerial = 0;
+    static uint32_t lastRenderedPoseTs = 0;
+    static uint32_t lastRenderedStateTs = 0;
+    static bool lastRenderedPoseFresh = false;
+    static DWORD lastRenderMs = 0;
+    const float vx = OneEuroPredictedVelocity(g_oeX);
+    const float vy = OneEuroPredictedVelocity(g_oeY);
+    const bool motionActive = poseFresh && (std::fabs(vx) + std::fabs(vy) > 0.05f);
+    const bool blendActive = g_depth && g_depth->depth_blend() < 0.999f;
+    const bool newActivity = g_captureFrameSerial != lastRenderedCaptureSerial
+        || ts != lastRenderedPoseTs
+        || trackerStateTs != lastRenderedStateTs
+        || poseFresh != lastRenderedPoseFresh
+        || g_presentRetryPending
+        || g_wantScreenshot;
+    const bool animationDue = (motionActive || blendActive) && (nowMs - lastRenderMs >= 8);
+    if (g_captureBackend == CaptureBackend::WindowsGraphicsCapture
+        && !newActivity && !animationDue) {
+        return;
+    }
+    lastRenderedCaptureSerial = g_captureFrameSerial;
+    lastRenderedPoseTs = ts;
+    lastRenderedStateTs = trackerStateTs;
+    lastRenderedPoseFresh = poseFresh;
+    lastRenderMs = nowMs;
 
     // Update constant buffer — use relative (dx, dy) so the parallax is zero
     // at the user's rest position and only responds to head movement.
@@ -2718,11 +3123,6 @@ static void Frame() {
     };
     memcpy(mapped.pData, &cb, sizeof(cb));
     g_ctx->Unmap(g_cb, 0);
-
-    // Advance depth blend counter once per render frame.
-    // This moves blend_t from 0→1 over kBlendFrames frames after each new
-    // inference, hiding the 10 Hz update rate at render rate.
-    if (g_depth) g_depth->advance_blend();
 
     // Draw fullscreen quad
     g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
@@ -2843,11 +3243,28 @@ static void Frame() {
         }
     }
 
-    // Synchronize with DWM/display presentation. Present(0, 0) allowed this
-    // 5120x1440 overlay to render hundreds of frames per second and starve the
-    // game sharing the adapter.
-    const HRESULT present_hr = g_swap->Present(1, 0);
+    // The frame-latency waitable object paces the flip-model path. Never let
+    // Present block the capture/render thread: when DWM is not ready, retain a
+    // retry request and drop this presentation attempt instead of making the
+    // game appear frozen behind a stale full-screen overlay.
+    const auto presentStarted = std::chrono::steady_clock::now();
+    const UINT syncInterval = g_flipModelSwap ? 0u : 1u;
+    const UINT presentFlags = g_flipModelSwap ? DXGI_PRESENT_DO_NOT_WAIT : 0u;
+    const HRESULT present_hr = g_swap->Present(syncInterval, presentFlags);
+    g_lastPresentCpuMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - presentStarted).count();
+    if (present_hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        static uint64_t droppedPresents = 0;
+        ++droppedPresents;
+        g_presentRetryPending = true;
+        if (droppedPresents <= 3 || droppedPresents % 120 == 0) {
+            Log("Present skipped without blocking (queue busy), total=%llu",
+                static_cast<unsigned long long>(droppedPresents));
+        }
+        return;
+    }
     if (!HandleDeviceResult("Present", present_hr)) return;
+    g_presentRetryPending = false;
     if (!g_overlayRevealed && g_hasFrame) {
         const BOOL revealed = SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
         Log("First frame presented; reveal overlay: ok=%d GLE=%lu",
@@ -2863,15 +3280,30 @@ static void Cleanup() {
     UnregisterHotKey(g_hwnd, HOTKEY_SCREENSHOT);
     if (g_shmView) UnmapViewOfFile((void*)g_shmView);
     if (g_shmH)    CloseHandle(g_shmH);
+    if (g_seqView) UnmapViewOfFile((void*)g_seqView);
+    if (g_seqH)    CloseHandle(g_seqH);
+    if (g_stateView) UnmapViewOfFile((void*)g_stateView);
+    if (g_stateH)    CloseHandle(g_stateH);
     if (g_setView) UnmapViewOfFile((void*)g_setView);
     if (g_setH)    CloseHandle(g_setH);
     DestroyDeviceResources();
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
+    // Acquire singleton ownership before opening/truncating overlay.log. A stale
+    // instance must not let a rejected replacement corrupt the active log or
+    // display a focus-stealing modal over the game.
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Global\\Glassless3DOverlay");
+    const DWORD mutexError = GetLastError();
+    if (mutex && mutexError == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        return 2;
+    }
+
     LogInit();
     Log("=== Glassless3D Overlay starting ===");
     Log("cmdline: '%s'", cmd ? cmd : "");
+    Log("CreateMutex: handle=%p GLE=%lu", mutex, mutexError);
     EnablePerMonitorV2DpiAwareness();
 
     int wideArgc = 0;
@@ -2880,32 +3312,24 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
         for (int i = 1; i + 1 < wideArgc; ++i) {
             if (wcscmp(wideArgv[i], L"--target-exe") == 0) {
                 g_targetExePath = wideArgv[++i];
+            } else if (wcscmp(wideArgv[i], L"--target-pid") == 0) {
+                wchar_t* end = nullptr;
+                const unsigned long parsed = wcstoul(wideArgv[++i], &end, 10);
+                if (end && *end == L'\0' && parsed > 0) {
+                    g_targetPid = static_cast<DWORD>(parsed);
+                }
             }
         }
         LocalFree(wideArgv);
     }
     if (!g_targetExePath.empty()) {
-        Log("Configured target executable: %ls", g_targetExePath.c_str());
+        Log("Configured target executable: %ls pid=%lu",
+            g_targetExePath.c_str(), static_cast<unsigned long>(g_targetPid));
     }
 
     // WIC (used for Ctrl+Shift+S PNG screenshots) requires COM on this thread.
     HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     Log("CoInitializeEx -> HRESULT=0x%08X", (unsigned)hrCo);
-
-    // Single-instance guard — DuplicateOutput allows only one holder per output
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Global\\Glassless3DOverlay");
-    DWORD gle = GetLastError();
-    Log("CreateMutex: handle=%p GLE=%lu (%s)", mutex, gle,
-        gle == ERROR_ALREADY_EXISTS ? "ALREADY_EXISTS" : "new owner");
-    if (gle == ERROR_ALREADY_EXISTS) {
-        Log("Exiting: another overlay instance is already running");
-        MessageBoxW(nullptr,
-            L"Glassless3D Overlay is already running.\n\nCheck the system tray.",
-            L"Already Running", MB_OK | MB_ICONINFORMATION);
-        if (mutex) CloseHandle(mutex);
-        LogClose();
-        return 0;
-    }
 
     // Args: width_cm  height_cm  strength  virtual_depth_cm
     // 0 or negative = leave default / trigger autodetect / allow GUI override.
@@ -2920,7 +3344,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
 
     if (!Init(hInst)) {
         Log("Init FAILED, cleaning up and exiting");
-        Cleanup(); if (mutex) CloseHandle(mutex); LogClose(); return 1;
+        Cleanup();
+        if (mutex) CloseHandle(mutex);
+        if (SUCCEEDED(hrCo)) CoUninitialize();
+        LogClose();
+        return 1;
     }
     Log("Init complete, entering message loop");
 
@@ -2931,6 +3359,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (msg.message == WM_QUIT) { Log("Main loop: WM_QUIT"); g_running = false; }
+        }
+        if (g_frameLatencyWaitable && g_captureState == CaptureState::Running) {
+            MsgWaitForMultipleObjectsEx(1, &g_frameLatencyWaitable, 16,
+                QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
         Frame();
         const DWORD idleWaitMs = CaptureIdleWaitMs();

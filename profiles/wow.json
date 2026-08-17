@@ -1,6 +1,6 @@
 {
   "name": "World of Warcraft",
-  "notes": "WoW (Dragonflight / TWW) on DirectX 11. Reversed depth buffer. Verified on patch 11.x.",
+  "notes": "Online title: ReShade/add-on injection is prohibited. This profile is retained only for non-injecting capture compatibility.",
   "reshade": {
     "RESHADE_DEPTH_INPUT_IS_REVERSED": 1,
     "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC": 0,
@@ -10,15 +10,5 @@
   "shader_defaults": {
     "ConvergenceDist": 0.45,
     "EffectStrength": 0.28
-  },
-  "setup": {
-    "executable": "Wow.exe",
-    "registry_key": "HKLM\\SOFTWARE\\WOW6432Node\\Blizzard Entertainment\\World of Warcraft",
-    "registry_value": "InstallPath",
-    "common_paths": [
-      "C:\\Program Files (x86)\\World of Warcraft\\_retail_",
-      "D:\\World of Warcraft\\_retail_",
-      "E:\\World of Warcraft\\_retail_"
-    ]
   }
 }

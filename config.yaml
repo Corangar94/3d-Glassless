@@ -1,18 +1,27 @@
 camera:
-  index: 0          # webcam device index (0 = default camera)
-  width: 1280
+  fps: 0
   height: 720
-  fps: 0            # 0 = no explicit cap; OpenCV will use camera default
-
+  index: 0
+  width: 1280
+overlay:
+  depth_curve: 2
+  depth_gamma: 2.0
+  depth_performance_mode: balanced
+  focus_radius: 0.1
+  screen_h_cm: 0.0
+  screen_w_cm: 0.0
+  strength_x: 1.0
+  strength_y: 0.4
+  virtual_depth_cm: 30.0
 screen:
-  width_cm: 59.8    # physical screen width in centimetres (27" = 59.8cm)
-  height_cm: 33.6   # physical screen height in centimetres
-
-tracking:
-  ipd_cm: 6.3       # inter-pupillary distance in cm (average adult = 6.3)
-  smoothing_q: 0.01 # Kalman process noise (lower = smoother, more lag)
-  smoothing_r: 0.1  # Kalman measurement noise (lower = trusts camera more)
-  hold_ms: 500      # ms to hold last known position when face lost
-
+  height_cm: 33.6
+  width_cm: 119.3
 shared_memory:
-  name: "G3D"       # Windows Named Shared Memory key
+  name: G3D
+tracking:
+  auto_tune: true
+  camera_tilt_deg: -17.92
+  hold_ms: 500
+  ipd_cm: 6.3
+  smoothing_q: 0.01
+  smoothing_r: 0.1

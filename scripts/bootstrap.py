@@ -13,6 +13,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -26,8 +28,18 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # -- Download helpers ----------------------------------------------------------
 
-def _download(url: str, dest: str, label: str) -> None:
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download(url: str, dest: str, label: str, *, sha256: str | None = None) -> None:
     if os.path.exists(dest):
+        if sha256 and _sha256(dest).lower() != sha256.lower():
+            raise RuntimeError(f"SHA-256 mismatch for existing {os.path.relpath(dest, _ROOT)}")
         print(f"  already present: {os.path.relpath(dest, _ROOT)}")
         return
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -35,6 +47,9 @@ def _download(url: str, dest: str, label: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
+    if sha256 and _sha256(dest).lower() != sha256.lower():
+        os.remove(dest)
+        raise RuntimeError(f"SHA-256 mismatch for downloaded {label}")
     print(f" {os.path.getsize(dest) // 1024} KB")
 
 
@@ -58,8 +73,15 @@ def step_face_model() -> bool:
 
 # -- Experimental ReShade DLL -------------------------------------------------
 
-RESHADE_URL = "https://reshade.me/downloads/ReShade_Setup_5.9.2_Addon.exe"
-RESHADE_INSTALLER = os.path.join(_ROOT, "vendor", "_ReShade_Setup_5.9.2.exe")
+RESHADE_VERSION = "6.7.3"
+RESHADE_URL = f"https://reshade.me/downloads/ReShade_Setup_{RESHADE_VERSION}_Addon.exe"
+RESHADE_INSTALLER = os.path.join(_ROOT, "vendor", f"_ReShade_Setup_{RESHADE_VERSION}_Addon.exe")
+# Published from reshade.me and checked against its documented signing
+# certificate thumbprint 589690208A5E52FB96980C4A6698F50ACD47C49F.
+RESHADE_INSTALLER_SHA256 = "c78db69bd127e98054bd496fb422655f4a1cc664e28f8d12ce9835b2647bc571"
+RESHADE32_SHA256 = "b0a0fa7472d9a153816edcf7606902eb9c8f262e6100fc9973ec495634dca2c2"
+RESHADE64_SHA256 = "ec9245d05c11751f2ac0d2256e6921ad8fb36be9172ef6d587856591eb729a25"
+RESHADE32_DLL = os.path.join(_ROOT, "ReShade32.dll")
 RESHADE_DLL = os.path.join(_ROOT, "ReShade64.dll")
 
 _7ZIP_CANDIDATES = [
@@ -78,9 +100,11 @@ def _find_7zip() -> str | None:
 
 
 def step_reshade_dll() -> bool:
-    print("\n[experimental] ReShade64.dll")
-    if os.path.isfile(RESHADE_DLL):
-        print(f"  already present: ReShade64.dll  ({os.path.getsize(RESHADE_DLL)//1024} KB)")
+    print("\n[experimental] verified ReShade32.dll + ReShade64.dll")
+    if (os.path.isfile(RESHADE32_DLL) and os.path.isfile(RESHADE_DLL) and
+            _sha256(RESHADE32_DLL) == RESHADE32_SHA256 and
+            _sha256(RESHADE_DLL) == RESHADE64_SHA256):
+        print("  already present and verified: ReShade32.dll + ReShade64.dll")
         return True
 
     seven_zip = _find_7zip()
@@ -90,47 +114,53 @@ def step_reshade_dll() -> bool:
         return False
 
     try:
-        _download(RESHADE_URL, RESHADE_INSTALLER, "ReShade installer (~3 MB)")
+        _download(
+            RESHADE_URL, RESHADE_INSTALLER, "ReShade installer (~3 MB)",
+            sha256=RESHADE_INSTALLER_SHA256,
+        )
     except Exception as e:
         print(f"  FAIL  download: {e}")
         return False
 
-    print("  extracting ReShade64.dll via 7-Zip...", end="", flush=True)
+    print("  extracting architecture-specific DLLs via 7-Zip...", end="", flush=True)
     result = subprocess.run(
-        [seven_zip, "e", RESHADE_INSTALLER, "ReShade64.dll", f"-o{_ROOT}", "-y"],
+        [seven_zip, "e", RESHADE_INSTALLER, "ReShade32.dll", "ReShade64.dll", f"-o{_ROOT}", "-y"],
         capture_output=True, text=True,
     )
-    # Clean up the installer regardless of outcome
-    if os.path.isfile(RESHADE_INSTALLER):
-        os.remove(RESHADE_INSTALLER)
-
-    if result.returncode != 0 or not os.path.isfile(RESHADE_DLL):
+    if result.returncode != 0 or not os.path.isfile(RESHADE32_DLL) or not os.path.isfile(RESHADE_DLL):
         print(f" FAILED")
         print(result.stderr[-500:])
         return False
 
-    print(f"  {os.path.getsize(RESHADE_DLL)//1024} KB")
-    print("  OK  ReShade64.dll")
+    if _sha256(RESHADE32_DLL) != RESHADE32_SHA256 or _sha256(RESHADE_DLL) != RESHADE64_SHA256:
+        print(" FAILED: extracted DLL hash mismatch")
+        return False
+    print(" OK")
     return True
 
 
 # -- Experimental ReShade SDK headers (for addon build) ----------------------
 
-RESHADE_VERSION = "5.9.2"
 SDK_ZIP_URL = (
     f"https://github.com/crosire/reshade/archive/refs/tags/v{RESHADE_VERSION}.zip"
 )
+SDK_ZIP_SHA256 = "0a771b62095d145028944e3944a6dedaa8a58cc9f91aee48b61679910987f9d1"
+SDK_HEADER_SHA256 = "dcb22f29ca7d7b2e4a9ea2f19cf98ce2911141659e525d3417f5ffada75899c8"
 SDK_ZIP = os.path.join(_ROOT, "vendor", "_reshade_src.zip")
 SDK_INCLUDE = os.path.join(_ROOT, "vendor", "reshade", "include")
 
 
 def step_reshade_sdk() -> bool:
     print("\n[experimental] ReShade SDK headers")
-    if os.path.isdir(SDK_INCLUDE) and os.listdir(SDK_INCLUDE):
-        print(f"  already present: vendor/reshade/include/")
+    main_header = os.path.join(SDK_INCLUDE, "reshade.hpp")
+    if os.path.isfile(main_header) and _sha256(main_header) == SDK_HEADER_SHA256:
+        print("  already present and version-verified: vendor/reshade/include/")
         return True
     try:
-        _download(SDK_ZIP_URL, SDK_ZIP, f"ReShade {RESHADE_VERSION} source (~5 MB)")
+        _download(
+            SDK_ZIP_URL, SDK_ZIP, f"ReShade {RESHADE_VERSION} source (~2 MB)",
+            sha256=SDK_ZIP_SHA256,
+        )
     except Exception as e:
         print(f"  FAIL  download: {e}")
         return False
@@ -151,6 +181,9 @@ def step_reshade_sdk() -> bool:
             with zf.open(member) as src, open(dest, "wb") as dst:
                 shutil.copyfileobj(src, dst)
     os.remove(SDK_ZIP)
+    if not os.path.isfile(main_header) or _sha256(main_header) != SDK_HEADER_SHA256:
+        print(" FAILED: extracted SDK header hash mismatch")
+        return False
     print(f" {len(os.listdir(SDK_INCLUDE))} files")
     print("  OK  vendor/reshade/include/")
     return True
@@ -270,7 +303,7 @@ def step_depth_model() -> bool:
 
 # -- Experimental ReShade addon ----------------------------------------------
 
-ADDON_OUT = os.path.join(_ROOT, "Glassless3D.addon")
+ADDON_OUT = os.path.join(_ROOT, "Glassless3D.addon64")
 ADDON_SRC = os.path.join(_ROOT, "addon")
 OVERLAY_OUT = os.path.join(_ROOT, "Glassless3DOverlay.exe")
 OVERLAY_SRC = os.path.join(_ROOT, "overlay")
@@ -283,11 +316,22 @@ _MINGW_URL = (
     "14.2.0posix-18.1.8-12.0.0-msvcrt-r1/"
     "winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64msvcrt-12.0.0-r1.7z"
 )
+_MINGW32_DIR = os.path.join(_ROOT, "vendor", "_mingw32")
+_MINGW32_ZIP = os.path.join(_ROOT, "vendor", "_mingw32.zip")
+_MINGW32_URL = (
+    "https://downloads.sourceforge.net/project/winlibs-mingw/"
+    "14.2.0posix-19.1.1-12.0.0-msvcrt-r2/"
+    "winlibs-i686-posix-dwarf-gcc-14.2.0-mingw-w64msvcrt-12.0.0-r2.zip"
+)
+_MINGW32_SHA256 = "430cb1d3a7e0c45683fc46b16275a92b98ba7f4eec975bb7846e1da83b2aa21e"
 
 
 def _find_cmake() -> str | None:
     if shutil.which("cmake"):
         return "cmake"
+    bundled = os.path.join(_MINGW_DIR, "mingw64", "bin", "cmake.exe")
+    if os.path.isfile(bundled):
+        return bundled
     try:
         import cmake as _cmake_pkg  # type: ignore[import-untyped]
         pkg_file = _cmake_pkg.__file__ or ""
@@ -351,11 +395,70 @@ def _find_gcc() -> str | None:
     return None
 
 
-def step_build_addon() -> bool:
-    print("\n[experimental] Glassless3D.addon (C++ ReShade addon)")
+def _find_gcc32() -> str | None:
+    compiler = os.path.join(_MINGW32_DIR, "mingw32", "bin", "g++.exe")
+    if os.path.isfile(compiler):
+        return compiler
+    try:
+        _download(_MINGW32_URL, _MINGW32_ZIP, "32-bit MinGW-w64 (~235 MB)", sha256=_MINGW32_SHA256)
+        root = os.path.realpath(_MINGW32_DIR)
+        with zipfile.ZipFile(_MINGW32_ZIP) as archive:
+            for member in archive.infolist():
+                destination = os.path.realpath(os.path.join(root, member.filename))
+                if os.path.commonpath((root, destination)) != root:
+                    raise RuntimeError(f"unsafe toolchain archive member: {member.filename}")
+            archive.extractall(root)
+    except Exception as exc:
+        print(f"  FAIL  32-bit MinGW setup: {exc}")
+        return None
+    return compiler if os.path.isfile(compiler) else None
 
-    if os.path.isfile(ADDON_OUT):
-        print(f"  already present: Glassless3D.addon  ({os.path.getsize(ADDON_OUT)//1024} KB)")
+
+def _build_addon_arch(cmake: str, compiler: str, arch: str) -> bool:
+    env = os.environ.copy()
+    env["PATH"] = os.path.dirname(compiler) + os.pathsep + env.get("PATH", "")
+    build_dir = os.path.join(ADDON_SRC, "build_mingw32" if arch == "x86" else "build_mingw")
+    output_name = "Glassless3D.addon32" if arch == "x86" else "Glassless3D.addon64"
+    cfg = subprocess.run(
+        [
+            cmake, "-G", "MinGW Makefiles", ADDON_SRC, "-B", build_dir,
+            f"-DRESHADE_INCLUDE={SDK_INCLUDE}", "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_CXX_COMPILER={compiler}",
+        ],
+        capture_output=True, text=True, env=env,
+    )
+    if cfg.returncode != 0:
+        print(f" FAILED ({arch} configure)\n{cfg.stderr[-800:]}")
+        return False
+    bld = subprocess.run(
+        [cmake, "--build", build_dir, "--config", "Release"],
+        capture_output=True, text=True, env=env,
+    )
+    if bld.returncode != 0:
+        print(f" FAILED ({arch} build)\n{bld.stderr[-800:]}")
+        return False
+    built = os.path.join(build_dir, output_name)
+    if not os.path.isfile(built):
+        print(f" FAILED: {output_name} not found")
+        return False
+    shutil.copy2(built, os.path.join(_ROOT, output_name))
+    return True
+
+
+def step_build_addon() -> bool:
+    print("\n[experimental] architecture-complete Glassless3D ReShade addons")
+
+    addon32 = os.path.join(_ROOT, "Glassless3D.addon32")
+    manifest_path = os.path.join(_ROOT, "reshade-assets.json")
+    manifest_current = False
+    try:
+        with open(manifest_path, encoding="utf-8") as stream:
+            manifest_current = json.load(stream).get("reshade_version") == RESHADE_VERSION
+    except (OSError, ValueError):
+        pass
+    if os.path.isfile(ADDON_OUT) and os.path.isfile(addon32) and manifest_current:
+        print("  already present: Glassless3D.addon32 + Glassless3D.addon64")
+        _write_reshade_asset_manifest()
         return True
 
     if not os.path.isdir(SDK_INCLUDE) or not os.listdir(SDK_INCLUDE):
@@ -367,66 +470,33 @@ def step_build_addon() -> bool:
         print("  FAIL  cmake not found.  Run:  pip install cmake")
         return False
 
-    # Detect compiler: prefer MSVC, fall back to portable MinGW
-    env = os.environ.copy()
-    extra: list[str] = []
-    use_msvc = False
-
-    vswhere = _find_vswhere()
-    if vswhere:
-        r = subprocess.run(
-            [vswhere, "-latest", "-property", "installationPath"],
-            capture_output=True, text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            extra = ["-G", "Visual Studio 17 2022", "-A", "x64"]
-            use_msvc = True
-            print(f"  Using MSVC: {r.stdout.strip()}")
-
-    if not use_msvc:
-        gpp = _find_gcc()
-        if not gpp:
-            return False
-        mingw_bin = os.path.dirname(gpp)
-        env["PATH"] = mingw_bin + os.pathsep + env.get("PATH", "")
-        extra = ["-G", "MinGW Makefiles"]
-        print(f"  Using MinGW GCC: {gpp}")
-
-    build_dir = os.path.join(ADDON_SRC, "build_mingw" if not use_msvc else "build")
-    os.makedirs(build_dir, exist_ok=True)
-
-    print("  configuring...", end="", flush=True)
-    cfg = subprocess.run(
-        [cmake, ADDON_SRC, "-B", build_dir,
-         f"-DRESHADE_INCLUDE={SDK_INCLUDE}",
-         "-DCMAKE_BUILD_TYPE=Release"] + extra,
-        capture_output=True, text=True, env=env,
-    )
-    if cfg.returncode != 0:
-        print(f" FAILED")
-        print(cfg.stderr[-800:])
+    gcc64 = _find_gcc()
+    gcc32 = _find_gcc32()
+    if not gcc64 or not gcc32:
         return False
-
-    print(" building...", end="", flush=True)
-    bld = subprocess.run(
-        [cmake, "--build", build_dir, "--config", "Release"],
-        capture_output=True, text=True, env=env,
-    )
-    if bld.returncode != 0:
-        print(f" FAILED")
-        print(bld.stderr[-800:])
+    print("  building x64 + x86...", end="", flush=True)
+    if not _build_addon_arch(cmake, gcc64, "x64"):
         return False
+    if not _build_addon_arch(cmake, gcc32, "x86"):
+        return False
+    _write_reshade_asset_manifest()
+    print(" OK")
+    return True
 
-    for root, _, files in os.walk(build_dir):
-        for fname in files:
-            if fname == "Glassless3D.addon":
-                shutil.copy2(os.path.join(root, fname), ADDON_OUT)
-                print(f"  {os.path.getsize(ADDON_OUT)//1024} KB")
-                print("  OK  Glassless3D.addon")
-                return True
 
-    print(" FAILED: built but Glassless3D.addon not found in build dir")
-    return False
+def _write_reshade_asset_manifest() -> None:
+    assets: dict[str, dict[str, str]] = {}
+    for name, arch in (
+        ("ReShade32.dll", "x86"), ("ReShade64.dll", "x64"),
+        ("Glassless3D.addon32", "x86"), ("Glassless3D.addon64", "x64"),
+    ):
+        path = os.path.join(_ROOT, name)
+        if os.path.isfile(path):
+            assets[name] = {"arch": arch, "sha256": _sha256(path)}
+    path = os.path.join(_ROOT, "reshade-assets.json")
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        json.dump({"reshade_version": RESHADE_VERSION, "assets": assets}, stream, indent=2)
+        stream.write("\n")
 
 
 # -- Step 7: Build overlay exe ------------------------------------------------

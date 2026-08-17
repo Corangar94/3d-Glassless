@@ -9,7 +9,7 @@ from tracker.display_backends import (
 )
 
 
-def test_builtin_backends_include_primary_overlay_and_future_targets():
+def test_builtin_backends_include_primary_overlay_and_experimental_targets():
     backends = built_in_backends()
     ids = [backend.id for backend in backends]
 

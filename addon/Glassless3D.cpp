@@ -7,11 +7,16 @@
 // The tracker (tracker/main.py or OpenTrack) must be running to provide data.
 // When it is not, uniforms default to (0, 0, 60) — a neutral no-op.
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <cstring>
 #include <cstdint>
+#include <cmath>
 
 #include <reshade.hpp>
 
@@ -34,6 +39,9 @@ static constexpr float           kDefaultZ = 60.0f;
 
 static HANDLE s_hMap  = NULL;
 static LPVOID s_pView = NULL;
+static uint32_t s_lastDataId = 0;
+static DWORD s_lastChangeMs = 0;
+static bool s_registered = false;
 
 // Open the shared memory mapping lazily (tracker may start after the game).
 static bool TryOpenSharedMemory()
@@ -55,8 +63,26 @@ static void CloseSharedMemory()
 static FTData ReadHeadData()
 {
     FTData d = {0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, kDefaultZ};
-    if (TryOpenSharedMemory() && s_pView)
-        std::memcpy(&d, s_pView, sizeof(FTData));
+    if (!TryOpenSharedMemory() || !s_pView)
+        return d;
+
+    FTData first{}, second{};
+    std::memcpy(&first, s_pView, sizeof(FTData));
+    std::memcpy(&second, s_pView, sizeof(FTData));
+    if (first.DataID != second.DataID)
+        return d;
+
+    const DWORD now = GetTickCount();
+    if (second.DataID != s_lastDataId)
+    {
+        s_lastDataId = second.DataID;
+        s_lastChangeMs = now;
+    }
+    if (second.DataID == 0 || s_lastChangeMs == 0 || now - s_lastChangeMs > 500 ||
+        !std::isfinite(second.X) || !std::isfinite(second.Y) || !std::isfinite(second.Z) ||
+        second.Z < 10.0f || second.Z > 300.0f)
+        return d;
+    d = second;
     return d;
 }
 
@@ -81,15 +107,24 @@ static void on_begin_effects(
 }
 
 // ── DLL entry point ───────────────────────────────────────────────────────
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID)
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(module);
+        if (!reshade::register_addon(module))
+            return FALSE;
+        s_registered = true;
         reshade::register_event<reshade::addon_event::reshade_begin_effects>(&on_begin_effects);
         break;
     case DLL_PROCESS_DETACH:
-        reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(&on_begin_effects);
+        if (s_registered)
+        {
+            reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(&on_begin_effects);
+            reshade::unregister_addon(module);
+            s_registered = false;
+        }
         CloseSharedMemory();
         break;
     }

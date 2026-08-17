@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "glassless3d"
+version = "0.1.0"
+description = "Windows head-tracked glasses-free 3D desktop overlay"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "mediapipe==0.10.33",
+  "numpy>=1.26.4,<3.0",
+  "opencv-python>=4.9",
+  "PySide6>=6.6",
+  "pyyaml==6.0.1",
+  "wmi>=1.5; platform_system == 'Windows'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pyinstaller>=6.11,<7",
+  "pyright>=1.1.400",
+  "pytest==8.1.1",
+  "pytest-qt>=4.4",
+]
+
+[project.scripts]
+glassless3d = "launcher.app:main"
+glassless3d-tracker = "tracker.main:main"
+glassless3d-diagnostics = "launcher.diagnostics:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["launcher", "tracker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

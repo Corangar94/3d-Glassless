@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea
 
 from launcher import diagnostics
 from launcher.mainwindow import MainWindow
+from launcher.window_discovery import RunningGameWindow
 
 CONFIG = {
     "camera": {"index": 0},
@@ -221,6 +223,51 @@ def test_mainwindow_persists_active_profile_executable_path(qapp, tmp_path):
     with open(cfg_path, encoding="utf-8") as config_file:
         saved = yaml.safe_load(config_file)
     assert saved["game_profiles"]["default"]["executable_path"] == "C:/Games/Story/Story.exe"
+
+
+def test_running_game_picker_selects_exact_live_process(window, tmp_path):
+    game_exe = tmp_path / "ExampleGame.exe"
+    game_exe.write_bytes(b"MZ")
+    candidate = RunningGameWindow(
+        title="Example Game",
+        executable_path=str(game_exe),
+        pid=4242,
+        hwnd=123,
+        window_class="ExampleWindow",
+    )
+
+    with patch(
+        "launcher.mainwindow.discover_running_game_windows",
+        return_value=[candidate],
+    ):
+        window._refresh_running_games()
+    window._on_running_game_selected(1)
+
+    assert window._active_profile.executable_path == str(game_exe)
+    assert window._selected_running_target == candidate
+    assert window._overlay_target_kwargs() == {"target_pid": 4242}
+    assert "PID 4242" in window._profile_target_label.text()
+
+
+def test_selected_live_process_pid_is_passed_when_overlay_starts(window, tmp_path):
+    game_exe = tmp_path / "ExampleGame.exe"
+    game_exe.write_bytes(b"MZ")
+    candidate = RunningGameWindow(
+        title="Example Game",
+        executable_path=str(game_exe),
+        pid=7878,
+        hwnd=456,
+    )
+    window._profile_executable_edit.setText(str(game_exe))
+    window._selected_running_target = candidate
+    window._on_profile_controls_changed()
+    window._thread = MagicMock()
+    window._overlay = MagicMock()
+    window.showMinimized = MagicMock()
+
+    window._on_tracker_status_for_overlay("tracking")
+
+    window._overlay.start.assert_called_once_with(str(game_exe), target_pid=7878)
 
 
 def test_mainwindow_can_add_a_distinct_game_profile(qapp, tmp_path):
@@ -445,6 +492,7 @@ def test_runtime_health_updates_from_overlay_summary(window):
         has_frame=True,
     )
 
+    window._overlay_started = True
     window._apply_runtime_health(summary)
 
     assert "LIVE 7/s" in window._shm_tile.text()
@@ -501,6 +549,10 @@ def test_runtime_health_warns_without_overriding_depth_preset(qapp, tmp_path):
     fake_thread = MagicMock()
     fake_thread.isRunning.return_value = True
     win._thread = fake_thread
+    win._overlay_started = True
+    win._overlay = MagicMock()
+    win._overlay.is_transitioning.return_value = False
+    win._overlay.is_running.return_value = True
 
     win._apply_runtime_health(summary)
     win._apply_runtime_health(summary)
@@ -532,11 +584,12 @@ def test_runtime_health_restarts_overlay_when_process_exited(window):
     window._overlay_started = True
     window._overlay = MagicMock()
     window._overlay.is_running.return_value = False
+    window._active_profile = MagicMock(executable_path=r"C:\Games\Title\Title.exe")
 
     window._apply_runtime_health(summary)
 
-    window._overlay.start.assert_called_once()
-    assert "Restarted" in window._overlay_tile.text()
+    window._overlay.restart_async.assert_called_once_with(r"C:\Games\Title\Title.exe")
+    assert "Restarting" in window._overlay_tile.text()
 
 
 def test_runtime_health_restarts_overlay_after_repeated_capture_loss(window):
@@ -559,14 +612,14 @@ def test_runtime_health_restarts_overlay_after_repeated_capture_loss(window):
     window._overlay_started = True
     window._overlay = MagicMock()
     window._overlay.is_running.return_value = True
+    window._active_profile = MagicMock(executable_path=r"C:\Games\Title\Title.exe")
 
     window._apply_runtime_health(summary)
     window._apply_runtime_health(summary)
     window._apply_runtime_health(summary)
 
-    window._overlay.stop.assert_called_once()
-    window._overlay.start.assert_called_once()
-    assert "Restarted" in window._overlay_tile.text()
+    window._overlay.restart_async.assert_called_once_with(r"C:\Games\Title\Title.exe")
+    assert "Restarting" in window._overlay_tile.text()
 
 
 def test_runtime_health_does_not_restart_an_intentionally_unavailable_capture(window):
@@ -601,6 +654,60 @@ def test_runtime_health_does_not_restart_an_intentionally_unavailable_capture(wi
     assert "Unavailable" in window._capture_tile.text()
 
 
+def test_runtime_health_does_not_claim_target_during_desktop_fallback(window, tmp_path):
+    target = tmp_path / "game.exe"
+    target.write_bytes(b"MZ")
+    window._overlay_started = True
+    window._active_profile = MagicMock(executable_path=str(target))
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=0,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=8,
+        head_z_cm=58.5,
+        has_frame=True,
+        capture_state="running",
+        capture_reason="desktop_fallback",
+    )
+
+    window._apply_runtime_health(summary)
+
+    assert window._profile_target_label.text() == (
+        "Waiting for game window: game.exe (desktop preview active)"
+    )
+
+
+def test_runtime_health_claims_target_only_for_explicit_target_binding(window, tmp_path):
+    target = tmp_path / "game.exe"
+    target.write_bytes(b"MZ")
+    window._overlay_started = True
+    window._active_profile = MagicMock(executable_path=str(target))
+    summary = diagnostics.OverlayRuntimeSummary(
+        frame_count=120,
+        acq_ok=118,
+        acq_timeout=2,
+        acq_lost=0,
+        acq_other=0,
+        shm_status="LIVE",
+        shm_changes_per_sec=7,
+        depth_total=28,
+        depth_hz=8,
+        head_z_cm=58.5,
+        has_frame=True,
+        capture_state="running",
+        capture_reason="bound_target_wgc",
+    )
+
+    window._apply_runtime_health(summary)
+
+    assert window._profile_target_label.text() == "Captured: game.exe"
+
+
 def test_low_depth_runtime_health_does_not_apply_safe_preset(qapp, tmp_path):
     cfg_path = str(tmp_path / "config.yaml")
     summary = diagnostics.OverlayRuntimeSummary(
@@ -621,6 +728,10 @@ def test_low_depth_runtime_health_does_not_apply_safe_preset(qapp, tmp_path):
     fake_thread = MagicMock()
     fake_thread.isRunning.return_value = True
     win._thread = fake_thread
+    win._overlay_started = True
+    win._overlay = MagicMock()
+    win._overlay.is_transitioning.return_value = False
+    win._overlay.is_running.return_value = True
     with patch.object(win, "_apply_comfort_preset") as apply:
         win._apply_runtime_health(summary)
         win._apply_runtime_health(summary)
@@ -658,7 +769,10 @@ def test_startup_runtime_health_does_not_auto_persist_safe_from_old_log(qapp, tm
     with open(cfg_path, encoding="utf-8") as f:
         saved = yaml.safe_load(f)
     assert saved["overlay"]["head_dist_cm"] == pytest.approx(81.0)
-    assert "keeping current preset" in win._comfort_status.text()
+    assert win._shm_tile.text() == "SHM\nIdle"
+    assert win._depth_tile.text() == "Depth\nIdle"
+    assert win._capture_tile.text() == "Capture\nIdle"
+    assert "Captured:" not in win._profile_target_label.text()
 
 
 def test_mainwindow_xyz_labels_update_on_signal(window):
@@ -719,8 +833,11 @@ def test_tracker_error_stops_overlay_and_restores_auto_hidden_window(window):
     window._on_status("error")
 
     fake_thread.stop.assert_called_once()
-    window._overlay.stop.assert_called_once()
+    window._overlay.stop_async.assert_called_once()
     window.showNormal.assert_called_once()
+    assert window._thread is fake_thread
+    assert window._tracker_stop_pending
+    window._on_tracker_stopped(fake_thread)
     assert window._thread is None
     assert window._hidden_for_overlay is False
     assert "START TRACKING" in window._action_btn.text()
@@ -932,6 +1049,7 @@ def test_stop_tracking_restores_window_after_overlay_auto_hide(window):
     fake_thread = MagicMock()
     window._thread = fake_thread
     window._overlay = MagicMock()
+    window._overlay_started = True
     window._hidden_for_overlay = True
     window.showNormal = MagicMock()
 
@@ -939,6 +1057,10 @@ def test_stop_tracking_restores_window_after_overlay_auto_hide(window):
 
     window.showNormal.assert_called_once()
     assert window._hidden_for_overlay is False
+    assert window._overlay_started is False
+    assert window._shm_tile.text() == "SHM\nIdle"
+    assert window._depth_tile.text() == "Depth\nIdle"
+    assert window._capture_tile.text() == "Capture\nIdle"
 
 
 def test_open_debug_monitor_starts_diagnostics_module(qapp, tmp_path):
@@ -1016,9 +1138,12 @@ def test_close_event_terminates_running_debug_monitor(qapp, tmp_path):
 
     with patch("launcher.mainwindow.TrackerProcess"):
         win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._overlay = MagicMock()
         win._debug_monitor_proc = fake_proc
         win.closeEvent(fake_event)
 
+    win._overlay.stop.assert_called_once()
+    win._overlay.stop_async.assert_not_called()
     fake_proc.terminate.assert_called_once()
     fake_event.accept.assert_called_once()
 
@@ -1064,6 +1189,8 @@ def test_measure_head_persists_overlay_head_distance(qapp, tmp_path):
     ):
         win = MainWindow(config=CONFIG, config_path=cfg_path)
         win._on_measure_head()
+        while not win._measure_btn.isEnabled():
+            QTest.qWait(10)
 
     with open(cfg_path) as f:
         saved = yaml.safe_load(f)
@@ -1082,7 +1209,24 @@ def test_measure_head_failure_does_not_persist_fallback(qapp, tmp_path):
     ):
         win = MainWindow(config=CONFIG, config_path=cfg_path)
         win._on_measure_head()
+        while not win._measure_btn.isEnabled():
+            QTest.qWait(10)
 
     with open(cfg_path) as f:
         saved = yaml.safe_load(f)
     assert saved["overlay"]["head_dist_cm"] == pytest.approx(81.0)
+
+
+def test_measure_head_reuses_live_tracker_distance_without_opening_camera(qapp, tmp_path):
+    cfg_path = str(tmp_path / "config.yaml")
+    with (
+        patch("launcher.mainwindow.TrackerProcess"),
+        patch("launcher.mainwindow.measure_head_distance_or_none") as camera_measure,
+    ):
+        win = MainWindow(config=CONFIG, config_path=cfg_path)
+        win._tracking_status = "tracking"
+        win._live_tracking_distances.extend([69.0, 70.0, 71.0, 72.0, 100.0])
+        win._on_measure_head()
+
+    camera_measure.assert_not_called()
+    assert win._head_dist_spin.value() == pytest.approx(71.0)

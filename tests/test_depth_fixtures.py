@@ -75,6 +75,76 @@ def test_main_benchmarks_all_fixtures(tmp_path, capsys):
     assert "quality=GOOD" in output
 
 
+def test_main_fails_when_fixture_quality_is_below_expected(tmp_path, capsys):
+    fixture_dir = tmp_path / "warn_fixture"
+    fixture_dir.mkdir(parents=True)
+    np.save(fixture_dir / "frame_0000.npy", np.zeros((2, 2), dtype=np.float32))
+    np.save(fixture_dir / "frame_0001.npy", np.full((2, 2), 0.02, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "fixtures": [
+                    {
+                        "name": "warn_fixture",
+                        "directory": "warn_fixture",
+                        "kind": "captured",
+                        "source": "overlay depth debug",
+                        "description": "warn quality fixture",
+                        "frame_count": 2,
+                        "width": 2,
+                        "height": 2,
+                        "expected_quality": "GOOD",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = depth_fixtures.main(["--root", str(tmp_path), "--benchmark-all"])
+
+    assert code == 1
+    output = capsys.readouterr().out
+    assert "quality=WARN" in output
+    assert "expected=GOOD" in output
+
+
+def test_main_benchmarks_named_fixture_checks_expected_quality(tmp_path, capsys):
+    fixture_dir = tmp_path / "warn_fixture"
+    fixture_dir.mkdir(parents=True)
+    np.save(fixture_dir / "frame_0000.npy", np.zeros((2, 2), dtype=np.float32))
+    np.save(fixture_dir / "frame_0001.npy", np.full((2, 2), 0.02, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "fixtures": [
+                    {
+                        "name": "warn_fixture",
+                        "directory": "warn_fixture",
+                        "kind": "captured",
+                        "source": "overlay depth debug",
+                        "description": "warn quality fixture",
+                        "frame_count": 2,
+                        "width": 2,
+                        "height": 2,
+                        "expected_quality": "GOOD",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = depth_fixtures.main(["--root", str(tmp_path), "--benchmark", "warn_fixture"])
+
+    assert code == 1
+    output = capsys.readouterr().out
+    assert "quality=WARN" in output
+    assert "expected=GOOD" in output
+
+
 def test_default_fixture_manifest_includes_smoke_sequence():
     fixtures = depth_fixtures.load_fixture_manifest()
 

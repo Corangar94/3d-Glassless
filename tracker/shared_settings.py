@@ -1,7 +1,7 @@
 # tracker/shared_settings.py
-"""Shared-memory channel for live overlay tuning (v4, 64 bytes).
+"""Shared-memory channel for live overlay tuning (v5, 88 bytes).
 
-Layout (64 bytes, little-endian):
+Layout (88 bytes, little-endian):
     float   strength_x
     float   strength_y
     float   virtual_depth_cm
@@ -18,6 +18,12 @@ Layout (64 bytes, little-endian):
     uint32  display_backend    (0=desktop, 1=stereo, 2=quilt)
     uint32  depth_mode         (0=quality, 1=balanced, 2=fast)
     uint32  version            (monotonic counter)
+    uint32  stereo_layout      (0=full_sbs, 1=half_sbs)
+    uint32  eye_order          (0=left_right, 1=right_left)
+    uint32  panel_width_px
+    uint32  panel_height_px
+    float   focus_plane_cm
+    uint32  tracking_mode      (0=glassless3d_managed, 1=vendor_managed)
 """
 from __future__ import annotations
 
@@ -25,8 +31,10 @@ import ctypes
 import struct
 from dataclasses import dataclass
 
-STRUCT_FORMAT = "<fffffIfffffffIII"
-STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 64
+STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
+STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
+VERSION_INDEX = 15
+VERSION_OFFSET = struct.calcsize("<fffffIfffffffII")
 SHM_NAME = "G3D_Settings"
 
 _PAGE_READWRITE   = 0x04
@@ -59,6 +67,12 @@ class OverlaySettings:
     deadzone_mm: float = 5.0
     display_backend: int = 0
     depth_mode: int = 1
+    stereo_layout: int = 0
+    eye_order: int = 0
+    panel_width_px: int = 0
+    panel_height_px: int = 0
+    focus_plane_cm: float = 0.0
+    tracking_mode: int = 0
 
 
 class SharedSettingsWriter:
@@ -90,7 +104,15 @@ class SharedSettingsWriter:
         view = self._view
         if view is None:
             raise RuntimeError("write() called after close()")
-        self._version = (self._version + 1) & 0xFFFF_FFFF
+        # Seqlock: odd means a write is in progress; the final packed snapshot
+        # carries the following even version.
+        writing_version = (self._version + 1) | 1
+        ctypes.memmove(
+            view + VERSION_OFFSET,
+            struct.pack("<I", writing_version & 0xFFFF_FFFF),
+            4,
+        )
+        self._version = (writing_version + 1) & 0xFFFF_FFFE
         data = struct.pack(
             STRUCT_FORMAT,
             float(s.strength_x), float(s.strength_y),
@@ -104,6 +126,12 @@ class SharedSettingsWriter:
             int(s.display_backend),
             int(s.depth_mode),
             self._version,
+            int(s.stereo_layout),
+            int(s.eye_order),
+            int(s.panel_width_px),
+            int(s.panel_height_px),
+            float(s.focus_plane_cm),
+            int(s.tracking_mode),
         )
         ctypes.memmove(view, data, STRUCT_SIZE)
 
@@ -153,7 +181,19 @@ class SharedSettingsReader:
             return None
         try:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
-            f = struct.unpack(STRUCT_FORMAT, bytes(raw))
+            f = None
+            for _ in range(4):
+                first = bytes(raw)
+                first_version = struct.unpack_from("<I", first, VERSION_OFFSET)[0]
+                if first_version & 1:
+                    continue
+                second = bytes(raw)
+                second_version = struct.unpack_from("<I", second, VERSION_OFFSET)[0]
+                if first_version == second_version and not (second_version & 1):
+                    f = struct.unpack(STRUCT_FORMAT, second)
+                    break
+            if f is None:
+                return None
         except OSError:
             self._view = None  # stale view; force re-attach next call
             return None
@@ -168,6 +208,12 @@ class SharedSettingsReader:
             deadzone_mm=f[12],
             display_backend=f[13],
             depth_mode=f[14],
+            stereo_layout=f[16],
+            eye_order=f[17],
+            panel_width_px=f[18],
+            panel_height_px=f[19],
+            focus_plane_cm=f[20],
+            tracking_mode=f[21],
         )
 
     def close(self) -> None:

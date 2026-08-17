@@ -1,10 +1,29 @@
 # tracker/shared_memory.py
 import ctypes
+from enum import IntEnum
 import struct
 import time
 
 STRUCT_FORMAT = "<fffI"   # little-endian: float x, float y, float z, uint32 timestamp
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 16
+STATE_STRUCT_FORMAT = "<II"  # state code, monotonic timestamp_ms
+STATE_STRUCT_SIZE = struct.calcsize(STATE_STRUCT_FORMAT)
+SEQ_STRUCT_SIZE = 4
+
+
+class TrackingState(IntEnum):
+    """Face-presence state published separately from the legacy pose block."""
+
+    PAUSED = 0
+    TRACKING = 1
+    HOLD = 2
+
+
+_STATE_NAMES = {
+    TrackingState.PAUSED: "paused",
+    TrackingState.TRACKING: "tracking",
+    TrackingState.HOLD: "hold",
+}
 
 _PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
@@ -29,6 +48,8 @@ class SharedMemoryWriter:
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None
+        self._seq_handle: int | None = None
+        self._seq_view: int | None = None
         self._handle = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STRUCT_SIZE, name,
         )
@@ -42,6 +63,16 @@ class SharedMemoryWriter:
             _k32.CloseHandle(self._handle)
             self._handle = None
             raise ctypes.WinError(err)
+        self._seq_handle = _k32.CreateFileMappingW(
+            _INVALID_HANDLE, None, _PAGE_READWRITE, 0, SEQ_STRUCT_SIZE,
+            f"{name}_Seq",
+        )
+        if self._seq_handle:
+            self._seq_view = _k32.MapViewOfFile(
+                self._seq_handle, _FILE_MAP_ALL_ACCESS, 0, 0, SEQ_STRUCT_SIZE,
+            )
+        if self._seq_view:
+            ctypes.c_long.from_address(self._seq_view).value = 0
         self.write(x=0.0, y=0.0, z=60.0)
 
     def write(self, x: float, y: float, z: float) -> None:
@@ -51,7 +82,12 @@ class SharedMemoryWriter:
             raise RuntimeError("write() called after close()")
         ts = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
         data = struct.pack(STRUCT_FORMAT, x, y, z, ts)
+        seq_word = ctypes.c_uint32.from_address(self._seq_view) if self._seq_view else None
+        if seq_word is not None:
+            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF  # odd
         ctypes.memmove(view, data, STRUCT_SIZE)
+        if seq_word is not None:
+            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF  # even
 
     def close(self) -> None:
         """Release the shared memory mapping and handle."""
@@ -61,6 +97,12 @@ class SharedMemoryWriter:
         if self._handle is not None:
             _k32.CloseHandle(self._handle)
             self._handle = None
+        if self._seq_view is not None:
+            _k32.UnmapViewOfFile(self._seq_view)
+            self._seq_view = None
+        if self._seq_handle is not None:
+            _k32.CloseHandle(self._seq_handle)
+            self._seq_handle = None
 
     def __enter__(self) -> "SharedMemoryWriter":
         return self
@@ -80,6 +122,8 @@ class SharedMemoryReader:
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None
+        self._seq_handle: int | None = None
+        self._seq_view: int | None = None
         self._try_attach()
 
     def _try_attach(self) -> None:
@@ -95,6 +139,15 @@ class SharedMemoryReader:
         if self._view is None:
             _k32.CloseHandle(self._handle)
             self._handle = None
+            return
+        if self._seq_handle is None:
+            self._seq_handle = _k32.OpenFileMappingW(
+                _FILE_MAP_READ, False, f"{self._name}_Seq"
+            )
+        if self._seq_handle and self._seq_view is None:
+            self._seq_view = _k32.MapViewOfFile(
+                self._seq_handle, _FILE_MAP_READ, 0, 0, SEQ_STRUCT_SIZE,
+            )
 
     def read(self) -> tuple[float, float, float, int] | None:
         """Return (x_cm, y_cm, z_cm, timestamp_ms) or None if segment absent."""
@@ -103,7 +156,29 @@ class SharedMemoryReader:
             return None
         try:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
-            x, y, z, ts = struct.unpack(STRUCT_FORMAT, bytes(raw))
+            snapshot = None
+            if self._seq_view:
+                seq_word = ctypes.c_uint32.from_address(self._seq_view)
+                for _ in range(8):
+                    seq1 = seq_word.value
+                    if seq1 & 1:
+                        continue
+                    candidate = bytes(raw)
+                    seq2 = seq_word.value
+                    if seq1 == seq2 and not (seq2 & 1):
+                        snapshot = candidate
+                        break
+            else:
+                # Backward-compatible best effort for legacy writers.
+                for _ in range(4):
+                    first = bytes(raw)
+                    second = bytes(raw)
+                    if first == second:
+                        snapshot = second
+                        break
+            if snapshot is None:
+                return None
+            x, y, z, ts = struct.unpack(STRUCT_FORMAT, snapshot)
         except OSError:
             _k32.UnmapViewOfFile(self._view)
             self._view = None
@@ -119,8 +194,124 @@ class SharedMemoryReader:
         if self._handle is not None:
             _k32.CloseHandle(self._handle)
             self._handle = None
+        if self._seq_view is not None:
+            _k32.UnmapViewOfFile(self._seq_view)
+            self._seq_view = None
+        if self._seq_handle is not None:
+            _k32.CloseHandle(self._seq_handle)
+            self._seq_handle = None
 
     def __enter__(self) -> "SharedMemoryReader":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class TrackingStateWriter:
+    """Publish face validity without changing the legacy ``G3D`` ABI."""
+
+    def __init__(self, name: str = "G3D_State") -> None:
+        self._handle: int | None = _k32.CreateFileMappingW(
+            _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STATE_STRUCT_SIZE, name,
+        )
+        if not self._handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._view: int | None = _k32.MapViewOfFile(
+            self._handle, _FILE_MAP_ALL_ACCESS, 0, 0, STATE_STRUCT_SIZE,
+        )
+        if not self._view:
+            err = ctypes.get_last_error()
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+            raise ctypes.WinError(err)
+        self.write("paused")
+
+    def write(self, state: str | TrackingState) -> None:
+        if self._view is None:
+            raise RuntimeError("write() called after close()")
+        if isinstance(state, str):
+            try:
+                code = TrackingState[state.strip().upper()]
+            except KeyError as exc:
+                raise ValueError(f"unknown tracking state: {state!r}") from exc
+        else:
+            code = TrackingState(state)
+        ts = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
+        ctypes.memmove(
+            self._view,
+            struct.pack(STATE_STRUCT_FORMAT, int(code), ts),
+            STATE_STRUCT_SIZE,
+        )
+
+    def close(self) -> None:
+        if self._view is not None:
+            _k32.UnmapViewOfFile(self._view)
+            self._view = None
+        if self._handle is not None:
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "TrackingStateWriter":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+class TrackingStateReader:
+    """Read face validity from ``G3D_State``; attach lazily."""
+
+    def __init__(self, name: str = "G3D_State") -> None:
+        self._name = name
+        self._handle: int | None = None
+        self._view: int | None = None
+        self._try_attach()
+
+    def _try_attach(self) -> None:
+        if self._view is not None:
+            return
+        self._handle = _k32.OpenFileMappingW(_FILE_MAP_READ, False, self._name)
+        if not self._handle:
+            self._handle = None
+            return
+        self._view = _k32.MapViewOfFile(
+            self._handle, _FILE_MAP_READ, 0, 0, STATE_STRUCT_SIZE,
+        )
+        if not self._view:
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+
+    def read(self) -> tuple[str, int] | None:
+        self._try_attach()
+        if self._view is None:
+            return None
+        try:
+            raw = (ctypes.c_char * STATE_STRUCT_SIZE).from_address(self._view)
+            snapshot = None
+            for _ in range(4):
+                first = bytes(raw)
+                second = bytes(raw)
+                if first == second:
+                    snapshot = second
+                    break
+            if snapshot is None:
+                return None
+            code, ts = struct.unpack(STATE_STRUCT_FORMAT, snapshot)
+            state = _STATE_NAMES[TrackingState(code)]
+        except (OSError, ValueError, KeyError):
+            return None
+        return state, ts
+
+    def close(self) -> None:
+        if self._view is not None:
+            _k32.UnmapViewOfFile(self._view)
+            self._view = None
+        if self._handle is not None:
+            _k32.CloseHandle(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> "TrackingStateReader":
         return self
 
     def __exit__(self, *_: object) -> None:
