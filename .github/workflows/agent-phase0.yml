@@ -88,7 +88,7 @@ jobs:
           Remove-Item -Recurse -Force .github/scripts -ErrorAction SilentlyContinue
           Remove-Item -Force .github/recover_phase0.py -ErrorAction SilentlyContinue
 
-      - name: Select the installed Visual Studio CMake generator
+      - name: Use the supported MinGW-w64 overlay toolchain
         shell: pwsh
         run: |
           @'
@@ -99,26 +99,9 @@ jobs:
           start = text.index("    vswhere = _find_vswhere()\n")
           end = text.index("\n    if not use_msvc:\n", start)
           replacement = (
-              "    vswhere = _find_vswhere()\n"
-              "    if vswhere:\n"
-              "        version_result = subprocess.run(\n"
-              "            [vswhere, \"-latest\", \"-property\", \"installationVersion\"],\n"
-              "            capture_output=True, text=True,\n"
-              "        )\n"
-              "        cmake_help = subprocess.run(\n"
-              "            [cmake, \"--help\"], capture_output=True, text=True,\n"
-              "        ).stdout\n"
-              "        try:\n"
-              "            vs_major = int(version_result.stdout.strip().split(\".\", 1)[0])\n"
-              "        except (TypeError, ValueError):\n"
-              "            vs_major = 0\n"
-              "        generator = {\n"
-              "            18: \"Visual Studio 18 2026\",\n"
-              "            17: \"Visual Studio 17 2022\",\n"
-              "        }.get(vs_major)\n"
-              "        if generator and generator in cmake_help:\n"
-              "            extra = [\"-G\", generator, \"-A\", \"x64\"]\n"
-              "            use_msvc = True\n"
+              "    # Prefer MinGW-w64 for the native overlay. The current WinRT COM\n"
+              "    # declarations use MinGW's __CRT_UUID_DECL support and are not yet\n"
+              "    # portable to MSVC without a separate compiler-compatibility pass.\n"
           )
           text = text[:start] + replacement + text[end:]
 
