@@ -28,10 +28,17 @@ jobs:
         run: |
           @'
           from pathlib import Path
-          import urllib.request
+          import subprocess
 
-          url = "https://raw.githubusercontent.com/Corangar94/3d-Glassless/4de779bd185af5a73e8f6f9521797c906a7dc796/.github/workflows/agent-phase0.yml"
-          raw = urllib.request.urlopen(url, timeout=60).read().decode("utf-8")
+          raw = subprocess.check_output(
+              [
+                  "git",
+                  "show",
+                  "4de779bd185af5a73e8f6f9521797c906a7dc796:.github/workflows/agent-phase0.yml",
+              ],
+              text=True,
+              encoding="utf-8",
+          )
           start = "          python - <<'PY'\n"
           end = "\n          PY\n"
           if start not in raw or end not in raw:
@@ -62,8 +69,8 @@ jobs:
           python .github/recover_phase0.py
           python -m py_compile .github/scripts/apply_phase0.py
           python .github/scripts/apply_phase0.py
-          Remove-Item -Recurse -Force .github/scripts
-          Remove-Item -Force .github/recover_phase0.py
+          Remove-Item -Recurse -Force .github/scripts -ErrorAction SilentlyContinue
+          Remove-Item -Force .github/recover_phase0.py -ErrorAction SilentlyContinue
 
       - name: Show generated Python around failing insertions
         shell: pwsh
