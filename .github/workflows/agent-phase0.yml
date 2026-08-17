@@ -120,7 +120,39 @@ jobs:
               "            extra = [\"-G\", generator, \"-A\", \"x64\"]\n"
               "            use_msvc = True\n"
           )
-          path.write_text(text[:start] + replacement + text[end:], encoding="utf-8", newline="\n")
+          text = text[:start] + replacement + text[end:]
+
+          old_cfg_error = (
+              "    if cfg.returncode != 0:\n"
+              "        print(\" FAILED\")\n"
+              "        print(cfg.stderr[-800:])\n"
+              "        return False\n"
+          )
+          new_cfg_error = (
+              "    if cfg.returncode != 0:\n"
+              "        print(\" FAILED\")\n"
+              "        output = (cfg.stdout + \"\\n\" + cfg.stderr).strip()\n"
+              "        print(output[-6000:])\n"
+              "        return False\n"
+          )
+          old_build_error = (
+              "    if bld.returncode != 0:\n"
+              "        print(\" FAILED\")\n"
+              "        print(bld.stderr[-800:])\n"
+              "        return False\n"
+          )
+          new_build_error = (
+              "    if bld.returncode != 0:\n"
+              "        print(\" FAILED\")\n"
+              "        output = (bld.stdout + \"\\n\" + bld.stderr).strip()\n"
+              "        print(output[-12000:])\n"
+              "        return False\n"
+          )
+          if old_cfg_error not in text or old_build_error not in text:
+              raise RuntimeError("bootstrap failure-reporting blocks changed unexpectedly")
+          text = text.replace(old_cfg_error, new_cfg_error, 1)
+          text = text.replace(old_build_error, new_build_error, 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
           '@ | python -
 
       - name: Install focused test dependency
