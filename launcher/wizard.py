@@ -26,8 +26,8 @@ class WelcomePage(QWizardPage):
         super().__init__(parent)  # type: ignore[call-overload]
         self.setTitle("Welcome to Glassless3D")
         self.setSubTitle(
-            "Turn your flat monitor into glassless 3D. "
-            "Setup takes about 60 seconds."
+            "Create a single-view, webcam-tracked virtual window on a flat monitor. "
+            "The effect uses motion parallax for one viewer; it is not binocular stereo."
         )
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Click Next to begin."))
@@ -127,6 +127,7 @@ _DEFAULT_TRACKING = {
     "smoothing_q": 0.01,
     "smoothing_r": 0.1,
     "hold_ms": 500,
+    "camera_fov_deg": 90.0,
 }
 
 _DEFAULT_OVERLAY = {
@@ -137,6 +138,7 @@ _DEFAULT_OVERLAY = {
     "virtual_depth_cm": 30.0,
     "depth_curve": 2,
     "depth_gamma": 2.0,
+    "camera_fov_deg": 90.0,
 }
 
 _DEFAULT_GAME_PROFILES = {
@@ -197,7 +199,12 @@ class DonePage(QWizardPage):
 
     def _write_config(self) -> None:
         config = {
-            "camera": {"index": self._camera_index},
+            "camera": {
+                "index": self._camera_index,
+                "width": 1280,
+                "height": 720,
+                "fps": 30,
+            },
             "screen": {
                 "width_cm": self._screen_width_cm,
                 "height_cm": self._screen_height_cm,

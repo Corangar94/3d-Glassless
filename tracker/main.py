@@ -60,8 +60,22 @@ def _resolve_ipd_cm(cfg: dict[str, Any]) -> float:
         return 6.4
 
 
-def _open_camera(index: int) -> cv2.VideoCapture:
-    """Try multiple backends in order and return the first opened capture."""
+def _configure_camera(
+    cap: cv2.VideoCapture, width: int = 0, height: int = 0, fps: float = 0.0
+) -> None:
+    """Apply requested capture properties; unsupported values degrade safely."""
+    if width > 0:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
+    if height > 0:
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
+    if fps > 0:
+        cap.set(cv2.CAP_PROP_FPS, float(fps))
+
+
+def _open_camera(
+    index: int, width: int = 0, height: int = 0, fps: float = 0.0
+) -> cv2.VideoCapture:
+    """Try multiple backends and apply configured camera properties."""
     backends = [
         (cv2.CAP_DSHOW, "CAP_DSHOW"),
         (cv2.CAP_MSMF, "CAP_MSMF"),
@@ -69,14 +83,20 @@ def _open_camera(index: int) -> cv2.VideoCapture:
     for backend_id, backend_name in backends:
         cap = cv2.VideoCapture(index, backend_id)
         if cap.isOpened():
-            print(f"[G3D] Camera {index} opened via {backend_name}")
+            _configure_camera(cap, width, height, fps)
+            print(
+                f"[G3D] Camera {index} opened via {backend_name} "
+                f"at {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+                f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))} "
+                f"@ {cap.get(cv2.CAP_PROP_FPS):.1f} fps"
+            )
             return cap
         cap.release()
 
     cap = cv2.VideoCapture(index)
     if cap.isOpened():
+        _configure_camera(cap, width, height, fps)
         print(f"[G3D] Camera {index} opened via default backend")
-        return cap
     return cap
 
 
@@ -98,19 +118,6 @@ def _load_face_tracker_class(backend: str):
 
     module = importlib.import_module("tracker.face_tracker_cv2")
     return module.FaceTracker, "cv2"
-
-
-def _apply_deadzone(
-    raw: tuple[float, float, float],
-    prev: tuple[float, float, float] | None,
-    deadzone_cm: float,
-) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """Suppress small XY movement while keeping Z responsive."""
-    if prev is None:
-        return raw, raw
-    if math.hypot(raw[0] - prev[0], raw[1] - prev[1]) < deadzone_cm:
-        return (prev[0], prev[1], raw[2]), prev
-    return raw, raw
 
 
 def _limit_pose_step(
@@ -164,9 +171,16 @@ class TrackingLoop:
         self._camera_tilt_deg: float = camera_tilt_deg
         self._config_path: Optional[str] = config_path
 
-    def run(self, camera_index: int = 0, max_frames: Optional[int] = None) -> None:
+    def run(
+        self,
+        camera_index: int = 0,
+        camera_width: int = 0,
+        camera_height: int = 0,
+        camera_fps: float = 0.0,
+        max_frames: Optional[int] = None,
+    ) -> None:
         """Run the tracking loop. Blocks until max_frames reached or Ctrl+C."""
-        cap = _open_camera(camera_index)
+        cap = _open_camera(camera_index, camera_width, camera_height, camera_fps)
         if not cap.isOpened():
             cap.release()
             raise RuntimeError(f"Could not open camera {camera_index}")
@@ -193,7 +207,9 @@ class TrackingLoop:
                         f"[G3D] Camera read stalled; reopening "
                         f"({reopen_attempts}/{_CAMERA_MAX_REOPEN_ATTEMPTS})"
                     )
-                    cap = _open_camera(camera_index)
+                    cap = _open_camera(
+                        camera_index, camera_width, camera_height, camera_fps
+                    )
                     if not cap.isOpened():
                         cap.release()
                         raise RuntimeError(
@@ -213,16 +229,21 @@ class TrackingLoop:
                     measurement_s = time.monotonic()
                     self._last_face_ms = measurement_s * 1000.0
                     settings = settings_reader.read()
-                    deadzone_cm = (settings.deadzone_mm / 10.0) if settings else 0.5
+                    if settings is not None:
+                        set_calibration = getattr(self._tracker, "set_calibration", None)
+                        if callable(set_calibration):
+                            set_calibration(
+                                real_ipd_cm=max(settings.ipd_mm / 10.0, 0.1),
+                                camera_fov_deg=settings.camera_fov_deg,
+                            )
                     smoothing_r = settings.smoothing_alpha if settings else 0.1
                     self._smoother.set_measurement_noise(max(smoothing_r, 1e-6))
                     raw = _limit_pose_step(
                         (pos.x_cm, pos.y_cm, pos.z_cm),
                         self._last_raw_pos,
                     )
-                    effective, self._last_raw_pos = _apply_deadzone(
-                        raw, self._last_raw_pos, deadzone_cm
-                    )
+                    self._last_raw_pos = raw
+                    effective = raw
                     dt_s = (
                         measurement_s - self._last_measurement_s
                         if self._last_measurement_s is not None else None
@@ -360,7 +381,7 @@ def main() -> None:
         real_ipd_cm=_resolve_ipd_cm(cfg),
         screen_width_cm=scr["width_cm"],
         screen_height_cm=scr["height_cm"],
-        camera_fov_deg=float(trk.get("camera_fov_deg", cfg.get("overlay", {}).get("camera_fov_deg", 60.0))),
+        camera_fov_deg=float(trk.get("camera_fov_deg", cfg.get("overlay", {}).get("camera_fov_deg", 90.0))),
     ) as tracker, FreetracWriter() as ft_writer, SharedMemoryWriter() as g3d_writer, TrackingStateWriter() as state_writer:
         # Combined writer: forwards every position to both sinks
         class _MultiWriter:
@@ -381,7 +402,12 @@ def main() -> None:
             config_path=args.config,
         )
         try:
-            loop.run(camera_index=cam["index"])
+            loop.run(
+                camera_index=int(cam["index"]),
+                camera_width=int(cam.get("width", 0)),
+                camera_height=int(cam.get("height", 0)),
+                camera_fps=float(cam.get("fps", 0.0)),
+            )
         except KeyboardInterrupt:
             pass
 

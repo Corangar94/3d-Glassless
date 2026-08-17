@@ -1,5 +1,5 @@
 camera:
-  fps: 0
+  fps: 30
   height: 720
   index: 0
   width: 1280
@@ -20,6 +20,7 @@ shared_memory:
   name: G3D
 tracking:
   auto_tune: true
+  camera_fov_deg: 90.0
   camera_tilt_deg: -17.92
   hold_ms: 500
   ipd_cm: 6.3

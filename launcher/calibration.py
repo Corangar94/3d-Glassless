@@ -74,7 +74,8 @@ def _create_face_landmarker():
 
 
 def _detect_face_distance_with_landmarker(
-    frame_bgr: "np.ndarray", ipd_mm: float, landmarker: object
+    frame_bgr: "np.ndarray", ipd_mm: float, landmarker: object,
+    camera_fov_deg: float = _ASSUMED_FOV_DEG,
 ) -> float | None:
     import cv2
     import numpy as np
@@ -96,20 +97,26 @@ def _detect_face_distance_with_landmarker(
     if ipd_px < 1.0:
         return None
 
-    focal_px = w / (2.0 * math.tan(math.radians(_ASSUMED_FOV_DEG / 2.0)))
+    focal_px = w / (2.0 * math.tan(math.radians(camera_fov_deg / 2.0)))
     return (focal_px * (ipd_mm / 10.0)) / ipd_px
 
 
-def _detect_face_distance(frame_bgr: "np.ndarray", ipd_mm: float) -> float | None:
+def _detect_face_distance(
+    frame_bgr: "np.ndarray", ipd_mm: float,
+    camera_fov_deg: float = _ASSUMED_FOV_DEG,
+) -> float | None:
     """Run MediaPipe on one BGR frame, return head distance in cm or None."""
     with _create_face_landmarker() as landmarker:
-        return _detect_face_distance_with_landmarker(frame_bgr, ipd_mm, landmarker)
+        return _detect_face_distance_with_landmarker(
+            frame_bgr, ipd_mm, landmarker, camera_fov_deg
+        )
 
 
 def measure_head_distance_or_none(
     ipd_mm: float = 64.0,
     camera_index: int = 0,
     sample_count: int = 7,
+    camera_fov_deg: float = _ASSUMED_FOV_DEG,
 ) -> float | None:
     """Return a robust multi-frame estimate from the selected camera."""
     import cv2
@@ -124,7 +131,7 @@ def measure_head_distance_or_none(
                 if not ok:
                     continue
                 distance = _detect_face_distance_with_landmarker(
-                    frame, ipd_mm, landmarker
+                    frame, ipd_mm, landmarker, camera_fov_deg
                 )
                 if distance is not None and 20.0 <= distance <= 200.0:
                     distances.append(distance)
@@ -138,7 +145,12 @@ def measure_head_distance_or_none(
         cap.release()
 
 
-def measure_head_distance(ipd_mm: float = 64.0, camera_index: int = 0) -> float:
-    """Return estimated head distance in cm (60.0 fallback on any failure)."""
-    result = measure_head_distance_or_none(ipd_mm, camera_index=camera_index)
+def measure_head_distance(
+    ipd_mm: float = 64.0, camera_index: int = 0,
+    camera_fov_deg: float = _ASSUMED_FOV_DEG,
+) -> float:
+    """Return estimated head distance in cm (60.0 fallback on failure)."""
+    result = measure_head_distance_or_none(
+        ipd_mm, camera_index=camera_index, camera_fov_deg=camera_fov_deg
+    )
     return result if result is not None else 60.0

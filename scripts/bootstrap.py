@@ -351,11 +351,8 @@ def _find_vswhere() -> str | None:
 
 def _find_gcc() -> str | None:
     """Return a path to g++.exe, downloading portable MinGW if needed."""
-    # Check PATH first
-    if shutil.which("g++"):
-        return shutil.which("g++")
-
-    # Check our portable MinGW
+    # Use the pinned portable toolchain before any system g++. Newer
+    # MinGW WinRT headers can redefine IReference<boolean>/IReference<BYTE>.
     if os.path.isdir(_MINGW_DIR):
         for root, _, files in os.walk(_MINGW_DIR):
             if "g++.exe" in files:
@@ -501,12 +498,25 @@ def _write_reshade_asset_manifest() -> None:
 
 # -- Step 7: Build overlay exe ------------------------------------------------
 
+def _sync_overlay_runtime_files() -> bool:
+    pairs = (
+        (os.path.join(ORT_DIR, "lib", "onnxruntime.dll"), os.path.join(_ROOT, "onnxruntime.dll")),
+        (os.path.join(DML_DIR, "lib", "DirectML.dll"), os.path.join(_ROOT, "DirectML.dll")),
+    )
+    try:
+        for source, destination in pairs:
+            if not os.path.isfile(source):
+                print(f"  FAIL  missing runtime dependency: {source}")
+                return False
+            shutil.copy2(source, destination)
+    except OSError as exc:
+        print(f"  FAIL  could not copy overlay runtime DLLs: {exc}")
+        return False
+    return all(os.path.isfile(destination) for _source, destination in pairs)
+
+
 def step_build_overlay() -> bool:
     print("\n[primary] Glassless3DOverlay.exe (D3D11 screen-capture overlay)")
-
-    if os.path.isfile(OVERLAY_OUT):
-        print(f"  already present: Glassless3DOverlay.exe  ({os.path.getsize(OVERLAY_OUT)//1024} KB)")
-        return True
 
     cmake = _find_cmake()
     if not cmake:
@@ -517,15 +527,9 @@ def step_build_overlay() -> bool:
     extra: list[str] = []
     use_msvc = False
 
-    vswhere = _find_vswhere()
-    if vswhere:
-        r = subprocess.run(
-            [vswhere, "-latest", "-property", "installationPath"],
-            capture_output=True, text=True,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            extra = ["-G", "Visual Studio 17 2022", "-A", "x64"]
-            use_msvc = True
+    # Prefer MinGW-w64 for the native overlay. The current WinRT COM
+    # declarations use MinGW's __CRT_UUID_DECL support and are not yet
+    # portable to MSVC without a separate compiler-compatibility pass.
 
     if not use_msvc:
         gpp = _find_gcc()
@@ -545,8 +549,9 @@ def step_build_overlay() -> bool:
         capture_output=True, text=True, env=env,
     )
     if cfg.returncode != 0:
-        print(f" FAILED")
-        print(cfg.stderr[-800:])
+        print(" FAILED")
+        output = (cfg.stdout + "\n" + cfg.stderr).strip()
+        print(output[-6000:])
         return False
 
     print(" building...", end="", flush=True)
@@ -555,17 +560,42 @@ def step_build_overlay() -> bool:
         capture_output=True, text=True, env=env,
     )
     if bld.returncode != 0:
-        print(f" FAILED")
-        print(bld.stderr[-800:])
+        print(" FAILED")
+        output = (bld.stdout + "\n" + bld.stderr).strip()
+        print(output[-12000:])
         return False
 
-    if os.path.isfile(OVERLAY_OUT):
-        print(f"  {os.path.getsize(OVERLAY_OUT)//1024} KB")
-        print("  OK  Glassless3DOverlay.exe")
-        return True
+    built_candidates = (
+        os.path.join(build_dir, "Release", "Glassless3DOverlay.exe"),
+        os.path.join(build_dir, "Glassless3DOverlay.exe"),
+    )
+    built = next((path for path in built_candidates if os.path.isfile(path)), None)
+    if built is None:
+        print(" FAILED: built overlay executable not found")
+        return False
 
-    print(" FAILED: exe not found after build")
-    return False
+    try:
+        shutil.copy2(built, OVERLAY_OUT)
+    except OSError as exc:
+        print(f" FAILED: could not replace {OVERLAY_OUT}: {exc}")
+        print("  Stop any running overlay process and re-run bootstrap.")
+        return False
+
+    if not _sync_overlay_runtime_files():
+        return False
+
+    required = (
+        OVERLAY_OUT,
+        os.path.join(_ROOT, "onnxruntime.dll"),
+        os.path.join(_ROOT, "DirectML.dll"),
+    )
+    if not all(os.path.isfile(path) for path in required):
+        print(" FAILED: overlay runtime layout is incomplete after build")
+        return False
+
+    print(f"  {os.path.getsize(OVERLAY_OUT)//1024} KB")
+    print("  OK  overlay executable + ONNX Runtime + DirectML")
+    return True
 
 
 # -- Main ----------------------------------------------------------------------

@@ -1783,6 +1783,7 @@ class MainWindow(QMainWindow):
                 result = measure_head_distance_or_none(
                     ipd_mm=ipd_mm,
                     camera_index=camera_index,
+                    camera_fov_deg=float(self._settings.camera_fov_deg),
                 )
             except Exception:  # noqa: BLE001
                 _log.warning("head-distance measurement failed", exc_info=True)
@@ -1907,6 +1908,7 @@ class MainWindow(QMainWindow):
             overlay.update(values)
             tracking = _ensure_mapping_child(cfg, "tracking")
             tracking["camera_tilt_deg"] = self._camera_tilt_deg
+            tracking["camera_fov_deg"] = s.camera_fov_deg
             tracking["ipd_cm"] = s.ipd_mm / 10.0
             display_calibration = _ensure_mapping_child(overlay, "display_calibration")
             display_calibration["ipd_mm"] = s.ipd_mm
