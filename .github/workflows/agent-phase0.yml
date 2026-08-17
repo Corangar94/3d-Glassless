@@ -38,9 +38,26 @@ jobs:
               raise RuntimeError("phase 0 patch payload markers were not found")
           body = raw.split(start, 1)[1].split(end, 1)[0]
           lines = [line[10:] if line.startswith("          ") else line for line in body.splitlines()]
+          script = "\n".join(lines) + "\n"
+          needle = (
+              "if tracker.count(old_measurement) != 1:\n"
+              "    raise RuntimeError(\"tracker/main.py: measurement block changed unexpectedly\")\n"
+              "tracker = tracker.replace(old_measurement, new_measurement, 1)\n"
+          )
+          replacement = (
+              "if tracker.count(old_measurement) == 1:\n"
+              "    tracker = tracker.replace(old_measurement, new_measurement, 1)\n"
+              "else:\n"
+              "    measurement_start = tracker.index(\"                    settings = settings_reader.read()\\n\")\n"
+              "    measurement_end = tracker.index(\"                    dt_s = (\\n\", measurement_start)\n"
+              "    tracker = tracker[:measurement_start] + new_measurement + tracker[measurement_end:]\n"
+          )
+          if needle not in script:
+              raise RuntimeError("tracker patch guard was not found in recovered payload")
+          script = script.replace(needle, replacement, 1)
           target = Path(".github/scripts/apply_phase0.py")
           target.parent.mkdir(parents=True, exist_ok=True)
-          target.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+          target.write_text(script, encoding="utf-8", newline="\n")
           '@ | Set-Content -Encoding utf8 .github/recover_phase0.py
           python .github/recover_phase0.py
           python -m py_compile .github/scripts/apply_phase0.py
