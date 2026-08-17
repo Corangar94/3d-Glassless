@@ -65,6 +65,22 @@ jobs:
           Remove-Item -Recurse -Force .github/scripts
           Remove-Item -Force .github/recover_phase0.py
 
+      - name: Show generated Python around failing insertions
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          for path, first, last in (
+              ("scripts/bootstrap.py", 500, 525),
+              ("tests/test_overlay_process.py", 155, 180),
+          ):
+              print(f"--- {path} ---")
+              lines = Path(path).read_text(encoding="utf-8").splitlines()
+              for number in range(first, min(last, len(lines)) + 1):
+                  print(f"{number}: {lines[number - 1]!r}")
+          '@ | python -
+
       - name: Install focused test dependency
         run: python -m pip install --disable-pip-version-check pytest
 
