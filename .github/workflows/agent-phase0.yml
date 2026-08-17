@@ -88,7 +88,7 @@ jobs:
           Remove-Item -Recurse -Force .github/scripts -ErrorAction SilentlyContinue
           Remove-Item -Force .github/recover_phase0.py -ErrorAction SilentlyContinue
 
-      - name: Use the supported MinGW-w64 overlay toolchain
+      - name: Use the pinned MinGW-w64 overlay toolchain
         shell: pwsh
         run: |
           @'
@@ -96,14 +96,28 @@ jobs:
 
           path = Path("scripts/bootstrap.py")
           text = path.read_text(encoding="utf-8")
-          start = text.index("    vswhere = _find_vswhere()\n")
-          end = text.index("\n    if not use_msvc:\n", start)
-          replacement = (
+
+          vs_start = text.index("    vswhere = _find_vswhere()\n")
+          vs_end = text.index("\n    if not use_msvc:\n", vs_start)
+          vs_replacement = (
               "    # Prefer MinGW-w64 for the native overlay. The current WinRT COM\n"
               "    # declarations use MinGW's __CRT_UUID_DECL support and are not yet\n"
               "    # portable to MSVC without a separate compiler-compatibility pass.\n"
           )
-          text = text[:start] + replacement + text[end:]
+          text = text[:vs_start] + vs_replacement + text[vs_end:]
+
+          find_start = text.index("def _find_gcc()")
+          selection_start = text.index("    # Check PATH first\n", find_start)
+          download_start = text.index("    # Download portable MinGW", selection_start)
+          selection_replacement = (
+              "    # Use the pinned portable toolchain before any system g++. Newer\n"
+              "    # MinGW WinRT headers can redefine IReference<boolean>/IReference<BYTE>.\n"
+              "    if os.path.isdir(_MINGW_DIR):\n"
+              "        for root, _, files in os.walk(_MINGW_DIR):\n"
+              "            if \"g++.exe\" in files:\n"
+              "                return os.path.join(root, \"g++.exe\")\n\n"
+          )
+          text = text[:selection_start] + selection_replacement + text[download_start:]
 
           old_cfg_error = (
               "    if cfg.returncode != 0:\n"
