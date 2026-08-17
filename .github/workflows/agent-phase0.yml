@@ -44,8 +44,18 @@ jobs:
           if start not in raw or end not in raw:
               raise RuntimeError("phase 0 patch payload markers were not found")
           body = raw.split(start, 1)[1].split(end, 1)[0]
-          lines = [line[10:] if line.startswith("          ") else line for line in body.splitlines()]
+
+          lines: list[str] = []
+          in_triple_string = False
+          for source_line in body.splitlines():
+              line = source_line
+              if not in_triple_string and line.startswith("          "):
+                  line = line[10:]
+              lines.append(line)
+              if line.count("'''") % 2:
+                  in_triple_string = not in_triple_string
           script = "\n".join(lines) + "\n"
+
           needle = (
               "if tracker.count(old_measurement) != 1:\n"
               "    raise RuntimeError(\"tracker/main.py: measurement block changed unexpectedly\")\n"
@@ -62,6 +72,12 @@ jobs:
           if needle not in script:
               raise RuntimeError("tracker patch guard was not found in recovered payload")
           script = script.replace(needle, replacement, 1)
+
+          print_needle = r'    print("\n[primary] Glassless3DOverlay.exe (D3D11 screen-capture overlay)")'
+          print_replacement = r'    print("\\n[primary] Glassless3DOverlay.exe (D3D11 screen-capture overlay)")'
+          if print_needle in script:
+              script = script.replace(print_needle, print_replacement, 1)
+
           target = Path(".github/scripts/apply_phase0.py")
           target.parent.mkdir(parents=True, exist_ok=True)
           target.write_text(script, encoding="utf-8", newline="\n")
@@ -72,15 +88,15 @@ jobs:
           Remove-Item -Recurse -Force .github/scripts -ErrorAction SilentlyContinue
           Remove-Item -Force .github/recover_phase0.py -ErrorAction SilentlyContinue
 
-      - name: Show generated Python around failing insertions
+      - name: Show generated Python around repaired insertions
         shell: pwsh
         run: |
           @'
           from pathlib import Path
 
           for path, first, last in (
-              ("scripts/bootstrap.py", 500, 525),
-              ("tests/test_overlay_process.py", 155, 180),
+              ("scripts/bootstrap.py", 504, 525),
+              ("tests/test_overlay_process.py", 156, 176),
           ):
               print(f"--- {path} ---")
               lines = Path(path).read_text(encoding="utf-8").splitlines()
