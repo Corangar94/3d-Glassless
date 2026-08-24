@@ -1,4 +1,5 @@
 name: One-time extracted tree digests
+# Temporary read-only measurement job; removed after constants are committed.
 
 on:
   pull_request:
