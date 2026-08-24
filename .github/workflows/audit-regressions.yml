@@ -56,6 +56,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          function Write-Digest([string]$Name, [string]$Path) {
+            if (-not (Test-Path -LiteralPath $Path)) {
+              throw "expected path missing: $Path"
+            }
+            $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $size = (Get-Item -LiteralPath $Path).Length
+            Write-Host "G3D_DIGEST $Name sha256=$hash size=$size path=$Path"
+          }
+
           $assets = @(
             @{
               Name = 'FACE_MODEL'
@@ -89,25 +99,31 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "download failed: $($asset.Name)"
             }
-            $hash = (Get-FileHash $asset.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $size = (Get-Item $asset.Path).Length
-            Write-Host "G3D_DIGEST $($asset.Name) sha256=$hash size=$size url=$($asset.Url)"
+            Write-Digest $asset.Name $asset.Path
           }
 
           Expand-Archive -LiteralPath 'onnxruntime-directml.nupkg' -DestinationPath 'ort-package'
           Expand-Archive -LiteralPath 'directml.nupkg' -DestinationPath 'dml-package'
-          $outputs = @(
-            @{ Name = 'ONNXRUNTIME_DLL'; Path = 'ort-package/runtimes/win-x64/native/onnxruntime.dll' },
-            @{ Name = 'ONNXRUNTIME_LIB'; Path = 'ort-package/runtimes/win-x64/native/onnxruntime.lib' },
-            @{ Name = 'DIRECTML_DLL'; Path = 'dml-package/bin/x64-win/DirectML.dll' },
-            @{ Name = 'DIRECTML_LIB'; Path = 'dml-package/lib/x64-win/DirectML.lib' },
-            @{ Name = 'DIRECTML_HEADER'; Path = 'dml-package/include/DirectML.h' }
-          )
-          foreach ($output in $outputs) {
-            if (-not (Test-Path $output.Path)) {
-              throw "expected package member missing: $($output.Path)"
-            }
-            $hash = (Get-FileHash $output.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $size = (Get-Item $output.Path).Length
-            Write-Host "G3D_DIGEST $($output.Name) sha256=$hash size=$size path=$($output.Path)"
+
+          Write-Digest 'ONNXRUNTIME_DLL' 'ort-package/runtimes/win-x64/native/onnxruntime.dll'
+          Write-Digest 'ONNXRUNTIME_LIB' 'ort-package/runtimes/win-x64/native/onnxruntime.lib'
+          Write-Digest 'ONNXRUNTIME_C_API_HEADER' 'ort-package/build/native/include/onnxruntime_c_api.h'
+          Write-Digest 'ONNXRUNTIME_CXX_API_HEADER' 'ort-package/build/native/include/onnxruntime_cxx_api.h'
+          Write-Digest 'DML_PROVIDER_HEADER' 'ort-package/build/native/include/dml_provider_factory.h'
+
+          $directmlDll = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.dll' | Select-Object -First 1
+          $directmlLib = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.lib' | Select-Object -First 1
+          $directmlHeader = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.h' | Select-Object -First 1
+          Write-Digest 'DIRECTML_DLL' $directmlDll.FullName
+          Write-Digest 'DIRECTML_LIB' $directmlLib.FullName
+          Write-Digest 'DIRECTML_HEADER' $directmlHeader.FullName
+
+          $sevenZip = 'C:/Program Files/7-Zip/7z.exe'
+          & $sevenZip x 'mingw64.7z' '-omingw64' -y | Out-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw 'MinGW extraction failed'
           }
+          $gxx = Get-ChildItem 'mingw64' -Recurse -File -Filter 'g++.exe' | Select-Object -First 1
+          $cmake = Get-ChildItem 'mingw64' -Recurse -File -Filter 'cmake.exe' | Select-Object -First 1
+          Write-Digest 'MINGW64_GXX' $gxx.FullName
+          Write-Digest 'MINGW64_CMAKE' $cmake.FullName
