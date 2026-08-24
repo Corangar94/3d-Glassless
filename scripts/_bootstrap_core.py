@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-scripts/bootstrap.py - one-command dev setup for Glassless3D.
+Internal build orchestration for the hardened Glassless3D bootstrap.
 
-Downloads required assets and (if build tools are available) compiles the
-standalone desktop overlay so the launcher can run the primary workflow.
-The ReShade addon is experimental and only prepared when requested.
-
-Usage:
-    python scripts/bootstrap.py
-    python scripts/bootstrap.py --with-reshade
+This module intentionally retains the platform/build implementation that is
+wrapped and patched by ``scripts/bootstrap.py``. It must not be executed
+standalone because doing so would bypass the wrapper's immutable asset hashes,
+safe extraction, and verified-toolchain checks.
 """
 from __future__ import annotations
 
@@ -128,7 +125,7 @@ def step_reshade_dll() -> bool:
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not os.path.isfile(RESHADE32_DLL) or not os.path.isfile(RESHADE_DLL):
-        print(f" FAILED")
+        print(" FAILED")
         print(result.stderr[-500:])
         return False
 
@@ -238,7 +235,7 @@ def step_onnxruntime() -> bool:
     ort_dll = os.path.join(ORT_DIR, "lib", "onnxruntime.dll")
     dml_dll = os.path.join(DML_DIR, "lib", "DirectML.dll")
     if os.path.isfile(ort_dll) and os.path.isfile(dml_dll):
-        print(f"  already present: vendor/onnxruntime + vendor/directml")
+        print("  already present: vendor/onnxruntime + vendor/directml")
         return True
 
     try:
@@ -270,7 +267,7 @@ def step_onnxruntime() -> bool:
                 os.remove(p)
 
     if not (os.path.isfile(ort_dll) and os.path.isfile(dml_dll)):
-        print(f"  FAIL  expected DLLs not found after extraction")
+        print("  FAIL  expected DLLs not found after extraction")
         print(f"    ORT entries: {n1} lib + {n2} headers")
         print(f"    DML entries: {n3} bin + {n4} lib + {n5} headers")
         return False
@@ -294,7 +291,7 @@ def step_depth_model() -> bool:
     try:
         _download(DEPTH_MODEL_URL, DEPTH_MODEL_DEST,
                   "depth_anything_v2_small_fp16.onnx (~50 MB)")
-        print(f"  OK  models/depth_anything_v2_small_fp16.onnx")
+        print("  OK  models/depth_anything_v2_small_fp16.onnx")
         return True
     except Exception as e:
         print(f"  FAIL  {e}")
@@ -385,7 +382,7 @@ def _find_gcc() -> str | None:
 
     for root, _, files in os.walk(_MINGW_DIR):
         if "g++.exe" in files:
-            print(f" OK")
+            print(" OK")
             return os.path.join(root, "g++.exe")
 
     print(" FAILED: g++.exe not found after extraction")
@@ -652,4 +649,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "ERROR: scripts/_bootstrap_core.py is internal and intentionally cannot "
+        "run standalone. Use: python scripts/bootstrap.py"
+    )
