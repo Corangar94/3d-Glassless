@@ -1,0 +1,61 @@
+name: Refresh audited overlay binary
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'agent/repair-head-coupled-3d'
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build audited Windows runtime
+        run: python scripts/bootstrap.py
+
+      - name: Verify native output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path Glassless3DOverlay.exe)) {
+            throw "Glassless3DOverlay.exe was not produced"
+          }
+          $binary = Get-Item Glassless3DOverlay.exe
+          if ($binary.Length -lt 100000) {
+            throw "Glassless3DOverlay.exe is unexpectedly small: $($binary.Length) bytes"
+          }
+          Get-FileHash Glassless3DOverlay.exe -Algorithm SHA256
+
+      - name: Upload audited binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: audited-glassless3d-overlay
+          path: Glassless3DOverlay.exe
+          if-no-files-found: error
+
+      - name: Commit refreshed binary
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f Glassless3DOverlay.exe
+          if (git diff --cached --quiet) {
+            Write-Host "Tracked binary already matches the audited build."
+            exit 0
+          }
+          git commit -m "Rebuild overlay with audited runtime guards"
+          git push origin HEAD:agent/repair-head-coupled-3d
