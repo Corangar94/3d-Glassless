@@ -34,6 +34,8 @@ jobs:
           python -m pytest
           tests/test_bootstrap.py
           tests/test_bootstrap_security.py
+          tests/test_calibration.py
+          tests/test_calibration_audit.py
           tests/test_main.py
           tests/test_tracker_audit.py
           tests/test_overlay_depth_guard.py
