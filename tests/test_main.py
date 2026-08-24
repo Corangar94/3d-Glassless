@@ -199,8 +199,8 @@ def test_tracking_loop_smooths_face_position():
     mock_writer.write.assert_called_once_with(x=4.9, y=-1.9, z=55.1)
 
 
-def test_tracking_loop_applies_runtime_deadzone_and_smoothing_settings():
-    """Direct tracker path must honor live stabilizer settings from shared memory."""
+def test_tracking_loop_applies_live_smoothing_without_tracker_deadzone():
+    """Tracker consumes smoothing settings; the overlay owns the sole XY deadzone."""
     mock_tracker = MagicMock()
     mock_tracker.process_frame.side_effect = [
         HeadPosition(x_cm=1.0, y_cm=0.0, z_cm=60.0),
@@ -211,7 +211,7 @@ def test_tracking_loop_applies_runtime_deadzone_and_smoothing_settings():
     mock_smoother = MagicMock()
     mock_smoother.update.side_effect = [
         (1.0, 0.0, 60.0),
-        (1.0, 0.0, 65.0),
+        (1.5, 0.0, 65.0),
     ]
 
     class FakeSettingsReader:
@@ -237,7 +237,7 @@ def test_tracking_loop_applies_runtime_deadzone_and_smoothing_settings():
 
     assert mock_smoother.set_measurement_noise.call_args_list[-1].args == (0.3,)
     assert mock_smoother.update.call_args_list[0].args == (1.0, 0.0, 60.0)
-    assert mock_smoother.update.call_args_list[1].args == (1.0, 0.0, 65.0)
+    assert mock_smoother.update.call_args_list[1].args == (1.5, 0.0, 65.0)
 
 
 def test_tracking_loop_publishes_state_before_pose_commit():

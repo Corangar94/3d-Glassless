@@ -56,7 +56,7 @@ def test_camera_properties_and_live_calibration_are_wired():
 
 
 def test_bootstrap_rebuilds_and_verifies_runtime_layout():
-    bootstrap = source("scripts/bootstrap.py")
+    bootstrap = source("scripts/_bootstrap_core.py")
     function = bootstrap[bootstrap.index("def step_build_overlay"):bootstrap.index("# -- Main")]
     assert "already present: Glassless3DOverlay.exe" not in function
     assert "_sync_overlay_runtime_files" in function
