@@ -1,0 +1,92 @@
+name: One-time bootstrap asset digests
+
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'agent/repair-head-coupled-3d'
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Download and hash authoritative assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(
+            @{
+              Name = 'FACE_MODEL'
+              Url = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+              Path = 'face_landmarker.task'
+            },
+            @{
+              Name = 'ORT_NUPKG'
+              Url = 'https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg'
+              Path = 'onnxruntime-directml.nupkg'
+            },
+            @{
+              Name = 'DML_NUPKG'
+              Url = 'https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.2/microsoft.ai.directml.1.15.2.nupkg'
+              Path = 'directml.nupkg'
+            },
+            @{
+              Name = 'DEPTH_MODEL'
+              Url = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/c70d1ddbcd93c9bda8098268cc3554adf5e8dd4f/onnx/model_fp16.onnx'
+              Path = 'depth_model.onnx'
+            },
+            @{
+              Name = 'MINGW64_ARCHIVE'
+              Url = 'https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-18.1.8-12.0.0-msvcrt-r1/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64msvcrt-12.0.0-r1.7z'
+              Path = 'mingw64.7z'
+            }
+          )
+
+          foreach ($asset in $assets) {
+            curl.exe -L --fail --retry 3 --retry-all-errors --output $asset.Path $asset.Url
+            if ($LASTEXITCODE -ne 0) {
+              throw "download failed: $($asset.Name)"
+            }
+            $hash = (Get-FileHash $asset.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $size = (Get-Item $asset.Path).Length
+            Write-Host "G3D_DIGEST $($asset.Name) sha256=$hash size=$size url=$($asset.Url)"
+          }
+
+          Expand-Archive -LiteralPath 'onnxruntime-directml.nupkg' -DestinationPath 'ort-package'
+          Expand-Archive -LiteralPath 'directml.nupkg' -DestinationPath 'dml-package'
+          $outputs = @(
+            @{
+              Name = 'ONNXRUNTIME_DLL'
+              Path = 'ort-package/runtimes/win-x64/native/onnxruntime.dll'
+            },
+            @{
+              Name = 'ONNXRUNTIME_LIB'
+              Path = 'ort-package/runtimes/win-x64/native/onnxruntime.lib'
+            },
+            @{
+              Name = 'DIRECTML_DLL'
+              Path = 'dml-package/bin/x64-win/DirectML.dll'
+            },
+            @{
+              Name = 'DIRECTML_LIB'
+              Path = 'dml-package/lib/x64-win/DirectML.lib'
+            },
+            @{
+              Name = 'DIRECTML_HEADER'
+              Path = 'dml-package/include/DirectML.h'
+            }
+          )
+          foreach ($output in $outputs) {
+            if (-not (Test-Path $output.Path)) {
+              throw "expected package member missing: $($output.Path)"
+            }
+            $hash = (Get-FileHash $output.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $size = (Get-Item $output.Path).Length
+            Write-Host "G3D_DIGEST $($output.Name) sha256=$hash size=$size path=$($output.Path)"
+          }
