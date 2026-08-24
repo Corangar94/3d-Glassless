@@ -509,21 +509,9 @@ def _find_gcc() -> str | None:
 
 
 def _find_cmake() -> str | None:
-    if shutil.which("cmake"):
-        return "cmake"
+    """Return CMake from the same tree-verified toolchain as the compiler."""
     paths = _ensure_mingw_toolchain()
-    if paths:
-        return paths[1]
-    try:
-        import cmake as cmake_package  # type: ignore[import-untyped]
-
-        package_file = cmake_package.__file__ or ""
-        candidate = os.path.join(
-            os.path.dirname(package_file), "data", "bin", "cmake.exe"
-        )
-        return candidate if os.path.isfile(candidate) else None
-    except ImportError:
-        return None
+    return paths[1] if paths else None
 
 
 # Patch every core call site, including functions defined in that module.
