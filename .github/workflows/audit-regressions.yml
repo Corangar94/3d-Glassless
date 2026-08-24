@@ -1,4 +1,4 @@
-name: Audit regressions
+name: Audit and dependency gates
 
 on:
   pull_request:
@@ -11,14 +11,18 @@ permissions:
   contents: read
 
 jobs:
-  focused-windows-tests:
-    runs-on: windows-latest
-    timeout-minutes: 25
+  full-windows-tests:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
           cache: pip
@@ -26,104 +30,34 @@ jobs:
       - name: Install project and test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
 
-      - name: Run focused regressions
-        run: >-
-          python -m pytest
-          tests/test_bootstrap.py
-          tests/test_bootstrap_security.py
-          tests/test_calibration.py
-          tests/test_calibration_audit.py
-          tests/test_main.py
-          tests/test_tracker_audit.py
-          tests/test_overlay_depth_guard.py
-          tests/test_overlay_process.py
-          tests/test_phase0_head_coupled.py
-          tests/test_reshade_install.py
-          -q
+      - name: Run the complete Python test suite
+        run: python -m pytest -q
 
-  temporary-asset-digests:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'agent/repair-head-coupled-3d'
-    runs-on: windows-latest
-    timeout-minutes: 25
+  python-dependency-audit:
+    runs-on: windows-2025
+    timeout-minutes: 20
 
     steps:
-      - name: Download and hash authoritative bootstrap inputs
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-          function Write-Digest([string]$Name, [string]$Path) {
-            if (-not (Test-Path -LiteralPath $Path)) {
-              throw "expected path missing: $Path"
-            }
-            $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-            $size = (Get-Item -LiteralPath $Path).Length
-            Write-Host "G3D_DIGEST $Name sha256=$hash size=$size path=$Path"
-          }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
 
-          $assets = @(
-            @{
-              Name = 'FACE_MODEL'
-              Url = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
-              Path = 'face_landmarker.task'
-            },
-            @{
-              Name = 'ORT_NUPKG'
-              Url = 'https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.directml/1.20.1/microsoft.ml.onnxruntime.directml.1.20.1.nupkg'
-              Path = 'onnxruntime-directml.nupkg'
-            },
-            @{
-              Name = 'DML_NUPKG'
-              Url = 'https://api.nuget.org/v3-flatcontainer/microsoft.ai.directml/1.15.2/microsoft.ai.directml.1.15.2.nupkg'
-              Path = 'directml.nupkg'
-            },
-            @{
-              Name = 'DEPTH_MODEL'
-              Url = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/c70d1ddbcd93c9bda8098268cc3554adf5e8dd4f/onnx/model_fp16.onnx'
-              Path = 'depth_model.onnx'
-            },
-            @{
-              Name = 'MINGW64_ARCHIVE'
-              Url = 'https://github.com/brechtsanders/winlibs_mingw/releases/download/14.2.0posix-18.1.8-12.0.0-msvcrt-r1/winlibs-x86_64-posix-seh-gcc-14.2.0-mingw-w64msvcrt-12.0.0-r1.7z'
-              Path = 'mingw64.7z'
-            }
-          )
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check -e .
 
-          foreach ($asset in $assets) {
-            curl.exe -L --fail --retry 3 --retry-all-errors --output $asset.Path $asset.Url
-            if ($LASTEXITCODE -ne 0) {
-              throw "download failed: $($asset.Name)"
-            }
-            Write-Digest $asset.Name $asset.Path
-          }
+      - name: Install the pinned PyPA vulnerability scanner
+        run: python -m pip install --disable-pip-version-check pip-audit==2.10.1
 
-          Expand-Archive -LiteralPath 'onnxruntime-directml.nupkg' -DestinationPath 'ort-package'
-          Expand-Archive -LiteralPath 'directml.nupkg' -DestinationPath 'dml-package'
-
-          Write-Digest 'ONNXRUNTIME_DLL' 'ort-package/runtimes/win-x64/native/onnxruntime.dll'
-          Write-Digest 'ONNXRUNTIME_LIB' 'ort-package/runtimes/win-x64/native/onnxruntime.lib'
-          Write-Digest 'ONNXRUNTIME_C_API_HEADER' 'ort-package/build/native/include/onnxruntime_c_api.h'
-          Write-Digest 'ONNXRUNTIME_CXX_API_HEADER' 'ort-package/build/native/include/onnxruntime_cxx_api.h'
-          Write-Digest 'DML_PROVIDER_HEADER' 'ort-package/build/native/include/dml_provider_factory.h'
-
-          $directmlDll = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.dll' | Select-Object -First 1
-          $directmlLib = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.lib' | Select-Object -First 1
-          $directmlHeader = Get-ChildItem 'dml-package' -Recurse -File -Filter 'DirectML.h' | Select-Object -First 1
-          Write-Digest 'DIRECTML_DLL' $directmlDll.FullName
-          Write-Digest 'DIRECTML_LIB' $directmlLib.FullName
-          Write-Digest 'DIRECTML_HEADER' $directmlHeader.FullName
-
-          $sevenZip = 'C:/Program Files/7-Zip/7z.exe'
-          & $sevenZip x 'mingw64.7z' '-omingw64' -y | Out-Host
-          if ($LASTEXITCODE -ne 0) {
-            throw 'MinGW extraction failed'
-          }
-          $gxx = Get-ChildItem 'mingw64' -Recurse -File -Filter 'g++.exe' | Select-Object -First 1
-          $cmake = Get-ChildItem 'mingw64' -Recurse -File -Filter 'cmake.exe' | Select-Object -First 1
-          Write-Digest 'MINGW64_GXX' $gxx.FullName
-          Write-Digest 'MINGW64_CMAKE' $cmake.FullName
+      - name: Audit the resolved Python environment
+        run: python -m pip_audit --progress-spinner off --desc off
