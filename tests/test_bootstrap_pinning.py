@@ -230,6 +230,23 @@ def test_verified_mingw_cache_is_reused_without_network(monkeypatch, tmp_path):
     )
 
 
+def test_build_uses_verified_cmake_even_when_system_cmake_exists(monkeypatch):
+    verified = (r"C:\verified\g++.exe", r"C:\verified\cmake.exe")
+    monkeypatch.setattr(
+        bootstrap,
+        "_ensure_mingw_toolchain",
+        lambda: verified,
+    )
+    monkeypatch.setattr(
+        bootstrap.shutil,
+        "which",
+        lambda name: rf"C:\system\{name}.exe",
+    )
+
+    assert bootstrap._find_gcc() == verified[0]
+    assert bootstrap._find_cmake() == verified[1]
+
+
 def test_all_legacy_core_call_sites_are_bound_to_hardened_implementations():
     assert bootstrap._core._sha256 is bootstrap._sha256
     assert bootstrap._core._download is bootstrap._download
