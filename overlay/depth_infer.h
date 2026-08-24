@@ -89,3 +89,36 @@ public:
 private:
     std::unique_ptr<DepthInferImpl> impl_;
 };
+
+#ifdef G3D_OVERLAY_SHOWWINDOW_GUARD
+// overlay.cpp marks a captured frame available before calling run().  Without
+// this gate, its first visibility update can expose the initial flat 0.5 depth
+// texture while the asynchronous worker is still producing the first result.
+//
+// Once the worker reports a completion, call run() here to drain/upload that
+// result before the window is shown.  While no result exists, clear has_frame;
+// the render loop's second visibility pass restores its bookkeeping to hidden
+// and the next captured frame retries normally.
+inline BOOL G3DShowWindowAfterDepthUpload(
+    HWND window,
+    int command,
+    DepthInferencer* depth,
+    ID3D11Texture2D* captured_frame,
+    bool& has_frame) {
+    if (command == SW_SHOWNOACTIVATE) {
+        const bool depth_ready = depth
+            && depth->inferences_completed() > 0
+            && captured_frame
+            && depth->run(captured_frame);
+        if (!depth_ready) {
+            has_frame = false;
+            return ::ShowWindow(window, SW_HIDE);
+        }
+    }
+    return ::ShowWindow(window, command);
+}
+
+#define ShowWindow(window, command) \
+    G3DShowWindowAfterDepthUpload( \
+        (window), (command), g_depth, g_capTex, g_hasFrame)
+#endif
