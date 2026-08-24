@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - agent/repair-head-coupled-3d
-  pull_request:
-    branches:
-      - master
 
 permissions:
   contents: write
@@ -30,8 +27,8 @@ jobs:
       - name: Install project test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Apply audited source fixes
-        run: python .github/scripts/apply_audit_fixes.py
+      - name: Apply remaining audited source fixes
+        run: python .github/scripts/apply_remaining_audit_fixes.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
@@ -47,7 +44,6 @@ jobs:
           -q
 
       - name: Commit fixes
-        if: github.event_name == 'push'
         shell: pwsh
         run: |
           if (git status --porcelain) {
