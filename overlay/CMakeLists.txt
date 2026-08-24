@@ -34,6 +34,12 @@ endif()
 
 add_executable(Glassless3DOverlay WIN32 overlay.cpp depth_infer.cpp capture_recovery.cpp)
 
+# Only overlay.cpp owns g_depth/g_capTex/g_hasFrame. Enable the visibility
+# guard there without leaking its ShowWindow wrapper into depth_infer.cpp.
+set_source_files_properties(overlay.cpp PROPERTIES
+    COMPILE_DEFINITIONS G3D_OVERLAY_SHOWWINDOW_GUARD
+)
+
 target_compile_definitions(Glassless3DOverlay PRIVATE UNICODE _UNICODE)
 
 target_include_directories(Glassless3DOverlay PRIVATE
