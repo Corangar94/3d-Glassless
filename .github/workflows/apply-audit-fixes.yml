@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/repair-head-coupled-3d
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -44,6 +47,7 @@ jobs:
           -q
 
       - name: Commit fixes
+        if: github.event_name == 'push'
         shell: pwsh
         run: |
           if (git status --porcelain) {
