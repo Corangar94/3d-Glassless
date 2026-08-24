@@ -1,0 +1,55 @@
+name: Native overlay build
+
+on:
+  pull_request:
+    paths:
+      - 'overlay/**'
+      - 'scripts/**'
+      - 'Glassless3DOverlay.exe'
+      - '.github/workflows/native-overlay-build.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'overlay/**'
+      - 'scripts/**'
+      - 'Glassless3DOverlay.exe'
+      - '.github/workflows/native-overlay-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-overlay:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Build the complete Windows overlay runtime
+        run: python scripts/bootstrap.py
+
+      - name: Verify native output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path Glassless3DOverlay.exe)) {
+            throw "Glassless3DOverlay.exe was not produced"
+          }
+          $binary = Get-Item Glassless3DOverlay.exe
+          if ($binary.Length -lt 100000) {
+            throw "Glassless3DOverlay.exe is unexpectedly small: $($binary.Length) bytes"
+          }
+          Get-FileHash Glassless3DOverlay.exe -Algorithm SHA256
+
+      - name: Upload verified overlay binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-glassless3d-overlay
+          path: Glassless3DOverlay.exe
+          if-no-files-found: error
