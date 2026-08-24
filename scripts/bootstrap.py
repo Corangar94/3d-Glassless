@@ -92,6 +92,14 @@ def _sha256(path: str | os.PathLike[str]) -> str:
     return digest.hexdigest()
 
 
+def _display_path(path: str | os.PathLike[str]) -> str:
+    """Format a path safely even when it is on another Windows drive."""
+    try:
+        return os.path.relpath(path, _core._ROOT)
+    except ValueError:
+        return os.path.abspath(path)
+
+
 def _download(url: str, dest: str, label: str, *, sha256: str | None = None) -> None:
     """Download an HTTPS asset atomically, optionally verifying SHA-256."""
     if urllib.parse.urlsplit(url).scheme.lower() != "https":
@@ -100,9 +108,9 @@ def _download(url: str, dest: str, label: str, *, sha256: str | None = None) -> 
     if os.path.exists(dest):
         if sha256 and _sha256(dest).lower() != sha256.lower():
             raise RuntimeError(
-                f"SHA-256 mismatch for existing {os.path.relpath(dest, _core._ROOT)}"
+                f"SHA-256 mismatch for existing {_display_path(dest)}"
             )
-        print(f"  already present: {os.path.relpath(dest, _core._ROOT)}")
+        print(f"  already present: {_display_path(dest)}")
         return
 
     destination_dir = os.path.dirname(dest) or "."
@@ -149,7 +157,7 @@ def _ensure_verified_asset(
     if os.path.exists(destination) and _sha256(destination).lower() != sha256.lower():
         print(
             "  cached asset failed SHA-256 verification; replacing: "
-            f"{os.path.relpath(destination, _core._ROOT)}"
+            f"{_display_path(destination)}"
         )
         os.remove(destination)
     _download(url, destination, label, sha256=sha256)
