@@ -90,6 +90,21 @@ def test_cooldown_expiry_allows_clean_immediate_retry():
     assert decision.failure_count == 1
 
 
+def test_failure_after_rolling_window_starts_new_immediate_episode():
+    clock = FakeClock()
+    controller = _controller(clock)
+    controller.record_failure("overlay", "first")
+    controller.record_failure("overlay", "second")
+    clock.advance(30.1)
+
+    decision = controller.record_failure("overlay", "new sparse failure")
+
+    assert decision.allowed
+    assert decision.delay_s == 0.0
+    assert decision.failure_count == 1
+    assert controller.snapshot("overlay").consecutive_failures == 1
+
+
 def test_stable_health_resets_backoff_only_after_required_interval():
     clock = FakeClock()
     controller = _controller(clock)
