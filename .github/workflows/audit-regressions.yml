@@ -96,18 +96,20 @@ jobs:
           python .github/scripts/write_depth_profile_tests.py
           python .github/scripts/fix_depth_contract_tests.py
           python .github/scripts/apply_camera_geometry_runtime.py
+          python .github/scripts/apply_camera_quality_runtime.py
           python .github/scripts/apply_auto_ui_diagnostics.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
 
-      - name: Run focused quality, geometry, and telemetry regressions
+      - name: Run focused quality, geometry, telemetry, and camera regressions
         run: >-
           python -m pytest
           tests/test_depth_profiles_native.py
           tests/test_fixed_depth_sessions.py
           tests/test_depth_auto_telemetry.py
           tests/test_camera_geometry.py
+          tests/test_camera_quality.py
           tests/test_face_tracker.py
           tests/test_face_tracker_live.py
           tests/test_main.py
