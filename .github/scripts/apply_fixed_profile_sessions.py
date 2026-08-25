@@ -59,10 +59,17 @@ regex_once(
             fixed.options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
             fixed.options->DisableMemPattern();
             fixed.options->SetExecutionMode(ORT_SEQUENTIAL);
-            fixed.options->AddFreeDimensionOverrideByName("batch_size", 1);
-            fixed.options->AddFreeDimensionOverrideByName("height", profile.height);
-            fixed.options->AddFreeDimensionOverrideByName("width", profile.width);
             OrtApi const& api = Ort::GetApi();
+            // ONNX Runtime 1.20.1 exposes symbolic-dimension overrides through
+            // the stable C API. The MinGW C++ wrapper in the NuGet package does
+            // not project these methods, so use the supported C entry point and
+            // retain normal C++ exception semantics via Ort::ThrowOnError.
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "batch_size", 1));
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "height", profile.height));
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "width", profile.width));
             OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_DML(
                 *fixed.options, dml_device_id);
             if (status != nullptr) {
