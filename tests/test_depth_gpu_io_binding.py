@@ -23,7 +23,9 @@ def test_mingw_uses_the_official_directml_device_iid_without_uuid_codegen():
     assert "0x6dbd6437, 0x96fd, 0x423f" in source
     assert "{0xa9, 0x8c, 0xae, 0x5e, 0x7c, 0x2a, 0x57, 0x3f}" in source
     assert "kIID_IDMLDevice," in source
-    assert "__uuidof(IDMLDevice)" not in source
+    # The explanatory comment may name the unsupported expression, but no
+    # executable DMLCreateDevice call may rely on MinGW UUID code generation.
+    assert "            __uuidof(IDMLDevice)," not in source
 
 
 def test_depth_profiles_bind_persistent_dml_device_tensors():
