@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - feature/full-quality-performance-overhaul
   workflow_dispatch:
 
 permissions:
@@ -62,57 +63,59 @@ jobs:
       - name: Audit the resolved Python environment
         run: python -m pip_audit --progress-spinner off --desc off
 
-  temporary-depth-shape-validation:
+  temporary-depth-overhaul:
     if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'feature/full-quality-performance-overhaul'
+      github.event_name == 'push' &&
+      github.ref_name == 'feature/full-quality-performance-overhaul' &&
+      github.actor != 'github-actions[bot]'
+    permissions:
+      contents: write
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/full-quality-performance-overhaul
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+          cache: pip
 
-      - name: Install CPU validation runtime
-        run: python -m pip install --disable-pip-version-check numpy==1.26.4 onnxruntime==1.20.1
+      - name: Install project and test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Download and verify pinned depth model
+      - name: Apply adaptive rectangular depth pipeline
+        run: |
+          python .github/scripts/apply_depth_overhaul.py
+          python .github/scripts/write_depth_profile_tests.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q launcher tracker scripts tests
+
+      - name: Run focused depth and renderer regressions
+        run: >-
+          python -m pytest
+          tests/test_depth_profiles_native.py
+          tests/test_overlay_backend_shader.py
+          tests/test_overlay_capture_resilience.py
+          tests/test_phase0_head_coupled.py
+          -q
+
+      - name: Build the complete native runtime
+        run: python scripts/bootstrap.py
+
+      - name: Commit verified depth overhaul
         shell: pwsh
         run: |
-          curl.exe -L --fail --retry 3 --retry-all-errors `
-            --output model_fp16.onnx `
-            'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/c70d1ddbcd93c9bda8098268cc3554adf5e8dd4f/onnx/model_fp16.onnx'
-          if ($LASTEXITCODE -ne 0) { throw 'model download failed' }
-          $hash = (Get-FileHash model_fp16.onnx -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne '2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04') {
-            throw "model digest mismatch: $hash"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add overlay/depth_infer.cpp tests/test_depth_profiles_native.py Glassless3DOverlay.exe
+          if (git diff --cached --quiet) {
+            throw "depth overhaul produced no source changes"
           }
-
-      - name: Validate rectangular dynamic shapes
-        shell: python
-        run: |
-          import time
-          import numpy as np
-          import onnxruntime as ort
-
-          session = ort.InferenceSession(
-              'model_fp16.onnx',
-              providers=['CPUExecutionProvider'],
-          )
-          input_meta = session.get_inputs()[0]
-          output_meta = session.get_outputs()[0]
-          print('G3D_MODEL_INPUT', input_meta.name, input_meta.shape, input_meta.type)
-          print('G3D_MODEL_OUTPUT', output_meta.name, output_meta.shape, output_meta.type)
-          for height, width in ((224, 392), (294, 518), (392, 686), (518, 518)):
-              tensor = np.zeros((1, 3, height, width), dtype=np.float32)
-              started = time.perf_counter()
-              output = session.run(None, {input_meta.name: tensor})[0]
-              elapsed_ms = (time.perf_counter() - started) * 1000.0
-              print(
-                  'G3D_PROFILE',
-                  f'{height}x{width}',
-                  'output=', output.shape,
-                  f'elapsed_ms={elapsed_ms:.2f}',
-              )
-              assert output.shape[-2:] == (height, width)
+          git commit -m "Add adaptive rectangular depth profiles and motion compensation"
+          git push origin HEAD:feature/full-quality-performance-overhaul
