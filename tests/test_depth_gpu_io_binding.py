@@ -51,7 +51,8 @@ def test_gpu_input_and_output_use_persistent_upload_and_readback_buffers():
     assert "CopyBufferRegion(\n            fixed.readback_resource.Get()" in source
     assert "D3D12_RESOURCE_STATE_UNORDERED_ACCESS" in source
     assert "fixed.input_in_uav_state = true" in source
-    assert "DML allocations are exposed for unordered-access" in source
+    assert "D3D12_RESOURCE_STATE_COPY_DEST" in source
+    assert source.count("transition_barrier(") >= 3
 
 
 def test_gpu_bound_run_has_automatic_cpu_marshalling_fallback():
