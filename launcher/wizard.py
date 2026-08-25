@@ -124,8 +124,10 @@ class OverlayReadyPage(QWizardPage):
 
 _DEFAULT_TRACKING = {
     "ipd_cm": 6.3,
-    "smoothing_q": 0.01,
+    "smoothing_q": 2.0,
     "smoothing_r": 0.1,
+    "prediction_horizon_ms": 0.0,
+    "max_prediction_ms": 80.0,
     "hold_ms": 500,
     "camera_fov_deg": 90.0,
 }

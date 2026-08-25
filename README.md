@@ -7,7 +7,7 @@ Glassless3D creates a **single-view, webcam-tracked virtual-window effect** on a
 
 An ordinary monitor cannot deliver separate left/right images to the eyes, so this is not binocular stereoscopic 3D. The current target is convincing head-coupled 2.5D for one tracked viewer.
 
-> **Project status:** the automated Windows tests, dependency audit, hash-pinned bootstrap, and native overlay build are green. Physical webcam/monitor acceptance is still tracked in [issue #2](https://github.com/Corangar94/3d-Glassless/issues/2).
+> **Project status:** the complete Windows suite, dependency audit, hash-pinned bootstrap, native overlay build, deterministic delayed/noisy/dropout pose replay, and synthetic virtual-window geometry gate run in CI. Hardware observations are optional field-validation evidence rather than a release blocker.
 
 ## How it works
 
@@ -73,6 +73,29 @@ A modified or incomplete cached dependency tree is discarded and rebuilt from it
 
 ## Diagnostics and support
 
+Software-only acceptance, replay regression, and virtual-window demo:
+
+```powershell
+python -m scripts.software_acceptance `
+  --output-dir software_acceptance `
+  --generate-demo `
+  --fail-on-regression
+```
+
+Filter tuning against deterministic delayed/noisy/dropout traces:
+
+```powershell
+python -m scripts.replay_quality `
+  --config config.yaml `
+  --tune `
+  --output-json replay_report.json `
+  --output-markdown replay_report.md
+```
+
+Add `--write-config` to atomically apply the recommended filter values. These
+software gates are reproducible and run in CI; they do not require a webcam,
+monitor, or GPU.
+
 Basic readiness report:
 
 ```powershell
@@ -104,7 +127,7 @@ python -m scripts.collect_support `
   --require-live-runtime
 ```
 
-See [Troubleshooting](docs/TROUBLESHOOTING.md) and the [hardware acceptance checklist](docs/HARDWARE_ACCEPTANCE_CHECKLIST.md) for deeper guidance.
+See [Troubleshooting](docs/TROUBLESHOOTING.md) for active runtime guidance. The [hardware acceptance checklist](docs/HARDWARE_ACCEPTANCE_CHECKLIST.md) remains available for optional device-specific field validation.
 
 ## Development
 
@@ -114,7 +137,7 @@ python -m compileall -q launcher tracker scripts tests
 python -m pytest -q
 ```
 
-Permanent CI gates run the complete Windows test suite, `pip check`, `pip-audit`, the hash-pinned bootstrap, and a clean native overlay build.
+Permanent CI gates run the complete Windows test suite, `pip check`, `pip-audit`, deterministic software acceptance with generated validation frames, the hash-pinned bootstrap, and a clean native overlay build.
 
 ## Experimental ReShade path
 

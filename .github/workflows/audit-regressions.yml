@@ -13,7 +13,7 @@ permissions:
 jobs:
   full-windows-tests:
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       QT_QPA_PLATFORM: offscreen
 
@@ -38,6 +38,20 @@ jobs:
 
       - name: Run the complete Python test suite
         run: python -m pytest -q
+
+      - name: Run deterministic software-only quality acceptance
+        run: >-
+          python -m scripts.software_acceptance
+          --output-dir software_acceptance
+          --generate-demo
+          --fail-on-regression
+
+      - name: Upload software acceptance report and demo
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: glassless3d-software-acceptance
+          path: software_acceptance
+          if-no-files-found: error
 
   python-dependency-audit:
     runs-on: windows-2025
