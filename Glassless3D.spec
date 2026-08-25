@@ -1,50 +1,64 @@
 # Glassless3D.spec
-# Build: pyinstaller Glassless3D.spec
-# Output: dist/Glassless3D.exe
+# Build: pyinstaller --clean --noconfirm Glassless3D.spec
+# Output: dist/Glassless3D/Glassless3D.exe
+#
+# A one-folder bundle is intentional. The native overlay, DirectML runtime,
+# MediaPipe runtime, and depth models are large; extracting a one-file build on
+# every launch increases startup latency and antivirus surface area. PyInstaller
+# places runtime content under dist/Glassless3D/_internal/ while keeping the
+# user-facing launcher at dist/Glassless3D/Glassless3D.exe.
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
-# Collect mediapipe model data
-mediapipe_data = collect_data_files("mediapipe")
-mediapipe_libs = collect_dynamic_libs("mediapipe")
+mediapipe_data, mediapipe_libs, mediapipe_hiddenimports = collect_all(
+    "mediapipe"
+)
+
+runtime_datas = [
+    # Standalone non-injecting native runtime and required models.
+    ("Glassless3DOverlay.exe", "."),
+    ("models/face_landmarker.task", "models"),
+    ("models/depth_anything_v2_small_fp16.onnx", "models"),
+    # ReShade explicitly requests that distributors link users to reshade.me
+    # instead of repackaging its binaries or shader files. The optional,
+    # offline-only integration is prepared separately by the user.
+    ("profiles/wow.json", "profiles"),
+    ("profiles/default.json", "profiles"),
+    *mediapipe_data,
+]
+
+runtime_binaries = [
+    *mediapipe_libs,
+    ("onnxruntime.dll", "."),
+    ("DirectML.dll", "."),
+]
+
+hidden_imports = [
+    *mediapipe_hiddenimports,
+    # The frozen executable dispatches this private child mode at runtime.
+    "tracker.main",
+    "tracker.face_tracker",
+    "tracker.face_tracker_cv2",
+    "tracker.camera_geometry",
+    "tracker.camera_quality",
+    "tracker.pose",
+    "tracker.pose_filter",
+    "tracker.pose_shared_memory",
+    "wmi",
+    "win32com",
+    "win32com.client",
+    "pythoncom",
+    "pywintypes",
+]
 
 a = Analysis(
     ["launcher/__main__.py"],
     pathex=["."],
-    datas=[
-        # Standalone non-injecting runtime and its required models.
-        ("Glassless3DOverlay.exe", "."),
-        ("models/face_landmarker.task", "models"),
-        ("models/depth_anything_v2_small_fp16.onnx", "models"),
-        # ReShade explicitly requests that distributors link users to
-        # reshade.me instead of repackaging its binaries or shader files.
-        # The optional offline-only integration is prepared separately with
-        # `python scripts/bootstrap.py --with-reshade`.
-        ("profiles/wow.json",       "profiles"),
-        ("profiles/default.json",   "profiles"),
-        # MediaPipe models
-        *mediapipe_data,
-    ],
-    # Native inference dependencies must be beside the extracted overlay.
-    # PyInstaller places root-target binaries in its one-file extraction root.
-    binaries=[
-        *mediapipe_libs,
-        ("onnxruntime.dll", "."),
-        ("DirectML.dll", "."),
-    ],
-    hiddenimports=[
-        # The frozen executable dispatches this private child mode at runtime.
-        "tracker.main",
-        "tracker.face_tracker",
-        "tracker.face_tracker_cv2",
-        "wmi",
-        "win32com",
-        "win32com.client",
-        "pythoncom",
-        "pywintypes",
-    ],
+    datas=runtime_datas,
+    binaries=runtime_binaries,
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -60,17 +74,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Glassless3D",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     target_arch=None,
@@ -79,4 +89,14 @@ exe = EXE(
     uac_admin=False,
     uac_uiaccess=False,
     icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="Glassless3D",
 )
