@@ -10,8 +10,10 @@ def source(path: str) -> str:
 
 def test_inverse_warp_moves_virtual_content_with_the_viewer():
     overlay = source("overlay/overlay.cpp")
-    assert "float2 uv_final = localUV - ApplyConfidenceProtectedParallax" in overlay
-    assert "float2 uv_final = localUV + ApplyConfidenceProtectedParallax" not in overlay
+    assert "float2 requestedUV = localUV" in overlay
+    assert "- ApplyConfidenceProtectedParallax" in overlay
+    assert "+ ApplyConfidenceProtectedParallax" not in overlay
+    assert "ResolveDepthDisocclusion" in overlay
 
 
 def test_overlay_uses_explicit_recenter_instead_of_moving_rest_ema():
