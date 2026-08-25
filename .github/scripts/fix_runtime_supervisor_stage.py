@@ -115,6 +115,40 @@ replace_once(
     "manual stop clears paused state",
 )
 replace_once(
+    '''        if self._thread:
+            self._tracker_stop_pending = True
+            self._thread.stop()
+        self._overlay.stop_async()
+''',
+    '''        if self._thread is not None and self._thread.isRunning():
+            self._tracker_stop_pending = True
+            self._thread.stop()
+        else:
+            self._thread = None
+            self._tracker_stop_pending = False
+        self._overlay.stop_async()
+''',
+    "manual stop handles already-finished tracker",
+)
+replace_once(
+    '''    def _on_tracker_stopped(self, tracker: TrackerProcess | None = None) -> None:
+        """Release lifecycle ownership only after the camera child has exited."""
+        if tracker is None or self._thread is tracker:
+            self._thread = None
+        self._tracker_stop_pending = False
+''',
+    '''    def _on_tracker_stopped(self, tracker: TrackerProcess | None = None) -> None:
+        """Release lifecycle ownership only after the camera child has exited."""
+        if tracker is not None and self._thread is not tracker:
+            # A retired process may deliver its queued stopped signal after a
+            # replacement already owns the runtime. Never tear down the new one.
+            return
+        self._thread = None
+        self._tracker_stop_pending = False
+''',
+    "ignore stale tracker stopped signal",
+)
+replace_once(
     '''        elif not self._runtime_requested:
             self._action_btn.setText("▶ START TRACKING")
 ''',
@@ -221,18 +255,24 @@ replace_once(
         self._overlay_recovery_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
+        if self._thread is not None:
+            self._tracker_stop_pending = True
+            self._thread.stop()
         if self._hidden_for_overlay:
 ''',
     '''        self._tracker_recovery_pending = False
         self._overlay_recovery_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
-        if self._thread is not None:
+        if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
+        else:
+            self._thread = None
+            self._tracker_stop_pending = False
         if self._hidden_for_overlay:
 ''',
-    "circuit retires tracker too",
+    "circuit handles already-finished tracker",
 )
 replace_once(
     '''        self._status_label.setToolTip(
@@ -311,6 +351,27 @@ replace_once(
         self._recovery_paused = False
 ''',
     "manual recovery clears paused state",
+)
+replace_once(
+    '''        if self._thread is not None:
+            self._tracker_stop_pending = True
+            self._thread.stop()
+            self._action_btn.setText("Stopping…")
+            self._action_btn.setEnabled(False)
+            return
+        generation = self._recovery_generation
+''',
+    '''        if self._thread is not None and self._thread.isRunning():
+            self._tracker_stop_pending = True
+            self._thread.stop()
+            self._action_btn.setText("Stopping…")
+            self._action_btn.setEnabled(False)
+            return
+        self._thread = None
+        self._tracker_stop_pending = False
+        generation = self._recovery_generation
+''',
+    "manual recovery handles already-finished tracker",
 )
 
 path.write_text(text, encoding="utf-8", newline="\n")
