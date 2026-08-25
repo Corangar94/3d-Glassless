@@ -52,7 +52,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add launcher/mainwindow.py
+          git add launcher/mainwindow.py launcher/runtime_supervisor.py
           if (git diff --cached --quiet) {
             throw "runtime supervisor integration produced no launcher changes"
           }
