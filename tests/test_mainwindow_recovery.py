@@ -78,6 +78,22 @@ def test_tracker_error_restarts_when_user_still_wants_runtime(window):
     assert window._tracker_recovery_pending is False
 
 
+def test_stale_tracker_stopped_signal_cannot_retire_replacement(window):
+    old_tracker = MagicMock()
+    replacement = MagicMock()
+    replacement.isRunning.return_value = True
+    window._thread = replacement
+    window._runtime_requested = True
+    window._tracker_failure_reason = "old tracker failure"
+
+    with patch.object(window, "_queue_tracker_recovery") as queue:
+        window._on_tracker_stopped(old_tracker)
+
+    assert window._thread is replacement
+    queue.assert_not_called()
+    assert window._tracker_failure_reason == "old tracker failure"
+
+
 def test_nonretryable_overlay_start_error_stops_without_crash_loop(window):
     tracker = MagicMock()
     tracker.isRunning.return_value = True
@@ -110,6 +126,21 @@ def test_manual_recovery_resets_circuit_and_starts_when_stopped(window):
     assert not window._recovery.snapshot("tracker").circuit_open
     start.assert_called_once_with(recovery=True)
     assert window._runtime_requested is True
+
+
+def test_manual_recovery_does_not_wait_on_already_finished_tracker(window):
+    tracker = MagicMock()
+    tracker.isRunning.return_value = False
+    window._thread = tracker
+
+    with patch.object(window, "_start_tracking") as start:
+        window._manual_recover_runtime()
+        QTest.qWait(10)
+
+    tracker.stop.assert_not_called()
+    assert window._thread is None
+    assert window._tracker_stop_pending is False
+    start.assert_called_once_with(recovery=True)
 
 
 def test_paused_primary_action_runs_manual_recovery_instead_of_stop(window):
@@ -208,6 +239,22 @@ def test_open_circuit_pauses_automatic_runtime_and_surfaces_retry(window):
     tracker.stop.assert_called_once()
     window.showNormal.assert_called_once()
     single_shot.assert_called_once()
+
+
+def test_pause_with_already_finished_tracker_does_not_wait_for_stopped_signal(window):
+    tracker = MagicMock()
+    tracker.isRunning.return_value = False
+    window._thread = tracker
+    window._runtime_requested = True
+    window._overlay = MagicMock()
+
+    with patch("launcher.mainwindow.QTimer.singleShot"):
+        window._pause_recovery("tracker", "repeated failure", 60.0)
+
+    tracker.stop.assert_not_called()
+    assert window._thread is None
+    assert window._tracker_stop_pending is False
+    assert window._recovery_paused is True
 
 
 def test_cooldown_expiry_automatically_restarts_full_runtime(window):
