@@ -33,6 +33,7 @@ jobs:
         run: |
           python .github/scripts/apply_gpu_io_binding.py
           python .github/scripts/fix_mingw_dml_iid.py
+          python .github/scripts/fix_gpu_resource_state.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
