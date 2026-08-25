@@ -92,6 +92,7 @@ jobs:
         run: |
           python .github/scripts/apply_depth_overhaul.py
           python .github/scripts/write_depth_profile_tests.py
+          python .github/scripts/fix_depth_contract_tests.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
@@ -113,7 +114,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add overlay/depth_infer.cpp tests/test_depth_profiles_native.py Glassless3DOverlay.exe
+          git add overlay/depth_infer.cpp tests/test_depth_profiles_native.py tests/test_overlay_capture_resilience.py Glassless3DOverlay.exe
           if (git diff --cached --quiet) {
             throw "depth overhaul produced no source changes"
           }
