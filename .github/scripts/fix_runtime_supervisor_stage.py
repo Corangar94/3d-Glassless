@@ -36,6 +36,23 @@ replace_once(
     "paused state initialization",
 )
 replace_once(
+    '''    def _toggle_tracking(self) -> None:
+        if self._runtime_requested or (self._thread and self._thread.isRunning()):
+            self._stop_tracking()
+        else:
+            self._start_tracking()
+''',
+    '''    def _toggle_tracking(self) -> None:
+        if self._recovery_paused:
+            self._manual_recover_runtime()
+        elif self._runtime_requested or (self._thread and self._thread.isRunning()):
+            self._stop_tracking()
+        else:
+            self._start_tracking()
+''',
+    "paused primary action",
+)
+replace_once(
     '''        self._runtime_requested = True
         self._tracker_recovery_pending = False
         self._tracker_failure_reason = None
