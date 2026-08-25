@@ -65,6 +65,29 @@ replace_once(
     "start clears paused state",
 )
 replace_once(
+    '''        if not tracker.start():
+            self._overlay_started = False
+            self._thread = None
+            self._tracker_failure_reason = "tracker child failed to start"
+            self._on_status("error")
+            self._queue_tracker_recovery(self._tracker_failure_reason)
+            return
+''',
+    '''        if not tracker.start():
+            # A spawn failure is normally a missing/blocked executable or other
+            # persistent setup problem. Do not burn the crash-loop budget on a
+            # condition that cannot heal without user action.
+            self._runtime_requested = False
+            self._recovery_paused = False
+            self._overlay_started = False
+            self._thread = None
+            self._tracker_failure_reason = None
+            self._on_status("error")
+            return
+''',
+    "nonretryable tracker launch failure",
+)
+replace_once(
     '''    def _stop_tracking(self) -> None:
         self._runtime_requested = False
         self._recovery_generation += 1
@@ -86,6 +109,23 @@ replace_once(
             )
 ''',
     "retirement preserves retry action",
+)
+replace_once(
+    '''    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
+        if not self._overlay_started or not self._tracker_is_running():
+''',
+    '''    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
+        if (
+            not self._runtime_requested
+            and self._overlay_started
+            and self._tracker_is_running()
+        ):
+            # Repair intent after legacy state restoration/tests or a launcher
+            # transition that already owns both active children.
+            self._runtime_requested = True
+        if not self._overlay_started or not self._tracker_is_running():
+''',
+    "infer active runtime intent",
 )
 replace_once(
     '''    def _pause_recovery(
