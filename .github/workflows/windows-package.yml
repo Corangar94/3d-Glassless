@@ -56,7 +56,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_release_packaging.py
-          tests/test_launcher_entry.py
+          tests/test_app.py
           tests/test_tracker_process.py
           tests/test_overlay_process.py
           -q
@@ -72,13 +72,15 @@ jobs:
           --fail-on-regression
 
       - name: Generate resolved Python CycloneDX SBOM
-        run: >-
-          python -m pip_audit
-          --progress-spinner off
-          --desc off
-          --skip-editable
-          --format cyclonedx-json
-          --output release/python-environment.sbom.cdx.json
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          python -m pip_audit `
+            --progress-spinner off `
+            --desc off `
+            --skip-editable `
+            --format cyclonedx-json `
+            --output release/python-environment.sbom.cdx.json
 
       - name: Build one-folder launcher and tracker
         run: python -m PyInstaller --clean --noconfirm Glassless3D.spec
@@ -106,15 +108,19 @@ jobs:
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
-          foreach ($arguments in @('--help', '--tracker-child --help')) {
+          $cases = @(
+            @{ Name = 'launcher-help'; Arguments = @('--help') },
+            @{ Name = 'tracker-help'; Arguments = @('--tracker-child', '--help') }
+          )
+          foreach ($case in $cases) {
             $process = Start-Process `
               -FilePath $exe `
-              -ArgumentList $arguments `
+              -ArgumentList $case.Arguments `
               -Wait `
               -PassThru `
               -WindowStyle Hidden
             if ($process.ExitCode -ne 0) {
-              throw "frozen smoke test failed: $arguments -> $($process.ExitCode)"
+              throw "$($case.Name) failed with exit code $($process.ExitCode)"
             }
           }
 
