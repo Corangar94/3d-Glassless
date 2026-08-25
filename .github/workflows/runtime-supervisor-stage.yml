@@ -30,7 +30,9 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
       - name: Apply runtime supervisor integration
-        run: python .github/scripts/apply_runtime_supervisor.py
+        run: |
+          python .github/scripts/apply_runtime_supervisor.py
+          python .github/scripts/fix_runtime_supervisor_stage.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
