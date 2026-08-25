@@ -1,0 +1,150 @@
+name: One-time slim standalone runtime stage
+
+on:
+  push:
+    branches:
+      - feature/slim-standalone-runtime
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-package:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-2025
+    timeout-minutes: 70
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/slim-standalone-runtime
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install runtime, packaging, audit, and test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+
+      - name: Apply the headless tracker-child migration
+        run: python .github/scripts/apply_slim_tracker_child.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q launcher tracker scripts tests
+
+      - name: Run focused slim-runtime contracts
+        run: >-
+          python -m pytest
+          tests/test_slim_mediapipe_runtime.py
+          tests/test_bundle_size.py
+          tests/test_system_tray.py
+          tests/test_frozen_self_test.py
+          tests/test_packaging.py
+          tests/test_release_packaging.py
+          tests/test_face_tracker.py
+          tests/test_face_tracker_live.py
+          tests/test_calibration.py
+          tests/test_calibration_audit.py
+          tests/test_app.py
+          tests/test_tracker_process.py
+          tests/test_overlay_process.py
+          -q
+
+      - name: Build and verify native runtime assets
+        run: python scripts/bootstrap.py
+
+      - name: Run deterministic software acceptance
+        run: >-
+          python -m scripts.software_acceptance
+          --output-dir software_acceptance
+          --generate-demo
+          --fail-on-regression
+
+      - name: Generate resolved Python CycloneDX SBOM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          python -m pip_audit `
+            --progress-spinner off `
+            --desc off `
+            --skip-editable `
+            --format cyclonedx-json `
+            --output release/python-environment.sbom.cdx.json
+
+      - name: Build slim one-folder launcher and tracker
+        run: python -m PyInstaller --clean --noconfirm Glassless3D.spec
+
+      - name: Run the frozen no-hardware self-test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
+          $report = (Join-Path $PWD 'frozen-self-test.json')
+          $process = Start-Process `
+            -FilePath $exe `
+            -ArgumentList @('--self-test', '--output', $report) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report -Raw | Write-Host }
+            throw "frozen self-test failed with exit code $($process.ExitCode)"
+          }
+          $payload = Get-Content $report -Raw | ConvertFrom-Json
+          if ($payload.passed -ne $true) {
+            throw "frozen self-test report did not pass"
+          }
+          Get-Content $report -Raw | Write-Host
+
+      - name: Create deterministic release candidate
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
+          python -m scripts.package_windows_release `
+            --bundle-dir dist/Glassless3D `
+            --output-dir release `
+            --acceptance-dir software_acceptance `
+            --sbom release/python-environment.sbom.cdx.json `
+            --summary-json release/package-summary.json
+
+      - name: Enforce bundle-size and forbidden-module budgets
+        shell: pwsh
+        run: |
+          $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
+          python -m scripts.analyze_bundle_size `
+            --manifest $summary.manifest `
+            --archive $summary.archive `
+            --output-json release/bundle-size.json `
+            --output-markdown release/bundle-size.md `
+            --fail-on-regression
+
+      - name: Upload slim package evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: slim-standalone-runtime
+          path: |
+            release/*.zip
+            release/*.sha256
+            release/*.manifest.json
+            release/*.sbom.cdx.json
+            release/package-summary.json
+            release/bundle-size.json
+            release/bundle-size.md
+            frozen-self-test.json
+          if-no-files-found: error
+
+      - name: Commit verified tracker-child migration
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tracker/main.py tests/test_release_packaging.py
+          if (git diff --cached --quiet) {
+            throw "slim tracker-child migration produced no source changes"
+          }
+          git commit -m "Move the tracker tray into the Qt launcher"
+          git push origin HEAD:feature/slim-standalone-runtime
