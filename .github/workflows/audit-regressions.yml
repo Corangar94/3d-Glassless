@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - master
-      - feature/full-quality-performance-overhaul
   workflow_dispatch:
 
 permissions:
@@ -13,10 +12,6 @@ permissions:
 
 jobs:
   full-windows-tests:
-    if: >-
-      github.event_name != 'push' ||
-      github.ref_name != 'feature/full-quality-performance-overhaul' ||
-      github.actor == 'github-actions[bot]'
     runs-on: windows-2025
     timeout-minutes: 30
     env:
@@ -66,74 +61,3 @@ jobs:
 
       - name: Audit the resolved Python environment
         run: python -m pip_audit --progress-spinner off --desc off
-
-  temporary-quality-overhaul:
-    if: >-
-      github.event_name == 'push' &&
-      github.ref_name == 'feature/full-quality-performance-overhaul' &&
-      github.actor != 'github-actions[bot]'
-    permissions:
-      contents: write
-    runs-on: windows-2025
-    timeout-minutes: 45
-    env:
-      QT_QPA_PLATFORM: offscreen
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: feature/full-quality-performance-overhaul
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: Install project and test dependencies
-        run: python -m pip install --disable-pip-version-check -e ".[dev]"
-
-      - name: Apply remaining quality migrations
-        shell: bash
-        run: |
-          set -euo pipefail
-          python .github/scripts/fix_quality_contracts.py
-          python .github/scripts/apply_fixed_profile_sessions.py
-          python .github/scripts/apply_depth_auto_telemetry.py
-          python .github/scripts/apply_camera_geometry_runtime.py
-          python .github/scripts/apply_camera_quality_runtime.py
-          python .github/scripts/apply_auto_ui_diagnostics.py
-
-      - name: Compile Python sources
-        run: python -m compileall -q launcher tracker scripts tests
-
-      - name: Run focused quality, geometry, telemetry, and camera regressions
-        run: >-
-          python -m pytest
-          tests/test_depth_profiles_native.py
-          tests/test_fixed_depth_sessions.py
-          tests/test_depth_auto_telemetry.py
-          tests/test_camera_geometry.py
-          tests/test_camera_quality.py
-          tests/test_face_tracker.py
-          tests/test_face_tracker_live.py
-          tests/test_main.py
-          tests/test_overlay_backend_shader.py
-          tests/test_overlay_capture_resilience.py
-          tests/test_phase0_head_coupled.py
-          tests/test_wizard.py
-          -q
-
-      - name: Build the complete native runtime
-        run: python scripts/bootstrap.py
-
-      - name: Commit verified quality overhaul
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add overlay/depth_infer.cpp overlay/depth_infer.h overlay/overlay.cpp tracker/camera_geometry.py tracker/face_tracker.py tracker/face_tracker_cv2.py tracker/main.py tracker/shared_settings.py launcher/mainwindow.py launcher/wizard.py launcher/diagnostics.py config.yaml tests/test_wizard.py Glassless3DOverlay.exe
-          if (git diff --cached --quiet) {
-            throw "quality overhaul produced no source changes"
-          }
-          git commit -m "Complete adaptive depth, calibration, and runtime telemetry"
-          git push origin HEAD:feature/full-quality-performance-overhaul
