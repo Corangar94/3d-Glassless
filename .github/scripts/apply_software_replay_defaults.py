@@ -17,6 +17,53 @@ replace_once(
     "dropout_ranges_s=((2.40, 3.00), (5.10, 5.50)),",
     "dropout_ranges_s=((2.40, 2.95), (5.10, 5.45)),",
 )
+replace_once(
+    "tracker/replay_quality.py",
+    '''DEFAULT_SCENARIOS: tuple[ScenarioSpec, ...] = (
+''',
+    '''_REPLAY_BASE_TIMESTAMP_MS = 1000
+
+
+DEFAULT_SCENARIOS: tuple[ScenarioSpec, ...] = (
+''',
+)
+replace_once(
+    "tracker/replay_quality.py",
+    '''        capture_ms = int(round(capture_s * 1000.0)) & 0xFFFF_FFFF
+        delivery_ms = int(round(capture_s * 1000.0 + latency))
+''',
+    '''        # Timestamp zero means "missing timestamp" in the production pose
+        # contract. Start deterministic traces at a valid nonzero epoch so the
+        # replay exercises exactly the same camera-time path as the runtime.
+        capture_ms = (
+            _REPLAY_BASE_TIMESTAMP_MS + int(round(capture_s * 1000.0))
+        ) & 0xFFFF_FFFF
+        delivery_ms = _REPLAY_BASE_TIMESTAMP_MS + int(
+            round(capture_s * 1000.0 + latency)
+        )
+''',
+)
+replace_once(
+    "tracker/replay_quality.py",
+    '''        timestamp_ms = int(round(index * 1000.0 / spec.display_hz))
+''',
+    '''        timestamp_ms = _REPLAY_BASE_TIMESTAMP_MS + int(
+            round(index * 1000.0 / spec.display_hz)
+        )
+''',
+)
+replace_once(
+    "tracker/replay_quality.py",
+    '''        truth_values.append(truth_pose(spec.motion, timestamp_ms / 1000.0))
+''',
+    '''        truth_values.append(
+            truth_pose(
+                spec.motion,
+                (timestamp_ms - _REPLAY_BASE_TIMESTAMP_MS) / 1000.0,
+            )
+        )
+''',
+)
 
 replace_once(
     "tracker/main.py",
