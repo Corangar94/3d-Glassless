@@ -14,8 +14,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-from PySide6.QtWidgets import QApplication, QWizard
 from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QWizard
 
 CONFIG_PATH = os.path.join(
     os.environ.get("APPDATA", "."), "Glassless3D", "config.yaml"
@@ -79,13 +79,22 @@ def main(argv: list[str] | None = None) -> None:
     config_path = str(args.config)
     if _is_first_run(config_path):
         from launcher.wizard import SetupWizard
+
         wizard = SetupWizard(config_path=config_path)
         if wizard.exec() != QWizard.DialogCode.Accepted:
             sys.exit(0)
 
     config = _load_config(config_path)
     from launcher.mainwindow import MainWindow
+    from launcher.system_tray import SystemTrayController, make_tray_icon
+
+    app.setWindowIcon(make_tray_icon())
     window = MainWindow(config=config, config_path=config_path)
+    tray = SystemTrayController(
+        app,
+        window,
+        quit_callback=lambda: _request_app_shutdown(app),
+    )
     window.show()
     interrupt_timer = _install_console_interrupt_handler(app)
     try:
@@ -94,5 +103,6 @@ def main(argv: list[str] | None = None) -> None:
         _request_app_shutdown(app)
         code = 130
     finally:
+        tray.close()
         interrupt_timer.stop()
     sys.exit(code)
