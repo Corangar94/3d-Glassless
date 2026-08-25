@@ -111,6 +111,15 @@ class RuntimeRecoveryController:
         cutoff = now_s - self._policy.failure_window_s
         while state.failures and state.failures[0] < cutoff:
             state.failures.popleft()
+        if not state.failures and state.open_until_s <= now_s:
+            # A sparse failure after the rolling window begins a new episode
+            # instead of inheriting an arbitrarily large exponential delay.
+            state.consecutive_failures = 0
+        else:
+            state.consecutive_failures = min(
+                state.consecutive_failures,
+                len(state.failures),
+            )
         if state.open_until_s and now_s >= state.open_until_s:
             state.open_until_s = 0.0
             state.consecutive_failures = 0
