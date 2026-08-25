@@ -6,7 +6,7 @@ camera:
 overlay:
   depth_curve: 2
   depth_gamma: 2.0
-  depth_performance_mode: balanced
+  depth_performance_mode: auto
   focus_radius: 0.1
   screen_h_cm: 0.0
   screen_w_cm: 0.0

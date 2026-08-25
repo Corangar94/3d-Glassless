@@ -141,7 +141,7 @@ def test_done_page_writes_overlay_config_defaults(qapp, tmp_path):
     assert cfg["tracking"]["ipd_cm"] == 6.3
     assert cfg["overlay"] == {
         "display_backend": "desktop_overlay",
-        "depth_performance_mode": "balanced",
+        "depth_performance_mode": "auto",
         "camera_fov_deg": pytest.approx(90.0),
         "strength_x": pytest.approx(1.0),
         "strength_y": pytest.approx(1.0),

@@ -165,7 +165,9 @@ def test_depth_crossfade_is_wall_clock_based_and_not_render_frame_based():
     header = Path("overlay/depth_infer.h").read_text(encoding="utf-8")
 
     assert "std::chrono::steady_clock" in depth
-    assert "kBlendDurationSec" in depth
+    assert "blend_duration_sec" in depth
+    assert "last_depth_arrival" in depth
+    assert "interval * 0.90f" in depth
     assert "kBlendFrames" not in depth
     assert "advance_blend" not in header
 
@@ -228,7 +230,10 @@ def test_tiled_depth_uses_global_percentiles_and_contrast():
     assert "global_hi" in depth
     assert "tile_overlap" in depth
     assert "tile_crop_x" in depth
-    assert "Apply one contrast transform over the stitched frame" in depth
+    assert "smoothed_global_lo" in depth
+    assert "smoothed_global_hi" in depth
+    assert "smoothed_contrast_mean" in depth
+    assert "smoothed_contrast_gain" in depth
 
 
 def test_overlay_prefers_wgc_target_window_capture_for_games():
@@ -270,10 +275,14 @@ def test_depth_cleanup_releases_both_current_and_previous_depth_resources():
 def test_depth_worker_run_can_be_terminated_before_join():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 
-    assert "std::unique_ptr<Ort::RunOptions>" in source
-    assert "session->Run(*run_options" in source
-    assert "run_options->SetTerminate()" in source
-    assert source.index("run_options->SetTerminate()") < source.index("worker.join()")
+    assert "std::unique_ptr<Ort::RunOptions> run_options;" in source
+    assert "fixed.session->Run(" in source
+    assert "*fixed.run_options" in source
+    assert "for (auto& fixed : profile_sessions)" in source
+    assert "fixed.run_options->SetTerminate();" in source
+    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+        "worker.join()"
+    )
 
 
 def test_acquire_device_loss_enters_device_recovery_before_generic_rebind():

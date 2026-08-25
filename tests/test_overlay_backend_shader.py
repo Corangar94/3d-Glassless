@@ -87,7 +87,7 @@ def test_depth_inferencer_exposes_runtime_performance_mode():
     assert "performance_mode" in source
 
 
-def test_overlay_uses_crisp_scene_sampler_and_linear_depth_sampler():
+def test_overlay_uses_stable_scene_sampling_and_linear_depth_sampling():
     source = Path("overlay/overlay.cpp").read_text(encoding="utf-8")
 
     assert "SamplerState SceneSmp : register(s0);" in source
@@ -95,8 +95,9 @@ def test_overlay_uses_crisp_scene_sampler_and_linear_depth_sampler():
     assert "DepthTex.Sample(DepthSmp" in source
     assert "DepthPrevTex.Sample(DepthSmp" in source
     assert "SceneTex.SampleGrad(SceneSmp" in source
-    assert "D3D11_FILTER_MIN_MAG_MIP_POINT" in source
-    assert "D3D11_FILTER_MIN_MAG_MIP_LINEAR" in source
+    assert "sceneSd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR" in source
+    assert "depthSd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR" in source
+    assert "SampleSceneQuality" in source
 
 
 def test_overlay_caps_relative_head_motion_before_shader_parallax():
