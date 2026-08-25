@@ -3,22 +3,26 @@ import re
 
 path = Path("overlay/depth_infer.cpp")
 text = path.read_text(encoding="utf-8")
+original = text
 
 
-def replace_once(old: str, new: str) -> None:
+def replace_once(old: str, new: str, label: str) -> None:
     global text
     if new in text:
         return
-    if text.count(old) != 1:
-        raise RuntimeError(f"expected one match for {old[:100]!r}")
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{label}: expected one match, found {count}")
     text = text.replace(old, new, 1)
 
 
-def regex_once(pattern: str, replacement: str) -> None:
+def regex_once(pattern: str, replacement: str, label: str) -> None:
     global text
+    if replacement in text:
+        return
     updated, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
     if count != 1:
-        raise RuntimeError(f"expected one regex match for {pattern[:100]!r}, got {count}")
+        raise RuntimeError(f"{label}: expected one regex match, found {count}")
     text = updated
 
 
@@ -36,6 +40,7 @@ replace_once(
     std::wstring model_path_copy;
     int dml_device_id = 0;
 ''',
+    "ORT state",
 )
 
 regex_once(
@@ -49,7 +54,7 @@ regex_once(
         FixedProfileSession& fixed = fixed_session(mode);
         if (fixed.session) return true;
         try {
-            DepthProfile profile = profile_for_mode(mode);
+            const DepthProfile profile = profile_for_mode(mode);
             fixed.options = std::make_unique<Ort::SessionOptions>();
             fixed.options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
             fixed.options->DisableMemPattern();
@@ -109,6 +114,7 @@ regex_once(
     }
 
     // CPU: downsample''',
+    "ORT session factory",
 )
 
 replace_once(
@@ -124,19 +130,27 @@ replace_once(
                     auto outputs = fixed.session->Run(
                         *fixed.run_options, input_names, &input, 1, output_names, 1);
 ''',
+    "profile Run call",
+)
+
+regex_once(
+    r'''            if \(run_options\) \{\n                try \{\n                    run_options->SetTerminate\(\);\n                \} catch \(\.\.\.\) \{\n                    // cleanup/destruction must not throw; join remains the\n                    // final synchronization point for the session lifetime\.\n                \}\n            \}\n''',
+    '''            for (auto& fixed : profile_sessions) {
+                if (!fixed.run_options) continue;
+                try {
+                    fixed.run_options->SetTerminate();
+                } catch (...) {
+                    // cleanup/destruction must not throw; join remains the
+                    // final synchronization point for the session lifetime.
+                }
+            }
+''',
+    "profile RunOptions termination",
 )
 
 replace_once(
-    '''        if (run_options) run_options->SetTerminate();
-''',
-    '''        for (auto& fixed : profile_sessions) {
-            if (fixed.run_options) fixed.run_options->SetTerminate();
-        }
-''',
-)
-replace_once(
-    '''        run_options.reset();
-        session.reset();
+    '''        session.reset();
+        run_options.reset();
         opts.reset();
         env.reset();
 ''',
@@ -148,6 +162,9 @@ replace_once(
         model_path_copy.clear();
         env.reset();
 ''',
+    "profile session cleanup",
 )
 
+if text == original:
+    raise RuntimeError("fixed-profile session migration made no changes")
 path.write_text(text, encoding="utf-8", newline="\n")
