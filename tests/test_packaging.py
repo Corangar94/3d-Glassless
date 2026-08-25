@@ -17,6 +17,15 @@ def test_pyproject_defines_runtime_and_dev_dependencies():
         for dependency in payload["project"]["optional-dependencies"]["dev"]
     )
     assert payload["project"]["scripts"]["glassless3d"] == "launcher.app:main"
+    runtime = payload["project"]["dependencies"]
+    assert any(
+        dependency.startswith("opencv-contrib-python") for dependency in runtime
+    )
+    assert not any(
+        dependency.startswith("opencv-python")
+        and not dependency.startswith("opencv-contrib-python")
+        for dependency in runtime
+    )
 
 
 def test_setup_py_is_a_fail_closed_retired_installer_shim():
@@ -41,12 +50,14 @@ def test_pyinstaller_does_not_redistribute_reshade_binaries_or_shaders():
     assert "datas=runtime_datas" in source
 
 
-def test_pyinstaller_includes_frozen_tracker_child_modules():
+def test_pyinstaller_includes_frozen_tracker_and_self_test_modules():
     source = (ROOT / "Glassless3D.spec").read_text(encoding="utf-8")
 
     assert '"tracker.main"' in source
     assert '"tracker.face_tracker"' in source
     assert '"tracker.face_tracker_cv2"' in source
+    assert '"launcher.frozen_self_test"' in source
+    assert '"launcher.system_tray"' in source
 
 
 def test_pyinstaller_bundles_standalone_runtime_and_models():
@@ -60,13 +71,17 @@ def test_pyinstaller_bundles_standalone_runtime_and_models():
         '("models/depth_anything_v2_small_fp16.onnx", "models")'
         in source
     )
+    assert "prepare_slim_mediapipe_runtime" in source
+    assert "collect_all" not in source
 
 
-def test_frozen_entrypoint_dispatches_private_tracker_child():
+def test_frozen_entrypoint_dispatches_private_modes():
     source = (ROOT / "launcher" / "__main__.py").read_text(encoding="utf-8")
 
     assert '"--tracker-child"' in source
     assert "from tracker.main import main" in source
+    assert '"--self-test"' in source
+    assert "from launcher.frozen_self_test import main" in source
 
 
 def test_bootstrap_pins_current_official_reshade_release():
