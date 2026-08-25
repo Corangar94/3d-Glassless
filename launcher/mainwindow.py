@@ -1171,7 +1171,11 @@ class MainWindow(QMainWindow):
         tracker.frame_ready.connect(self._on_frame)
         tracker.status_changed.connect(self._on_status)
         tracker.status_changed.connect(self._on_tracker_status_for_overlay)
-        tracker.stopped.connect(self._on_tracker_stopped)
+        # TrackerProcess.stopped has no payload. Bind the process owner here so
+        # a queued stop from a retired tracker cannot clear a newer replacement.
+        tracker.stopped.connect(
+            lambda owner=tracker: self._on_tracker_stopped(owner)
+        )
         if not tracker.start():
             # A spawn failure is normally a missing/blocked executable or other
             # persistent setup problem. Do not burn the crash-loop budget on a
