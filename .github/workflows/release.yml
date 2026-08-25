@@ -21,6 +21,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-validate-publish:
@@ -109,6 +111,22 @@ jobs:
             --sbom release/python-environment.sbom.cdx.json `
             --summary-json release/package-summary.json
 
+      - name: Resolve release package paths
+        id: release_paths
+        shell: pwsh
+        run: |
+          $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
+          if (-not (Test-Path -LiteralPath $summary.archive)) {
+            throw "release archive is missing: $($summary.archive)"
+          }
+          $sbom = Get-ChildItem -Path release -Filter '*-windows-x64.sbom.cdx.json' |
+            Select-Object -First 1
+          if ($null -eq $sbom) {
+            throw "package-specific CycloneDX SBOM is missing"
+          }
+          "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
+          "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
+
       - name: Enforce release version, legal, and acceptance gates
         run: >-
           python -m scripts.check_release_ready
@@ -130,6 +148,17 @@ jobs:
           if ($tagCommit -ne $headCommit) {
             throw "tag $env:TAG_NAME points to $tagCommit, but this build is $headCommit"
           }
+
+      - name: Attest release build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.release_paths.outputs.archive }}
+
+      - name: Attest release SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.release_paths.outputs.archive }}
+          sbom-path: ${{ steps.release_paths.outputs.sbom }}
 
       - name: Upload dry-run release candidate
         if: env.DRY_RUN == 'true'
