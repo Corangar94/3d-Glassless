@@ -151,14 +151,17 @@ jobs:
         if: env.DRY_RUN != 'true'
         shell: pwsh
         run: |
-          $assets = @(
-            (Get-ChildItem release/*.zip).FullName,
-            (Get-ChildItem release/*.sha256).FullName,
-            (Get-ChildItem release/*.manifest.json).FullName,
-            (Get-ChildItem release/*.sbom.cdx.json).FullName,
-            (Resolve-Path software_acceptance/software_acceptance.json).Path,
-            (Resolve-Path software_acceptance/software_acceptance.md).Path
-          )
+          $assets = @()
+          $assets += Get-ChildItem -Path release -Filter '*.zip' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.sha256' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.manifest.json' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.sbom.cdx.json' | ForEach-Object FullName
+          $assets += (Resolve-Path software_acceptance/software_acceptance.json).Path
+          $assets += (Resolve-Path software_acceptance/software_acceptance.md).Path
+          if ($assets.Count -lt 6) {
+            throw "release asset set is incomplete: $($assets.Count) files"
+          }
+
           $arguments = @(
             'release', 'create', $env:TAG_NAME,
             '--verify-tag',
@@ -168,5 +171,10 @@ jobs:
           if ($env:TAG_NAME -match '(?i)(alpha|beta|rc|preview)') {
             $arguments += '--prerelease'
           }
-          $arguments += $assets
-          gh @arguments
+          foreach ($asset in $assets) {
+            $arguments += $asset
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE"
+          }
