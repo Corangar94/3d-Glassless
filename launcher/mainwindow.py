@@ -1201,7 +1201,11 @@ class MainWindow(QMainWindow):
             self._hidden_for_overlay = True
             self.showMinimized()
         except OverlayStartError as e:
-            self._tracker_failure_reason = f"overlay launch failed: {e}"
+            # Missing runtime assets, an invalid executable, or policy/setup
+            # errors cannot heal through repeated process restarts.
+            self._runtime_requested = False
+            self._recovery_paused = False
+            self._tracker_failure_reason = None
             self._on_status("error")
             self._status_label.setText("✕ OVERLAY ERROR")
             self._overlay_tile.setText("Overlay\nError")
@@ -1395,7 +1399,12 @@ class MainWindow(QMainWindow):
             summary.has_frame
             and summary.capture_state == "running"
             and summary.depth_hz > 0
+            and self._overlay.is_running()
+            and self._overlay.is_transitioning() is not True
         ):
+            # Native recovery succeeded before a delayed launcher restart fired.
+            # Clearing the pending flag makes that stale timer a no-op.
+            self._overlay_recovery_pending = False
             self._recovery.mark_healthy("overlay")
 
         target_path = self._active_profile.executable_path.strip()
@@ -1494,10 +1503,10 @@ class MainWindow(QMainWindow):
         if not decision.allowed:
             self._pause_recovery("overlay", decision.reason, decision.delay_s)
             return
+        self._overlay_recovery_pending = True
         if decision.delay_s <= 0.0:
             self._execute_overlay_recovery(self._recovery_generation, reason)
             return
-        self._overlay_recovery_pending = True
         generation = self._recovery_generation
         if hasattr(self, "_overlay_tile"):
             self._overlay_tile.setText(
@@ -1516,7 +1525,11 @@ class MainWindow(QMainWindow):
         )
 
     def _execute_overlay_recovery(self, generation: int, reason: str) -> None:
-        if generation != self._recovery_generation or not self._runtime_requested:
+        if (
+            generation != self._recovery_generation
+            or not self._runtime_requested
+            or not self._overlay_recovery_pending
+        ):
             return
         self._overlay_recovery_pending = False
         if not self._tracker_is_running():
@@ -1601,17 +1614,49 @@ class MainWindow(QMainWindow):
         )
         self._status_label.setToolTip(
             f"{component} failed repeatedly: {reason}. "
-            f"Automatic retry paused for {retry_after_s:.0f}s."
+            f"Automatic retry pauses for {retry_after_s:.0f}s; "
+            "Retry Runtime overrides the cooldown."
         )
         self._action_btn.setText("↻ RETRY RUNTIME")
         self._action_btn.setEnabled(True)
         if hasattr(self, "_overlay_tile"):
             self._overlay_tile.setText("Overlay\nPaused")
+        generation = self._recovery_generation
+        QTimer.singleShot(
+            max(1, int(round(retry_after_s * 1000.0))),
+            lambda token=generation, name=component: self._resume_recovery_after_cooldown(
+                token, name
+            ),
+        )
         _log.error(
             "%s recovery circuit opened after repeated failure: %s",
             component,
             reason,
         )
+
+    def _resume_recovery_after_cooldown(
+        self,
+        generation: int,
+        component: str,
+    ) -> None:
+        if generation != self._recovery_generation or not self._recovery_paused:
+            return
+        snapshot = self._recovery.snapshot(component)
+        if snapshot.circuit_open:
+            QTimer.singleShot(
+                max(1, int(round(snapshot.retry_after_s * 1000.0))),
+                lambda token=generation, name=component: self._resume_recovery_after_cooldown(
+                    token, name
+                ),
+            )
+            return
+        self._recovery_paused = False
+        self._runtime_requested = True
+        self._tracker_failure_reason = None
+        self._on_status("restarting")
+        self._action_btn.setText("■ CANCEL RECOVERY")
+        self._action_btn.setEnabled(True)
+        self._execute_tracker_recovery(generation)
 
     def _manual_recover_runtime(self) -> None:
         self._recovery.reset()
