@@ -2,13 +2,12 @@
 
 [![Audit and dependency gates](https://github.com/Corangar94/3d-Glassless/actions/workflows/audit-regressions.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/audit-regressions.yml)
 [![Native overlay build](https://github.com/Corangar94/3d-Glassless/actions/workflows/native-overlay-build.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/native-overlay-build.yml)
-[![Standalone Windows package](https://github.com/Corangar94/3d-Glassless/actions/workflows/windows-package.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/windows-package.yml)
 
 Glassless3D creates a **single-view, webcam-tracked virtual-window effect** on an ordinary Windows monitor. As the viewer moves, scene layers reproject using head position and monocular depth, producing motion parallax.
 
 An ordinary monitor cannot deliver separate left/right images to the eyes, so this is not binocular stereoscopic 3D. The current target is convincing head-coupled 2.5D for one tracked viewer.
 
-> **Project status:** the complete Windows suite, dependency audit, hash-pinned bootstrap, native overlay build, deterministic delayed/noisy/dropout pose replay, synthetic virtual-window geometry gate, and standalone Windows packaging run in CI. Hardware observations are optional field-validation evidence rather than a release blocker.
+> **Project status:** the complete Windows suite, dependency audit, hash-pinned bootstrap, native overlay build, deterministic delayed/noisy/dropout pose replay, and synthetic virtual-window geometry gate run in CI. Hardware observations are optional field-validation evidence rather than a release blocker.
 
 ## How it works
 
@@ -22,22 +21,7 @@ The default, non-injecting desktop backend:
 
 The overlay is not shown until the first real depth result has reached the GPU.
 
-## Standalone Windows package
-
-CI builds a one-folder Windows x64 package containing the launcher, tracker, native overlay, DirectML/ONNX Runtime libraries, and verified models. The standalone package does **not** require a separately installed Python interpreter.
-
-Every candidate includes:
-
-- a deterministic ZIP;
-- per-file and archive SHA-256 values;
-- an exact release manifest;
-- a CycloneDX Python-environment SBOM;
-- software-acceptance JSON/Markdown; and
-- generated virtual-window validation frames.
-
-The project has not selected a software license yet, so current CI packages are evaluation artifacts and contain `UNLICENSED_PREVIEW.txt`. Publication is blocked until reviewed `LICENSE` and `THIRD_PARTY_NOTICES.md` files are committed. See [Releasing Glassless3D](docs/RELEASING.md).
-
-## Source-install requirements
+## Requirements
 
 - 64-bit Windows with D3D11 and DirectML support
 - Python 3.11 or 3.12
@@ -45,7 +29,7 @@ The project has not selected a software license yet, so current CI packages are 
 - 7-Zip installed in its normal Windows location or available as `7z` on `PATH`
 - enough free disk space for the models, native dependencies, and pinned build toolchain
 
-## Fresh source install
+## Fresh install
 
 Run the following in PowerShell:
 
@@ -79,6 +63,32 @@ A modified or incomplete cached dependency tree is discarded and rebuilt from it
 3. Start tracking.
 4. Move naturally and press `Ctrl+R` once the normal viewing position is comfortable.
 5. Use the launcher’s runtime tiles or diagnostics command to confirm live tracking, capture, and depth flow.
+
+## Automatic runtime recovery
+
+The launcher supervises both the tracker and native overlay instead of restarting them in an unlimited tight loop:
+
+- the first transient tracker or overlay failure retries immediately;
+- repeated failures use exponential backoff, capped at 20 seconds by default;
+- five failures inside the default 90-second rolling window open a 60-second cooldown circuit;
+- the full runtime resumes automatically when the cooldown expires;
+- **Recover runtime** or the primary **Retry runtime** action clears the circuit immediately;
+- an explicit Stop cancels every queued restart by generation token;
+- missing executables, incomplete runtime assets, invalid policy, and other nonrecoverable startup failures stop immediately rather than consuming the crash-loop budget;
+- a stable 30-second run resets the failure episode.
+
+The policy is configurable in `config.yaml`:
+
+```yaml
+recovery:
+  immediate_retries: 1
+  base_delay_s: 1.0
+  max_delay_s: 20.0
+  max_failures: 5
+  failure_window_s: 90.0
+  cooldown_s: 60.0
+  stable_reset_s: 30.0
+```
 
 ## Controls
 
