@@ -49,6 +49,7 @@ target_include_directories(Glassless3DOverlay PRIVATE
 
 target_link_libraries(Glassless3DOverlay PRIVATE
     d3d11
+    d3d12
     dxgi
     d3dcompiler
     user32

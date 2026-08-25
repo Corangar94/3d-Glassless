@@ -3214,6 +3214,11 @@ static void Frame() {
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
+        if (g_depth) {
+            Log("DepthIO path=%s fallbacks=%llu",
+                g_depth->gpu_io_active() ? "persistent_dml_binding" : "cpu_marshalling_fallback",
+                static_cast<unsigned long long>(g_depth->gpu_io_fallbacks()));
+        }
         if (usingPoseV2) {
             Log("PoseV2 source=predicted confidence=%.3f velocity=(%.2f,%.2f,%.2f) orientation=(%.1f,%.1f,%.1f) capture_ts=%u publish_ts=%u flags=0x%X",
                 poseConfidence, poseVelocityX, poseVelocityY, poseVelocityZ,

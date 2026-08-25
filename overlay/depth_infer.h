@@ -68,6 +68,8 @@ public:
     float last_inference_ms() const;
     float blend_duration_ms() const;
     uint32_t depth_age_ms() const;
+    bool gpu_io_active() const;
+    uint64_t gpu_io_fallbacks() const;
 
     // Two depth SRVs for render-rate interpolation.
     // The shader lerps between prev_srv (depth at last inference) and
