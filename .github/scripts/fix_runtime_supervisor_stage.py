@@ -88,6 +88,21 @@ replace_once(
     "nonretryable tracker launch failure",
 )
 replace_once(
+    '''        except OverlayStartError as e:
+            self._tracker_failure_reason = f"overlay launch failed: {e}"
+            self._on_status("error")
+''',
+    '''        except OverlayStartError as e:
+            # Missing runtime assets, an invalid executable, or policy/setup
+            # errors cannot heal through repeated process restarts.
+            self._runtime_requested = False
+            self._recovery_paused = False
+            self._tracker_failure_reason = None
+            self._on_status("error")
+''',
+    "nonretryable overlay launch failure",
+)
+replace_once(
     '''    def _stop_tracking(self) -> None:
         self._runtime_requested = False
         self._recovery_generation += 1
@@ -111,6 +126,28 @@ replace_once(
     "retirement preserves retry action",
 )
 replace_once(
+    '''        if (
+            summary.has_frame
+            and summary.capture_state == "running"
+            and summary.depth_hz > 0
+        ):
+            self._recovery.mark_healthy("overlay")
+''',
+    '''        if (
+            summary.has_frame
+            and summary.capture_state == "running"
+            and summary.depth_hz > 0
+            and self._overlay.is_running()
+            and self._overlay.is_transitioning() is not True
+        ):
+            # Native recovery succeeded before a delayed launcher restart fired.
+            # Clearing the pending flag makes that stale timer a no-op.
+            self._overlay_recovery_pending = False
+            self._recovery.mark_healthy("overlay")
+''',
+    "healthy overlay cancels delayed restart",
+)
+replace_once(
     '''    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
         if not self._overlay_started or not self._tracker_is_running():
 ''',
@@ -126,6 +163,36 @@ replace_once(
         if not self._overlay_started or not self._tracker_is_running():
 ''',
     "infer active runtime intent",
+)
+replace_once(
+    '''        if decision.delay_s <= 0.0:
+            self._execute_overlay_recovery(self._recovery_generation, reason)
+            return
+        self._overlay_recovery_pending = True
+''',
+    '''        self._overlay_recovery_pending = True
+        if decision.delay_s <= 0.0:
+            self._execute_overlay_recovery(self._recovery_generation, reason)
+            return
+''',
+    "track immediate and delayed overlay attempts",
+)
+replace_once(
+    '''    def _execute_overlay_recovery(self, generation: int, reason: str) -> None:
+        if generation != self._recovery_generation or not self._runtime_requested:
+            return
+        self._overlay_recovery_pending = False
+''',
+    '''    def _execute_overlay_recovery(self, generation: int, reason: str) -> None:
+        if (
+            generation != self._recovery_generation
+            or not self._runtime_requested
+            or not self._overlay_recovery_pending
+        ):
+            return
+        self._overlay_recovery_pending = False
+''',
+    "stale overlay timer guard",
 )
 replace_once(
     '''    def _pause_recovery(
@@ -166,6 +233,70 @@ replace_once(
         if self._hidden_for_overlay:
 ''',
     "circuit retires tracker too",
+)
+replace_once(
+    '''        self._status_label.setToolTip(
+            f"{component} failed repeatedly: {reason}. "
+            f"Automatic retry paused for {retry_after_s:.0f}s."
+        )
+''',
+    '''        self._status_label.setToolTip(
+            f"{component} failed repeatedly: {reason}. "
+            f"Automatic retry pauses for {retry_after_s:.0f}s; "
+            "Retry Runtime overrides the cooldown."
+        )
+''',
+    "cooldown tooltip",
+)
+replace_once(
+    '''        _log.error(
+            "%s recovery circuit opened after repeated failure: %s",
+            component,
+            reason,
+        )
+
+    def _manual_recover_runtime(self) -> None:
+''',
+    '''        generation = self._recovery_generation
+        QTimer.singleShot(
+            max(1, int(round(retry_after_s * 1000.0))),
+            lambda token=generation, name=component: self._resume_recovery_after_cooldown(
+                token, name
+            ),
+        )
+        _log.error(
+            "%s recovery circuit opened after repeated failure: %s",
+            component,
+            reason,
+        )
+
+    def _resume_recovery_after_cooldown(
+        self,
+        generation: int,
+        component: str,
+    ) -> None:
+        if generation != self._recovery_generation or not self._recovery_paused:
+            return
+        snapshot = self._recovery.snapshot(component)
+        if snapshot.circuit_open:
+            QTimer.singleShot(
+                max(1, int(round(snapshot.retry_after_s * 1000.0))),
+                lambda token=generation, name=component: self._resume_recovery_after_cooldown(
+                    token, name
+                ),
+            )
+            return
+        self._recovery_paused = False
+        self._runtime_requested = True
+        self._tracker_failure_reason = None
+        self._on_status("restarting")
+        self._action_btn.setText("■ CANCEL RECOVERY")
+        self._action_btn.setEnabled(True)
+        self._execute_tracker_recovery(generation)
+
+    def _manual_recover_runtime(self) -> None:
+''',
+    "automatic cooldown resume",
 )
 replace_once(
     '''    def _manual_recover_runtime(self) -> None:
