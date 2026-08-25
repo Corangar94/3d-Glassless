@@ -1220,9 +1220,12 @@ class MainWindow(QMainWindow):
         self._tracker_recovery_pending = False
         self._overlay_recovery_pending = False
         self._recovery.reset()
-        if self._thread:
+        if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
+        else:
+            self._thread = None
+            self._tracker_stop_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
         if self._hidden_for_overlay:
@@ -1240,8 +1243,11 @@ class MainWindow(QMainWindow):
 
     def _on_tracker_stopped(self, tracker: TrackerProcess | None = None) -> None:
         """Release lifecycle ownership only after the camera child has exited."""
-        if tracker is None or self._thread is tracker:
-            self._thread = None
+        if tracker is not None and self._thread is not tracker:
+            # A retired process may deliver its queued stopped signal after a
+            # replacement already owns the runtime. Never tear down the new one.
+            return
+        self._thread = None
         self._tracker_stop_pending = False
         self._action_btn.setEnabled(True)
         if self._runtime_requested and self._tracker_failure_reason:
@@ -1601,9 +1607,12 @@ class MainWindow(QMainWindow):
         self._overlay_recovery_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
-        if self._thread is not None:
+        if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
+        else:
+            self._thread = None
+            self._tracker_stop_pending = False
         if self._hidden_for_overlay:
             self._hidden_for_overlay = False
             self.showNormal()
@@ -1669,12 +1678,14 @@ class MainWindow(QMainWindow):
         self._tracker_failure_reason = "manual recovery"
         self._overlay.stop_async()
         self._overlay_started = False
-        if self._thread is not None:
+        if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
             self._action_btn.setText("Stopping…")
             self._action_btn.setEnabled(False)
             return
+        self._thread = None
+        self._tracker_stop_pending = False
         generation = self._recovery_generation
         QTimer.singleShot(
             0,
