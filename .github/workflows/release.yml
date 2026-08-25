@@ -1,0 +1,209 @@
+name: Publish Windows release
+run-name: >-
+  Release ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '(dry run)' || '' }}
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag matching pyproject.toml
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate without creating a GitHub Release
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build-validate-publish:
+    runs-on: windows-2025
+    timeout-minutes: 75
+    env:
+      QT_QPA_PLATFORM: offscreen
+      TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install runtime, packaging, audit, and test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+
+      - name: Run complete Python suite
+        run: |
+          python -m pip check
+          python -m compileall -q launcher tracker scripts tests
+          python -m pytest -q
+
+      - name: Run deterministic software acceptance
+        run: >-
+          python -m scripts.software_acceptance
+          --output-dir software_acceptance
+          --generate-demo
+          --fail-on-regression
+
+      - name: Audit resolved third-party environment and emit CycloneDX SBOM
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          python -m pip_audit `
+            --progress-spinner off `
+            --desc off `
+            --skip-editable `
+            --format cyclonedx-json `
+            --output release/python-environment.sbom.cdx.json
+
+      - name: Build hash-pinned native runtime
+        run: python scripts/bootstrap.py
+
+      - name: Build one-folder standalone launcher
+        run: python -m PyInstaller --clean --noconfirm Glassless3D.spec
+
+      - name: Smoke-test frozen entrypoints
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
+          $cases = @(
+            @{ Name = 'launcher-help'; Arguments = @('--help') },
+            @{ Name = 'tracker-help'; Arguments = @('--tracker-child', '--help') }
+          )
+          foreach ($case in $cases) {
+            $process = Start-Process `
+              -FilePath $exe `
+              -ArgumentList $case.Arguments `
+              -Wait `
+              -PassThru `
+              -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) {
+              throw "$($case.Name) failed with exit code $($process.ExitCode)"
+            }
+          }
+
+      - name: Package deterministic Windows bundle
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
+          python -m scripts.package_windows_release `
+            --bundle-dir dist/Glassless3D `
+            --output-dir release `
+            --acceptance-dir software_acceptance `
+            --sbom release/python-environment.sbom.cdx.json `
+            --summary-json release/package-summary.json
+
+      - name: Resolve release package paths
+        id: release_paths
+        shell: pwsh
+        run: |
+          $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
+          if (-not (Test-Path -LiteralPath $summary.archive)) {
+            throw "release archive is missing: $($summary.archive)"
+          }
+          $sbom = Get-ChildItem -Path release -Filter '*-windows-x64.sbom.cdx.json' |
+            Select-Object -First 1
+          if ($null -eq $sbom) {
+            throw "package-specific CycloneDX SBOM is missing"
+          }
+          "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
+          "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Enforce release version, legal, and acceptance gates
+        run: >-
+          python -m scripts.check_release_ready
+          --tag "${{ env.TAG_NAME }}"
+          --acceptance software_acceptance/software_acceptance.json
+          --package-summary release/package-summary.json
+          --output-json release/release-readiness.json
+
+      - name: Verify publication tag points to this exact build
+        if: env.DRY_RUN != 'true'
+        shell: pwsh
+        run: |
+          git fetch --tags --force
+          $tagCommit = (git rev-list -n 1 $env:TAG_NAME).Trim()
+          $headCommit = (git rev-parse HEAD).Trim()
+          if (-not $tagCommit) {
+            throw "tag does not exist: $env:TAG_NAME"
+          }
+          if ($tagCommit -ne $headCommit) {
+            throw "tag $env:TAG_NAME points to $tagCommit, but this build is $headCommit"
+          }
+
+      - name: Attest release build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.release_paths.outputs.archive }}
+
+      - name: Attest release SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.release_paths.outputs.archive }}
+          sbom-path: ${{ steps.release_paths.outputs.sbom }}
+
+      - name: Upload dry-run release candidate
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: glassless3d-release-dry-run
+          path: |
+            release/*.zip
+            release/*.sha256
+            release/*.manifest.json
+            release/*.sbom.cdx.json
+            release/package-summary.json
+            release/release-readiness.json
+            software_acceptance/software_acceptance.json
+            software_acceptance/software_acceptance.md
+          if-no-files-found: error
+
+      - name: Publish immutable-tag release assets
+        if: env.DRY_RUN != 'true'
+        shell: pwsh
+        run: |
+          $assets = @()
+          $assets += Get-ChildItem -Path release -Filter '*.zip' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.sha256' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.manifest.json' | ForEach-Object FullName
+          $assets += Get-ChildItem -Path release -Filter '*.sbom.cdx.json' | ForEach-Object FullName
+          $assets += (Resolve-Path software_acceptance/software_acceptance.json).Path
+          $assets += (Resolve-Path software_acceptance/software_acceptance.md).Path
+          if ($assets.Count -lt 6) {
+            throw "release asset set is incomplete: $($assets.Count) files"
+          }
+
+          $arguments = @(
+            'release', 'create', $env:TAG_NAME,
+            '--verify-tag',
+            '--generate-notes',
+            '--title', "Glassless3D $env:TAG_NAME"
+          )
+          if ($env:TAG_NAME -match '(?i)(alpha|beta|rc|preview)') {
+            $arguments += '--prerelease'
+          }
+          foreach ($asset in $assets) {
+            $arguments += $asset
+          }
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "gh release create failed with exit code $LASTEXITCODE"
+          }

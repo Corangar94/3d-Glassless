@@ -2,12 +2,13 @@
 
 [![Audit and dependency gates](https://github.com/Corangar94/3d-Glassless/actions/workflows/audit-regressions.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/audit-regressions.yml)
 [![Native overlay build](https://github.com/Corangar94/3d-Glassless/actions/workflows/native-overlay-build.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/native-overlay-build.yml)
+[![Standalone Windows package](https://github.com/Corangar94/3d-Glassless/actions/workflows/windows-package.yml/badge.svg?branch=master)](https://github.com/Corangar94/3d-Glassless/actions/workflows/windows-package.yml)
 
 Glassless3D creates a **single-view, webcam-tracked virtual-window effect** on an ordinary Windows monitor. As the viewer moves, scene layers reproject using head position and monocular depth, producing motion parallax.
 
 An ordinary monitor cannot deliver separate left/right images to the eyes, so this is not binocular stereoscopic 3D. The current target is convincing head-coupled 2.5D for one tracked viewer.
 
-> **Project status:** the complete Windows suite, dependency audit, hash-pinned bootstrap, native overlay build, deterministic delayed/noisy/dropout pose replay, and synthetic virtual-window geometry gate run in CI. Hardware observations are optional field-validation evidence rather than a release blocker.
+> **Project status:** the complete Windows suite, dependency audit, hash-pinned bootstrap, native overlay build, deterministic delayed/noisy/dropout pose replay, synthetic virtual-window geometry gate, and standalone Windows packaging run in CI. Hardware observations are optional field-validation evidence rather than a release blocker.
 
 ## How it works
 
@@ -21,7 +22,22 @@ The default, non-injecting desktop backend:
 
 The overlay is not shown until the first real depth result has reached the GPU.
 
-## Requirements
+## Standalone Windows package
+
+CI builds a one-folder Windows x64 package containing the launcher, tracker, native overlay, DirectML/ONNX Runtime libraries, and verified models. The standalone package does **not** require a separately installed Python interpreter.
+
+Every candidate includes:
+
+- a deterministic ZIP;
+- per-file and archive SHA-256 values;
+- an exact release manifest;
+- a CycloneDX Python-environment SBOM;
+- software-acceptance JSON/Markdown; and
+- generated virtual-window validation frames.
+
+The project has not selected a software license yet, so current CI packages are evaluation artifacts and contain `UNLICENSED_PREVIEW.txt`. Publication is blocked until reviewed `LICENSE` and `THIRD_PARTY_NOTICES.md` files are committed. See [Releasing Glassless3D](docs/RELEASING.md).
+
+## Source-install requirements
 
 - 64-bit Windows with D3D11 and DirectML support
 - Python 3.11 or 3.12
@@ -29,7 +45,7 @@ The overlay is not shown until the first real depth result has reached the GPU.
 - 7-Zip installed in its normal Windows location or available as `7z` on `PATH`
 - enough free disk space for the models, native dependencies, and pinned build toolchain
 
-## Fresh install
+## Fresh source install
 
 Run the following in PowerShell:
 
@@ -92,9 +108,7 @@ python -m scripts.replay_quality `
   --output-markdown replay_report.md
 ```
 
-Add `--write-config` to atomically apply the recommended filter values. These
-software gates are reproducible and run in CI; they do not require a webcam,
-monitor, or GPU.
+Add `--write-config` to atomically apply the recommended filter values. These software gates are reproducible and run in CI; they do not require a webcam, monitor, or GPU.
 
 Basic readiness report:
 
@@ -135,9 +149,10 @@ See [Troubleshooting](docs/TROUBLESHOOTING.md) for active runtime guidance. The 
 python -m pip install -e ".[dev]"
 python -m compileall -q launcher tracker scripts tests
 python -m pytest -q
+python -m PyInstaller --clean --noconfirm Glassless3D.spec
 ```
 
-Permanent CI gates run the complete Windows test suite, `pip check`, `pip-audit`, deterministic software acceptance with generated validation frames, the hash-pinned bootstrap, and a clean native overlay build.
+Permanent CI gates run the complete Windows test suite, `pip check`, `pip-audit`, deterministic software acceptance with generated validation frames, the hash-pinned bootstrap, a clean native overlay build, frozen-entrypoint smoke tests, and deterministic standalone packaging.
 
 ## Experimental ReShade path
 
@@ -160,4 +175,4 @@ See [Head-coupled 3D direction](docs/HEAD_COUPLED_3D_DIRECTION.md), [architectur
 
 ## Release governance
 
-A project license has not yet been selected, and `master` protection plus the first prerelease are tracked in [issue #3](https://github.com/Corangar94/3d-Glassless/issues/3). Do not assume redistribution terms until a license is committed.
+A project license has not yet been selected, and default-branch protection plus the first prerelease are tracked in [issue #3](https://github.com/Corangar94/3d-Glassless/issues/3). The release workflow fails closed until the legal files are reviewed and committed. Do not assume redistribution terms from the public repository or CI artifacts.
