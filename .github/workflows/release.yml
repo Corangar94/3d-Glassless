@@ -80,7 +80,7 @@ jobs:
       - name: Build one-folder standalone launcher
         run: python -m PyInstaller --clean --noconfirm Glassless3D.spec
 
-      - name: Smoke-test frozen entrypoints
+      - name: Smoke-test frozen dispatchers
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
@@ -98,6 +98,26 @@ jobs:
             if ($process.ExitCode -ne 0) {
               throw "$($case.Name) failed with exit code $($process.ExitCode)"
             }
+          }
+
+      - name: Run frozen no-hardware runtime self-test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
+          $report = (Join-Path $PWD 'frozen-self-test.json')
+          $process = Start-Process `
+            -FilePath $exe `
+            -ArgumentList @('--self-test', '--output', $report) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report -Raw | Write-Host }
+            throw "frozen self-test failed with exit code $($process.ExitCode)"
+          }
+          $payload = Get-Content $report -Raw | ConvertFrom-Json
+          if ($payload.passed -ne $true) {
+            throw "frozen self-test report did not pass"
           }
 
       - name: Package deterministic Windows bundle
@@ -125,7 +145,17 @@ jobs:
             throw "package-specific CycloneDX SBOM is missing"
           }
           "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
+          "manifest=$($summary.manifest)" >> $env:GITHUB_OUTPUT
           "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Enforce standalone size and unrelated-module budgets
+        run: >-
+          python -m scripts.analyze_bundle_size
+          --manifest "${{ steps.release_paths.outputs.manifest }}"
+          --archive "${{ steps.release_paths.outputs.archive }}"
+          --output-json release/bundle-size.json
+          --output-markdown release/bundle-size.md
+          --fail-on-regression
 
       - name: Enforce release version, legal, and acceptance gates
         run: >-
@@ -172,6 +202,9 @@ jobs:
             release/*.sbom.cdx.json
             release/package-summary.json
             release/release-readiness.json
+            release/bundle-size.json
+            release/bundle-size.md
+            frozen-self-test.json
             software_acceptance/software_acceptance.json
             software_acceptance/software_acceptance.md
           if-no-files-found: error
@@ -185,9 +218,12 @@ jobs:
           $assets += Get-ChildItem -Path release -Filter '*.sha256' | ForEach-Object FullName
           $assets += Get-ChildItem -Path release -Filter '*.manifest.json' | ForEach-Object FullName
           $assets += Get-ChildItem -Path release -Filter '*.sbom.cdx.json' | ForEach-Object FullName
+          $assets += (Resolve-Path release/bundle-size.json).Path
+          $assets += (Resolve-Path release/bundle-size.md).Path
+          $assets += (Resolve-Path frozen-self-test.json).Path
           $assets += (Resolve-Path software_acceptance/software_acceptance.json).Path
           $assets += (Resolve-Path software_acceptance/software_acceptance.md).Path
-          if ($assets.Count -lt 6) {
+          if ($assets.Count -lt 9) {
             throw "release asset set is incomplete: $($assets.Count) files"
           }
 
