@@ -58,6 +58,11 @@ jobs:
         run: >-
           python -m pytest
           tests/test_release_packaging.py
+          tests/test_packaging.py
+          tests/test_slim_mediapipe_runtime.py
+          tests/test_bundle_size.py
+          tests/test_frozen_self_test.py
+          tests/test_system_tray.py
           tests/test_app.py
           tests/test_tracker_process.py
           tests/test_overlay_process.py
@@ -96,7 +101,8 @@ jobs:
             'dist/Glassless3D/_internal/onnxruntime.dll',
             'dist/Glassless3D/_internal/DirectML.dll',
             'dist/Glassless3D/_internal/models/face_landmarker.task',
-            'dist/Glassless3D/_internal/models/depth_anything_v2_small_fp16.onnx'
+            'dist/Glassless3D/_internal/models/depth_anything_v2_small_fp16.onnx',
+            'dist/Glassless3D/_internal/mediapipe/tasks/c/libmediapipe.dll'
           )
           foreach ($path in $required) {
             if (-not (Test-Path -LiteralPath $path)) {
@@ -106,7 +112,7 @@ jobs:
           Get-ChildItem -LiteralPath dist/Glassless3D -Recurse -File |
             Measure-Object -Property Length -Sum
 
-      - name: Smoke-test frozen GUI and private tracker dispatcher
+      - name: Smoke-test frozen dispatchers
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
@@ -124,6 +130,26 @@ jobs:
             if ($process.ExitCode -ne 0) {
               throw "$($case.Name) failed with exit code $($process.ExitCode)"
             }
+          }
+
+      - name: Run frozen no-hardware runtime self-test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
+          $report = (Join-Path $PWD 'frozen-self-test.json')
+          $process = Start-Process `
+            -FilePath $exe `
+            -ArgumentList @('--self-test', '--output', $report) `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $report) { Get-Content $report -Raw | Write-Host }
+            throw "frozen self-test failed with exit code $($process.ExitCode)"
+          }
+          $payload = Get-Content $report -Raw | ConvertFrom-Json
+          if ($payload.passed -ne $true) {
+            throw "frozen self-test report did not pass"
           }
 
       - name: Create deterministic release candidate
@@ -155,11 +181,21 @@ jobs:
             throw "package-specific CycloneDX SBOM is missing"
           }
           "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
+          "manifest=$($summary.manifest)" >> $env:GITHUB_OUTPUT
           "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
           Write-Host "Package: $($summary.package_name)"
           Write-Host "SHA256: $actual"
           Write-Host "License present: $($summary.license_present)"
           Write-Host "Third-party notices present: $($summary.third_party_notices_present)"
+
+      - name: Enforce standalone size and unrelated-module budgets
+        run: >-
+          python -m scripts.analyze_bundle_size
+          --manifest "${{ steps.package_paths.outputs.manifest }}"
+          --archive "${{ steps.package_paths.outputs.archive }}"
+          --output-json release/bundle-size.json
+          --output-markdown release/bundle-size.md
+          --fail-on-regression
 
       - name: Attest standalone package build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -182,4 +218,7 @@ jobs:
             release/*.manifest.json
             release/*.sbom.cdx.json
             release/package-summary.json
+            release/bundle-size.json
+            release/bundle-size.md
+            frozen-self-test.json
           if-no-files-found: error
