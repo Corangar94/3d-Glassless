@@ -91,6 +91,7 @@ jobs:
       - name: Apply depth and camera geometry runtime overhaul
         run: |
           python .github/scripts/apply_depth_overhaul.py
+          python .github/scripts/apply_fixed_profile_sessions.py
           python .github/scripts/write_depth_profile_tests.py
           python .github/scripts/fix_depth_contract_tests.py
           python .github/scripts/apply_camera_geometry_runtime.py
@@ -102,6 +103,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_depth_profiles_native.py
+          tests/test_fixed_depth_sessions.py
           tests/test_camera_geometry.py
           tests/test_face_tracker.py
           tests/test_face_tracker_live.py
