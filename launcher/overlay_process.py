@@ -4,8 +4,8 @@ The overlay is a standalone D3D11 process that:
   * captures the desktop (DXGI Output Duplication),
   * runs Depth Anything V2 inference on each frame,
   * reads head position from the `G3D` shared-memory segment (written by the
-    tracker thread) and live tuning from `G3D_Settings` (written by the
-    settings GUI),
+    tracker thread) and live tuning from the `G3D_Settings` shared-memory
+    segment (written by the settings GUI),
   * composites a parallax-warped layer on top of the desktop.
 
 The launcher owns its lifetime: start it when tracking starts, terminate it
@@ -32,7 +32,12 @@ RUNTIME_DLL_NAMES = ("onnxruntime.dll", "DirectML.dll")
 
 
 def _project_root() -> Path:
-    """Return the project root (parent of the `launcher` package)."""
+    """Return the source root or PyInstaller runtime-content directory."""
+    if getattr(sys, "frozen", False):
+        extraction_root = getattr(sys, "_MEIPASS", None)
+        if extraction_root:
+            return Path(extraction_root).resolve()
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 
@@ -40,9 +45,9 @@ def find_overlay_exe() -> Optional[Path]:
     """Locate the overlay executable, or return None if not found.
 
     Search order:
-      1. `<project_root>/Glassless3DOverlay.exe` (normal install layout)
+      1. `<project_root>/Glassless3DOverlay.exe` (normal/frozen runtime layout)
       2. `<project_root>/overlay/build_mingw/Glassless3DOverlay.exe` (dev)
-      3. `<project_root>/overlay/build/Glassless3DOverlay.exe` (MSVC dev)
+      3. `<project_root>/overlay/build/Release/Glassless3DOverlay.exe` (MSVC dev)
     """
     root = _project_root()
     candidates = [
@@ -51,9 +56,9 @@ def find_overlay_exe() -> Optional[Path]:
         root / "overlay" / "build" / "Release" / OVERLAY_EXE_NAME,
         root / "overlay" / "build" / OVERLAY_EXE_NAME,
     ]
-    for p in candidates:
-        if p.is_file():
-            return p
+    for path in candidates:
+        if path.is_file():
+            return path
     return None
 
 
@@ -91,11 +96,11 @@ def _normalized_windows_path(path: str | Path) -> str:
 def _retire_stale_overlay_instances(exe: Path, timeout_ms: int = 1500) -> int:
     """Close orphaned copies of this exact overlay binary before spawning.
 
-    A previous launcher crash can leave the detached native child alive.  Its
+    A previous launcher crash can leave the detached native child alive. Its
     global mutex then makes the correctly targeted replacement exit while the
-    old desktop-only overlay remains visible.  Match the full image path, ask
-    its top-level window to close, then force only that exact binary after a
-    bounded timeout.
+    old desktop-only overlay remains visible. Match the full image path, ask its
+    top-level window to close, then force only that exact binary after a bounded
+    timeout.
     """
 
     if sys.platform != "win32":
@@ -244,19 +249,13 @@ class OverlayProcess:
         self._worker_running = False
         self._restart_requested = False
 
-    # ── Lifecycle ──────────────────────────────────────────────────────────
-
     def start(
         self,
         target_executable: Optional[str] = None,
         *,
         target_pid: Optional[int] = None,
     ) -> Path:
-        """Launch the overlay. Returns the path of the exe actually spawned.
-
-        Raises OverlayStartError if the binary or any required runtime asset
-        is missing, or if process launch fails.
-        """
+        """Launch the overlay. Returns the path of the executable actually spawned."""
         normalized_target = (
             target_executable.strip() or None
             if target_executable is not None
@@ -268,8 +267,6 @@ class OverlayProcess:
             self._target_executable = normalized_target
             self._target_pid = normalized_pid
             if self._worker_running:
-                # A previous process is still being reaped.  The worker will
-                # reconcile this newest desired target before it exits.
                 exe = find_overlay_exe()
                 if exe is None:
                     raise OverlayStartError(f"{OVERLAY_EXE_NAME} not found")
@@ -288,202 +285,28 @@ class OverlayProcess:
         self, target_executable: Optional[str], target_pid: Optional[int] = None
     ) -> tuple[Path, subprocess.Popen[bytes]]:
         """Create one process; caller serializes it against retirement."""
-
         exe = find_overlay_exe()
         if exe is None:
             raise OverlayStartError(
                 f"{OVERLAY_EXE_NAME} not found. The desktop overlay is the primary "
                 "runtime path. Run `python scripts/bootstrap.py` to build it."
             )
-
-        _retire_stale_overlay_instances(exe)
-
         missing = missing_overlay_runtime_assets(exe)
         if missing:
-            formatted = ", ".join(missing)
             raise OverlayStartError(
-                "Glassless3D overlay runtime is incomplete. Missing: "
-                f"{formatted}. Run `python scripts/bootstrap.py`, then try again."
+                "The overlay runtime is incomplete. Missing: " + ", ".join(missing)
             )
-
-        # CWD = project root so the overlay's <exe>/models/ search hits.
-        cwd = str(_project_root())
-        creationflags = 0
-        if sys.platform == "win32":
-            # Detach from console and make the process killable via terminate().
-            creationflags = (
-                subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
-                | getattr(subprocess, "DETACHED_PROCESS", 0)
-            )
-
+        _retire_stale_overlay_instances(exe)
+        command = [str(exe)]
+        if target_pid is not None:
+            command.extend(["--target-pid", str(target_pid)])
+        elif target_executable:
+            command.extend(["--target-exe", target_executable])
         try:
-            args = [str(exe)]
-            if target_executable:
-                args.extend(["--target-exe", target_executable])
-            if target_pid is not None:
-                args.extend(["--target-pid", str(target_pid)])
-            proc = subprocess.Popen(
-                args,
-                cwd=cwd,
-                creationflags=creationflags,
-                # Inherit stdout/stderr so the overlay's diagnostic prints show up
-                # in the launcher console when run from a terminal.
-            )
-        except OSError as e:
-            raise OverlayStartError(
-                "Failed to start the desktop overlay runtime. Run "
-                "`python scripts/bootstrap.py` to rebuild it, then try again. "
-                f"Original error: {e}"
-            ) from e
+            proc = subprocess.Popen(command, cwd=str(exe.parent))
+        except OSError as error:
+            raise OverlayStartError(f"Could not launch {exe}: {error}") from error
         return exe, proc
-
-    def stop(self, timeout: float = 3.0) -> None:
-        """Terminate the overlay. Safe to call if already stopped."""
-        with self._lock:
-            self._request_generation += 1
-            self._desired_running = False
-            self._restart_requested = False
-            proc = self._proc
-            self._proc = None
-        if proc is None:
-            return
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    pass
-            except OSError:
-                # Process is already gone.
-                pass
-
-    def stop_async(self, timeout: float = 3.0) -> None:
-        """Coalesce to stopped and reap outside the Qt GUI thread."""
-        self._request_transition(False, None, None, timeout, restart=False)
-
-    def restart_async(
-        self,
-        target_executable: Optional[str] = None,
-        timeout: float = 3.0,
-        *,
-        target_pid: Optional[int] = None,
-    ) -> None:
-        """Restart once, after the prior process has fully released capture."""
-        target = (
-            target_executable.strip() or None
-            if target_executable is not None
-            else self._target_executable
-        )
-        pid = target_pid if target_pid is not None and target_pid > 0 else None
-        self._request_transition(True, target, pid, timeout, restart=True)
-
-    def _request_transition(
-        self,
-        desired_running: bool,
-        target: Optional[str],
-        target_pid: Optional[int],
-        timeout: float,
-        *,
-        restart: bool,
-    ) -> None:
-        with self._lock:
-            self._request_generation += 1
-            self._desired_running = desired_running
-            if desired_running:
-                self._target_executable = target
-                self._target_pid = target_pid
-            self._restart_requested = self._restart_requested or restart
-            if self._worker_running:
-                return
-            self._worker_running = True
-        threading.Thread(
-            target=self._reconcile_lifecycle,
-            args=(timeout,),
-            name="g3d-overlay-lifecycle",
-            # A detached native overlay must never outlive the launcher just
-            # because Python began interpreter shutdown while cleanup was in
-            # progress. Non-daemon lifecycle workers finish their bounded reap.
-            daemon=False,
-        ).start()
-
-    @staticmethod
-    def _reap(proc: subprocess.Popen[bytes], timeout: float) -> None:
-        try:
-            proc.terminate()
-        except OSError:
-            return
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-                proc.wait(timeout=1.0)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        except OSError:
-            pass
-
-    def _reconcile_lifecycle(self, timeout: float) -> None:
-        """Single serialized worker implementing latest-request-wins semantics."""
-        while True:
-            with self._lock:
-                generation = self._request_generation
-                desired = self._desired_running
-                target = self._target_executable
-                target_pid = self._target_pid
-                proc = self._proc
-                must_restart = self._restart_requested
-                if proc is not None and proc.poll() is not None:
-                    self._proc = None
-                    proc = None
-                if proc is not None and (not desired or must_restart):
-                    self._proc = None
-                    self._restart_requested = False
-                else:
-                    proc = None
-
-            if proc is not None:
-                self._reap(proc, timeout)
-                continue
-
-            with self._lock:
-                if generation != self._request_generation:
-                    continue
-                desired = self._desired_running
-                target = self._target_executable
-                target_pid = self._target_pid
-                existing = self._proc
-                if existing is not None and existing.poll() is None:
-                    self._worker_running = False
-                    return
-                if not desired:
-                    self._worker_running = False
-                    return
-
-            try:
-                exe, spawned = self._spawn(target, target_pid)
-            except OverlayStartError:
-                with self._lock:
-                    if generation == self._request_generation:
-                        self._desired_running = False
-                        self._worker_running = False
-                return
-
-            with self._lock:
-                self._proc = spawned
-                self._exe_path = exe
-                if generation == self._request_generation and self._desired_running:
-                    self._restart_requested = False
-                    self._worker_running = False
-                    return
-                # Desired state changed during spawn.  Keep the process visible
-                # to the next loop so it is retired before any replacement.
-
-    # ── Status ────────────────────────────────────────────────────────────
 
     def is_running(self) -> bool:
         with self._lock:
@@ -491,8 +314,97 @@ class OverlayProcess:
 
     def is_transitioning(self) -> bool:
         with self._lock:
-            return self._worker_running
+            return self._worker_running or self._restart_requested
 
-    def poll_exit_code(self) -> Optional[int]:
-        """Return exit code if the overlay has quit, else None."""
-        return None if self._proc is None else self._proc.poll()
+    def stop(self) -> None:
+        with self._lock:
+            self._desired_running = False
+            self._restart_requested = False
+            proc = self._proc
+            self._proc = None
+            self._exe_path = None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
+
+    def stop_async(self) -> None:
+        self._request_transition(restart=False)
+
+    def restart_async(
+        self,
+        target_executable: Optional[str] = None,
+        *,
+        target_pid: Optional[int] = None,
+    ) -> None:
+        with self._lock:
+            if target_executable is not None:
+                self._target_executable = target_executable.strip() or None
+            if target_pid is not None:
+                self._target_pid = target_pid if target_pid > 0 else None
+            self._desired_running = True
+            self._restart_requested = True
+        self._request_transition(restart=True)
+
+    def _request_transition(self, *, restart: bool) -> None:
+        with self._lock:
+            self._request_generation += 1
+            generation = self._request_generation
+            if not restart:
+                self._desired_running = False
+                self._restart_requested = False
+            if self._worker_running:
+                return
+            self._worker_running = True
+        threading.Thread(
+            target=self._transition_worker,
+            args=(generation,),
+            name="g3d-overlay-lifecycle",
+            daemon=True,
+        ).start()
+
+    def _transition_worker(self, generation: int) -> None:
+        try:
+            while True:
+                with self._lock:
+                    proc = self._proc
+                    self._proc = None
+                    self._exe_path = None
+                    desired_running = self._desired_running
+                    restart_requested = self._restart_requested
+                    target_executable = self._target_executable
+                    target_pid = self._target_pid
+                    current_generation = self._request_generation
+                    self._restart_requested = False
+                if proc is not None and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2.0)
+                    except OSError:
+                        pass
+                if desired_running and (restart_requested or proc is not None):
+                    try:
+                        exe, replacement = self._spawn(target_executable, target_pid)
+                    except OverlayStartError:
+                        replacement = None
+                        exe = None
+                    with self._lock:
+                        if replacement is not None and self._desired_running:
+                            self._proc = replacement
+                            self._exe_path = exe
+                with self._lock:
+                    if current_generation == self._request_generation:
+                        break
+                    generation = self._request_generation
+        finally:
+            with self._lock:
+                self._worker_running = False
+                rerun = generation != self._request_generation
+            if rerun:
+                self._request_transition(restart=self._desired_running)
