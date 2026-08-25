@@ -80,22 +80,30 @@ def detect_screen_cm() -> tuple[float, float]:
 
 def _create_face_landmarker():
     """Create one IMAGE-mode landmarker for a calibration sampling session."""
-    from mediapipe import tasks
     import pathlib
+
+    from mediapipe.tasks.python.core.base_options import BaseOptions
+    from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
+        VisionTaskRunningMode,
+    )
+    from mediapipe.tasks.python.vision.face_landmarker import (
+        FaceLandmarker,
+        FaceLandmarkerOptions,
+    )
 
     model_path = str(
         pathlib.Path(__file__).resolve().parent.parent
         / "models"
         / "face_landmarker.task"
     )
-    options = tasks.vision.FaceLandmarkerOptions(
-        base_options=tasks.BaseOptions(model_asset_path=model_path),
-        running_mode=tasks.vision.RunningMode.IMAGE,
+    options = FaceLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=VisionTaskRunningMode.IMAGE,
         num_faces=1,
         min_face_detection_confidence=0.5,
         min_face_presence_confidence=0.5,
     )
-    return tasks.vision.FaceLandmarker.create_from_options(options)
+    return FaceLandmarker.create_from_options(options)
 
 
 def _detect_face_distance_with_landmarker(
@@ -110,8 +118,8 @@ def _detect_face_distance_with_landmarker(
     valid_ipd_mm, valid_fov_deg = calibration
 
     import cv2
-    import mediapipe as mp
     import numpy as np
+    from mediapipe.tasks.python.vision.core.image import Image, ImageFormat
 
     try:
         h, w = frame_bgr.shape[:2]
@@ -120,9 +128,9 @@ def _detect_face_distance_with_landmarker(
     if h <= 0 or w <= 0:
         return None
 
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
     result = landmarker.detect(  # type: ignore[attr-defined]
-        mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        Image(image_format=ImageFormat.SRGB, data=rgb)
     )
 
     if not result.face_landmarks:
