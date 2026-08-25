@@ -1,12 +1,15 @@
 from pathlib import Path
 
 
-def test_depth_profiles_use_named_dimension_overrides():
+def test_depth_profiles_use_supported_c_api_dimension_overrides():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 
-    assert 'AddFreeDimensionOverrideByName("batch_size", 1)' in source
-    assert 'AddFreeDimensionOverrideByName("height", profile.height)' in source
-    assert 'AddFreeDimensionOverrideByName("width", profile.width)' in source
+    assert "OrtApi const& api = Ort::GetApi();" in source
+    assert "Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(" in source
+    assert '"batch_size", 1' in source
+    assert '"height", profile.height' in source
+    assert '"width", profile.width' in source
+    assert "fixed.options->AddFreeDimensionOverrideByName" not in source
 
 
 def test_depth_profiles_have_lazy_session_cache():
