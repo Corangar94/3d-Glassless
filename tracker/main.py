@@ -314,8 +314,10 @@ class TrackingLoop:
                         output = FilteredPose(x_cm=0.0, y_cm=0.0, z_cm=60.0, publish_timestamp_ms=monotonic_ms())
                         status = "paused"
                     else:
+                        # Preserve the public state contract: a predicted/replayed
+                        # pose during an async result gap is still a hold sample.
                         output = self._predict_filter()
-                        status = "tracking" if output.confidence >= 0.20 else "hold"
+                        status = "hold"
 
                 if status != "paused":
                     output = _tilt_filtered_pose(output, self._camera_tilt_deg)
