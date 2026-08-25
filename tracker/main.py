@@ -386,15 +386,6 @@ def _load_config(path: str = "config.yaml") -> dict[str, Any]:
     return loaded
 
 
-def _make_tray_image():
-    from PIL import Image, ImageDraw
-    image = Image.new("RGBA", (64, 64), (30, 30, 30, 255))
-    draw = ImageDraw.Draw(image)
-    draw.ellipse([8, 8, 56, 56], fill=(60, 200, 60, 255))
-    draw.ellipse([26, 26, 38, 38], fill=(255, 255, 255, 255))
-    return image
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Glassless3D head tracker")
     parser.add_argument("--config", default="config.yaml")
@@ -417,16 +408,10 @@ def main() -> None:
     smoother = AdaptivePoseFilter(process_noise=float(trk.get("smoothing_q", 2.0)), measurement_noise=float(trk.get("smoothing_r", 0.1)), prediction_horizon_ms=float(trk.get("prediction_horizon_ms", 0.0)), max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)))
 
     stop_event = threading.Event()
-    tray_icon = None
-    try:
-        import pystray
-        def _on_quit(icon, _item):
-            stop_event.set(); icon.stop()
-        tray_icon = pystray.Icon("G3D Tracker", _make_tray_image(), "Glassless3D Tracker", menu=pystray.Menu(pystray.MenuItem("Quit Tracker", _on_quit)))
-        threading.Thread(target=tray_icon.run, daemon=True).start()
-        print("[G3D] Tray icon active — right-click it to quit.")
-    except Exception:
-        print("[G3D] Tray icon unavailable — press Ctrl+C to stop.")
+    print(
+        "[G3D] Tracker child is supervised by the launcher; "
+        "press Ctrl+C when running it directly."
+    )
 
     print(f"[G3D] Starting tracker — camera {cam['index']}")
     print(f"[G3D] Tracking backend: {selected_backend}")
@@ -452,8 +437,6 @@ def main() -> None:
             loop.run(camera_index=int(cam["index"]), camera_width=int(cam.get("width", 0)), camera_height=int(cam.get("height", 0)), camera_fps=float(cam.get("fps", 0.0)))
         except KeyboardInterrupt:
             pass
-    if tray_icon is not None:
-        tray_icon.stop()
     print("\n[G3D] Tracker stopped.")
 
 

@@ -74,7 +74,11 @@ def test_standalone_spec_builds_a_one_folder_runtime():
     assert '("Glassless3DOverlay.exe", ".")' in source
     assert '("onnxruntime.dll", ".")' in source
     assert '("DirectML.dll", ".")' in source
-    assert 'collect_all(\n    "mediapipe"\n)' in source
+    assert "prepare_slim_mediapipe_runtime" in source
+    assert "collect_all" not in source
+    assert '"PIL"' in source
+    assert '"matplotlib"' in source
+    assert '"sounddevice"' in source
 
 
 def test_packager_creates_deterministic_unlicensed_preview(
