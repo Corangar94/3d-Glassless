@@ -1,0 +1,158 @@
+name: Standalone Windows package
+
+on:
+  pull_request:
+    paths:
+      - 'launcher/**'
+      - 'tracker/**'
+      - 'scripts/**'
+      - 'overlay/**'
+      - 'profiles/**'
+      - 'Glassless3D.spec'
+      - 'Glassless3DOverlay.exe'
+      - 'pyproject.toml'
+      - '.github/workflows/windows-package.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'launcher/**'
+      - 'tracker/**'
+      - 'scripts/**'
+      - 'overlay/**'
+      - 'profiles/**'
+      - 'Glassless3D.spec'
+      - 'Glassless3DOverlay.exe'
+      - 'pyproject.toml'
+      - '.github/workflows/windows-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      QT_QPA_PLATFORM: offscreen
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install runtime, packaging, and test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+
+      - name: Verify packaging contracts
+        run: >-
+          python -m pytest
+          tests/test_release_packaging.py
+          tests/test_launcher_entry.py
+          tests/test_tracker_process.py
+          tests/test_overlay_process.py
+          -q
+
+      - name: Build and verify native runtime assets
+        run: python scripts/bootstrap.py
+
+      - name: Run deterministic software acceptance
+        run: >-
+          python -m scripts.software_acceptance
+          --output-dir software_acceptance
+          --generate-demo
+          --fail-on-regression
+
+      - name: Generate resolved Python CycloneDX SBOM
+        run: >-
+          python -m pip_audit
+          --progress-spinner off
+          --desc off
+          --skip-editable
+          --format cyclonedx-json
+          --output release/python-environment.sbom.cdx.json
+
+      - name: Build one-folder launcher and tracker
+        run: python -m PyInstaller --clean --noconfirm Glassless3D.spec
+
+      - name: Verify standalone runtime layout
+        shell: pwsh
+        run: |
+          $required = @(
+            'dist/Glassless3D/Glassless3D.exe',
+            'dist/Glassless3D/_internal/Glassless3DOverlay.exe',
+            'dist/Glassless3D/_internal/onnxruntime.dll',
+            'dist/Glassless3D/_internal/DirectML.dll',
+            'dist/Glassless3D/_internal/models/face_landmarker.task',
+            'dist/Glassless3D/_internal/models/depth_anything_v2_small_fp16.onnx'
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "standalone package is missing $path"
+            }
+          }
+          Get-ChildItem -LiteralPath dist/Glassless3D -Recurse -File |
+            Measure-Object -Property Length -Sum
+
+      - name: Smoke-test frozen GUI and private tracker dispatcher
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'dist/Glassless3D/Glassless3D.exe').Path
+          foreach ($arguments in @('--help', '--tracker-child --help')) {
+            $process = Start-Process `
+              -FilePath $exe `
+              -ArgumentList $arguments `
+              -Wait `
+              -PassThru `
+              -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) {
+              throw "frozen smoke test failed: $arguments -> $($process.ExitCode)"
+            }
+          }
+
+      - name: Create deterministic release candidate
+        shell: pwsh
+        run: |
+          $env:SOURCE_DATE_EPOCH = git show -s --format=%ct HEAD
+          python -m scripts.package_windows_release `
+            --bundle-dir dist/Glassless3D `
+            --output-dir release `
+            --acceptance-dir software_acceptance `
+            --sbom release/python-environment.sbom.cdx.json `
+            --summary-json release/package-summary.json
+
+      - name: Verify candidate archive and checksums
+        shell: pwsh
+        run: |
+          $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
+          if (-not (Test-Path -LiteralPath $summary.archive)) {
+            throw "release archive is missing: $($summary.archive)"
+          }
+          $actual = (Get-FileHash -LiteralPath $summary.archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $summary.archive_sha256) {
+            throw "release archive digest mismatch"
+          }
+          Write-Host "Package: $($summary.package_name)"
+          Write-Host "SHA256: $actual"
+          Write-Host "License present: $($summary.license_present)"
+          Write-Host "Third-party notices present: $($summary.third_party_notices_present)"
+
+      - name: Upload standalone release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: glassless3d-windows-x64-package
+          path: |
+            release/*.zip
+            release/*.sha256
+            release/*.manifest.json
+            release/*.sbom.cdx.json
+            release/package-summary.json
+          if-no-files-found: error
