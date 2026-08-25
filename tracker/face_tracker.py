@@ -8,9 +8,16 @@ import threading
 from typing import Any
 
 import cv2
-import mediapipe as mp
 import numpy as np
-from mediapipe import tasks
+from mediapipe.tasks.python.core.base_options import BaseOptions
+from mediapipe.tasks.python.vision.core.image import Image, ImageFormat
+from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
+    VisionTaskRunningMode,
+)
+from mediapipe.tasks.python.vision.face_landmarker import (
+    FaceLandmarker,
+    FaceLandmarkerOptions,
+)
 
 from tracker.camera_geometry import CameraGeometry
 from tracker.pose import HeadPosition, monotonic_ms
@@ -137,15 +144,15 @@ class FaceTracker:
         self._last_submitted_timestamp_ms = 0
         self._closed = False
 
-        options = tasks.vision.FaceLandmarkerOptions(
-            base_options=tasks.BaseOptions(
+        options = FaceLandmarkerOptions(
+            base_options=BaseOptions(
                 model_asset_path=model_path,
-                delegate=tasks.BaseOptions.Delegate.CPU,
+                delegate=BaseOptions.Delegate.CPU,
             ),
             running_mode=(
-                tasks.vision.RunningMode.LIVE_STREAM
+                VisionTaskRunningMode.LIVE_STREAM
                 if self._async_mode
-                else tasks.vision.RunningMode.IMAGE
+                else VisionTaskRunningMode.IMAGE
             ),
             num_faces=1,
             min_face_detection_confidence=0.5,
@@ -154,7 +161,7 @@ class FaceTracker:
             output_facial_transformation_matrixes=True,
             result_callback=self._on_result if self._async_mode else None,
         )
-        self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
+        self._landmarker = FaceLandmarker.create_from_options(options)
 
     def set_calibration(
         self,
@@ -285,7 +292,7 @@ class FaceTracker:
         self._last_submitted_timestamp_ms = timestamp_ms
 
         rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        image = Image(image_format=ImageFormat.SRGB, data=rgb)
         if self._async_mode:
             try:
                 self._landmarker.detect_async(image, timestamp_ms)
