@@ -72,6 +72,22 @@ def test_manual_recovery_resets_circuit_and_starts_when_stopped(window):
     assert window._runtime_requested is True
 
 
+def test_paused_primary_action_runs_manual_recovery_instead_of_stop(window):
+    window._recovery_paused = True
+    window._runtime_requested = False
+    window._thread = MagicMock()
+    window._thread.isRunning.return_value = True
+
+    with (
+        patch.object(window, "_manual_recover_runtime") as recover,
+        patch.object(window, "_stop_tracking") as stop,
+    ):
+        window._toggle_tracking()
+
+    recover.assert_called_once()
+    stop.assert_not_called()
+
+
 def test_manual_stop_cancels_pending_recovery_generation(window):
     window._runtime_requested = True
     window._tracker_recovery_pending = True
@@ -83,6 +99,7 @@ def test_manual_stop_cancels_pending_recovery_generation(window):
     window._stop_tracking()
 
     assert window._runtime_requested is False
+    assert window._recovery_paused is False
     assert window._tracker_recovery_pending is False
     assert window._overlay_recovery_pending is False
     assert window._recovery_generation == previous_generation + 1
@@ -103,6 +120,9 @@ def test_first_overlay_failure_keeps_immediate_recovery_behavior(window):
 
 
 def test_open_circuit_pauses_automatic_runtime_and_surfaces_retry(window):
+    tracker = MagicMock()
+    tracker.isRunning.return_value = True
+    window._thread = tracker
     window._runtime_requested = True
     window._overlay = MagicMock()
     window._hidden_for_overlay = True
@@ -111,9 +131,11 @@ def test_open_circuit_pauses_automatic_runtime_and_surfaces_retry(window):
     window._pause_recovery("overlay", "repeated crash", 60.0)
 
     assert window._runtime_requested is False
+    assert window._recovery_paused is True
     assert window._action_btn.text() == "↻ RETRY RUNTIME"
     assert "RECOVERY PAUSED" in window._status_label.text()
     assert "repeated crash" in window._status_label.toolTip()
+    tracker.stop.assert_called_once()
     window.showNormal.assert_called_once()
 
 
