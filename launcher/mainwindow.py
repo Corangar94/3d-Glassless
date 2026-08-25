@@ -1400,6 +1400,12 @@ class MainWindow(QMainWindow):
             self._capture_tile.setText("Capture\nWaiting")
             return
 
+        # TrackerProcess emits a status only when it changes. Sample sustained
+        # health from the one-second runtime timer so the stable-reset interval
+        # can complete during an unchanged tracking session.
+        if self._tracking_status == "tracking" and self._tracker_is_running():
+            self._recovery.mark_healthy("tracker")
+
         self._maybe_recover_overlay(summary)
         if (
             summary.has_frame
