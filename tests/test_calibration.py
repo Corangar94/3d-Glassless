@@ -79,29 +79,27 @@ def test_detect_face_distance_returns_none_on_no_face():
     mock_lmk.__exit__ = MagicMock(return_value=False)
     mock_lmk.detect.return_value = mock_result
 
-    mock_landmarker_cls = MagicMock()
-    mock_landmarker_cls.create_from_options.return_value = mock_lmk
-
-    mock_tasks = MagicMock()
-    mock_tasks.vision.FaceLandmarker = mock_landmarker_cls
-    mock_tasks.vision.FaceLandmarkerOptions = MagicMock()
-    mock_tasks.vision.RunningMode.IMAGE = "IMAGE"
-    mock_tasks.BaseOptions = MagicMock()
-
-    mock_mp = MagicMock()
-    mock_mp.Image = MagicMock()
-    mock_mp.ImageFormat.SRGB = "SRGB"
-
-    # cv2 is lazy-imported inside the function; patch via sys.modules
     mock_cv2 = MagicMock()
     mock_cv2.cvtColor.return_value = fake_frame
     mock_cv2.COLOR_BGR2RGB = 4  # cv2.COLOR_BGR2RGB == 4
 
-    with patch.dict("sys.modules", {
-        "cv2": mock_cv2,
-        "mediapipe": mock_mp,
-        "mediapipe.tasks": mock_tasks,
-    }):
+    mock_image_module = MagicMock()
+    mock_image_module.Image = MagicMock()
+    mock_image_module.ImageFormat.SRGB = "SRGB"
+
+    # Calibration now imports only the exact Face Landmarker modules. Patch the
+    # landmarker factory seam and the narrow image module instead of replacing
+    # `mediapipe.tasks` with a non-package mock.
+    with (
+        patch("launcher.calibration._create_face_landmarker", return_value=mock_lmk),
+        patch.dict(
+            "sys.modules",
+            {
+                "cv2": mock_cv2,
+                "mediapipe.tasks.python.vision.core.image": mock_image_module,
+            },
+        ),
+    ):
         result = _detect_face_distance(fake_frame, ipd_mm=64.0)
 
     assert result is None
