@@ -13,6 +13,14 @@ overlay:
   strength_x: 1.0
   strength_y: 0.4
   virtual_depth_cm: 30.0
+recovery:
+  immediate_retries: 1
+  base_delay_s: 1.0
+  max_delay_s: 20.0
+  max_failures: 5
+  failure_window_s: 90.0
+  cooldown_s: 60.0
+  stable_reset_s: 30.0
 screen:
   height_cm: 33.6
   width_cm: 119.3

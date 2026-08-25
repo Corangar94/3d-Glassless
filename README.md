@@ -80,6 +80,32 @@ A modified or incomplete cached dependency tree is discarded and rebuilt from it
 4. Move naturally and press `Ctrl+R` once the normal viewing position is comfortable.
 5. Use the launcher’s runtime tiles or diagnostics command to confirm live tracking, capture, and depth flow.
 
+## Automatic runtime recovery
+
+The launcher supervises both the tracker and native overlay instead of restarting them in an unlimited tight loop:
+
+- the first transient tracker or overlay failure retries immediately;
+- repeated failures use exponential backoff, capped at 20 seconds by default;
+- five failures inside the default 90-second rolling window open a 60-second cooldown circuit;
+- the full runtime resumes automatically when the cooldown expires;
+- **Recover runtime** or the primary **Retry runtime** action clears the circuit immediately;
+- an explicit Stop cancels every queued restart by generation token;
+- missing executables, incomplete runtime assets, invalid policy, and other nonrecoverable startup failures stop immediately rather than consuming the crash-loop budget;
+- a stable 30-second run resets the failure episode.
+
+The policy is configurable in `config.yaml`:
+
+```yaml
+recovery:
+  immediate_retries: 1
+  base_delay_s: 1.0
+  max_delay_s: 20.0
+  max_failures: 5
+  failure_window_s: 90.0
+  cooldown_s: 60.0
+  stable_reset_s: 30.0
+```
+
 ## Controls
 
 - `Ctrl+R`: recenter at the current viewing position
