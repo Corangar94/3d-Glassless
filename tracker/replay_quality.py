@@ -142,13 +142,16 @@ class ReplayReport:
         destination.write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
 
 
+_REPLAY_BASE_TIMESTAMP_MS = 1000
+
+
 DEFAULT_SCENARIOS: tuple[ScenarioSpec, ...] = (
     ScenarioSpec(name="smooth_lateral", motion="smooth"),
     ScenarioSpec(name="direction_reversal", motion="reversal"),
     ScenarioSpec(
         name="dropout_recovery",
         motion="smooth",
-        dropout_ranges_s=((2.40, 3.00), (5.10, 5.50)),
+        dropout_ranges_s=((2.40, 2.95), (5.10, 5.45)),
     ),
     ScenarioSpec(
         name="stationary_jitter",
@@ -210,8 +213,15 @@ def generate_measurements(spec: ScenarioSpec) -> tuple[MeasurementEvent, ...]:
             0.0,
             spec.delivery_latency_ms + rng.normal(0.0, spec.delivery_jitter_ms),
         )
-        capture_ms = int(round(capture_s * 1000.0)) & 0xFFFF_FFFF
-        delivery_ms = int(round(capture_s * 1000.0 + latency))
+        # Timestamp zero means "missing timestamp" in the production pose
+        # contract. Start deterministic traces at a valid nonzero epoch so the
+        # replay exercises exactly the same camera-time path as the runtime.
+        capture_ms = (
+            _REPLAY_BASE_TIMESTAMP_MS + int(round(capture_s * 1000.0))
+        ) & 0xFFFF_FFFF
+        delivery_ms = _REPLAY_BASE_TIMESTAMP_MS + int(
+            round(capture_s * 1000.0 + latency)
+        )
         events.append(
             MeasurementEvent(
                 delivery_timestamp_ms=delivery_ms,
@@ -304,7 +314,9 @@ def replay_scenario(
     delivered_measurements = 0
 
     for index in range(display_samples):
-        timestamp_ms = int(round(index * 1000.0 / spec.display_hz))
+        timestamp_ms = _REPLAY_BASE_TIMESTAMP_MS + int(
+            round(index * 1000.0 / spec.display_hz)
+        )
         output: FilteredPose | None = None
         while (
             event_index < len(events)
@@ -334,7 +346,12 @@ def replay_scenario(
             if have_measurement
             else np.array((0.0, 0.0, 60.0), dtype=np.float64)
         )
-        truth_values.append(truth_pose(spec.motion, timestamp_ms / 1000.0))
+        truth_values.append(
+            truth_pose(
+                spec.motion,
+                (timestamp_ms - _REPLAY_BASE_TIMESTAMP_MS) / 1000.0,
+            )
+        )
 
     timestamp_array = np.asarray(timestamps, dtype=np.float64)
     filtered_array = np.asarray(filtered_values, dtype=np.float64)

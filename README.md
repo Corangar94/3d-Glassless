@@ -73,6 +73,29 @@ A modified or incomplete cached dependency tree is discarded and rebuilt from it
 
 ## Diagnostics and support
 
+Software-only acceptance, replay regression, and virtual-window demo:
+
+```powershell
+python -m scripts.software_acceptance `
+  --output-dir software_acceptance `
+  --generate-demo `
+  --fail-on-regression
+```
+
+Filter tuning against deterministic delayed/noisy/dropout traces:
+
+```powershell
+python -m scripts.replay_quality `
+  --config config.yaml `
+  --tune `
+  --output-json replay_report.json `
+  --output-markdown replay_report.md
+```
+
+Add `--write-config` to atomically apply the recommended filter values. These
+software gates are reproducible and run in CI; they do not require a webcam,
+monitor, or GPU.
+
 Basic readiness report:
 
 ```powershell

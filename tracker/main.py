@@ -414,7 +414,7 @@ def main() -> None:
         minimum_sharpness=float(cam.get("minimum_sharpness", 35.0)),
         minimum_fps=float(cam.get("minimum_fps", 20.0)),
     )
-    smoother = AdaptivePoseFilter(process_noise=float(trk.get("smoothing_q", 0.01)), measurement_noise=float(trk.get("smoothing_r", 0.1)), prediction_horizon_ms=float(trk.get("prediction_horizon_ms", 35.0)), max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)))
+    smoother = AdaptivePoseFilter(process_noise=float(trk.get("smoothing_q", 2.0)), measurement_noise=float(trk.get("smoothing_r", 0.1)), prediction_horizon_ms=float(trk.get("prediction_horizon_ms", 0.0)), max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)))
 
     stop_event = threading.Event()
     tray_icon = None
