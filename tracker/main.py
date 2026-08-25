@@ -12,12 +12,14 @@ import yaml
 from tracker.face_tracker_cv2 import HeadPosition
 from tracker.freetrack import FreetracWriter
 from tracker.shared_memory import SharedMemoryWriter, TrackingStateWriter
-from tracker.shared_settings import SharedSettingsReader
+from tracker.shared_settings import OverlaySettings, SharedSettingsReader
 from tracker.smoother import HeadSmoother
 from tracker.tilt import _apply_camera_tilt, _calibrate_tilt
 
 _CAMERA_READ_FAILURES_BEFORE_REOPEN = 3
 _CAMERA_MAX_REOPEN_ATTEMPTS = 3
+_DEFAULT_CAMERA_FOV_DEG = 90.0
+_DEFAULT_SMOOTHING_R = 0.1
 
 
 class FaceTrackerLike(Protocol):
@@ -30,6 +32,15 @@ class PoseWriterLike(Protocol):
         ...
 
 
+def _finite_float(value: object) -> float | None:
+    """Return a finite float, or None for malformed/non-finite input."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _resolve_ipd_cm(cfg: dict[str, Any]) -> float:
     """Resolve the single runtime IPD source, preferring display calibration."""
     tracking_raw = cfg.get("tracking", {})
@@ -38,30 +49,85 @@ def _resolve_ipd_cm(cfg: dict[str, Any]) -> float:
     overlay = overlay_raw if isinstance(overlay_raw, dict) else {}
     calibration_raw = overlay.get("display_calibration", {})
     calibration = calibration_raw if isinstance(calibration_raw, dict) else {}
-    candidates_mm = (
-        calibration.get("ipd_mm"),
-        overlay.get("ipd_mm"),
+    for value in (calibration.get("ipd_mm"), overlay.get("ipd_mm")):
+        parsed = _finite_float(value)
+        if parsed is not None and parsed > 0.0:
+            return parsed / 10.0
+    parsed_tracking_ipd = _finite_float(tracking.get("ipd_cm", 6.4))
+    if parsed_tracking_ipd is None:
+        return 6.4
+    return max(0.1, parsed_tracking_ipd)
+
+
+def _resolve_camera_fov_deg(cfg: dict[str, Any]) -> float:
+    """Resolve a finite horizontal camera FOV, falling back to 90 degrees."""
+    tracking_raw = cfg.get("tracking", {})
+    overlay_raw = cfg.get("overlay", {})
+    tracking = tracking_raw if isinstance(tracking_raw, dict) else {}
+    overlay = overlay_raw if isinstance(overlay_raw, dict) else {}
+    for value in (
+        tracking.get("camera_fov_deg"),
+        overlay.get("camera_fov_deg"),
+    ):
+        parsed = _finite_float(value)
+        if parsed is not None and 0.0 < parsed < 180.0:
+            return parsed
+    return _DEFAULT_CAMERA_FOV_DEG
+
+
+def _configure_camera(
+    cap: cv2.VideoCapture, width: int = 0, height: int = 0, fps: float = 0.0
+) -> None:
+    """Apply requested capture properties; unsupported values degrade safely."""
+    requested = (
+        (cv2.CAP_PROP_FRAME_WIDTH, width),
+        (cv2.CAP_PROP_FRAME_HEIGHT, height),
+        (cv2.CAP_PROP_FPS, fps),
     )
-    for value in candidates_mm:
-        if not isinstance(value, (int, float, str)):
+    for property_id, value in requested:
+        parsed = _finite_float(value)
+        if parsed is None or parsed <= 0.0:
             continue
         try:
-            parsed = float(value)
-        except ValueError:
+            cap.set(property_id, parsed)
+        except (cv2.error, TypeError, ValueError):
+            # Some backends raise instead of returning False for unsupported modes.
             continue
-        if parsed > 0.0:
-            return parsed / 10.0
-    tracking_ipd = tracking.get("ipd_cm", 6.4)
-    if not isinstance(tracking_ipd, (int, float, str)):
-        return 6.4
+
+
+def _capture_property(cap: cv2.VideoCapture, property_id: int) -> float:
+    """Read a non-negative finite camera property for diagnostics."""
     try:
-        return max(0.1, float(tracking_ipd))
-    except ValueError:
-        return 6.4
+        value = _finite_float(cap.get(property_id))
+    except (cv2.error, TypeError, ValueError):
+        return 0.0
+    if value is None or value < 0.0:
+        return 0.0
+    return value
 
 
-def _open_camera(index: int) -> cv2.VideoCapture:
-    """Try multiple backends in order and return the first opened capture."""
+def _camera_mode(cap: cv2.VideoCapture) -> tuple[int, int, float]:
+    """Return the actual capture mode without trusting backend sentinels."""
+    width = int(round(_capture_property(cap, cv2.CAP_PROP_FRAME_WIDTH)))
+    height = int(round(_capture_property(cap, cv2.CAP_PROP_FRAME_HEIGHT)))
+    fps = _capture_property(cap, cv2.CAP_PROP_FPS)
+    return width, height, fps
+
+
+def _log_camera_opened(
+    index: int, backend_name: str, cap: cv2.VideoCapture
+) -> None:
+    width, height, fps = _camera_mode(cap)
+    print(
+        f"[G3D] Camera {index} opened via {backend_name} "
+        f"at {width}x{height} @ {fps:.1f} fps"
+    )
+
+
+def _open_camera(
+    index: int, width: int = 0, height: int = 0, fps: float = 0.0
+) -> cv2.VideoCapture:
+    """Try multiple backends and apply configured camera properties."""
     backends = [
         (cv2.CAP_DSHOW, "CAP_DSHOW"),
         (cv2.CAP_MSMF, "CAP_MSMF"),
@@ -69,14 +135,15 @@ def _open_camera(index: int) -> cv2.VideoCapture:
     for backend_id, backend_name in backends:
         cap = cv2.VideoCapture(index, backend_id)
         if cap.isOpened():
-            print(f"[G3D] Camera {index} opened via {backend_name}")
+            _configure_camera(cap, width, height, fps)
+            _log_camera_opened(index, backend_name, cap)
             return cap
         cap.release()
 
     cap = cv2.VideoCapture(index)
     if cap.isOpened():
-        print(f"[G3D] Camera {index} opened via default backend")
-        return cap
+        _configure_camera(cap, width, height, fps)
+        _log_camera_opened(index, "default backend", cap)
     return cap
 
 
@@ -100,17 +167,70 @@ def _load_face_tracker_class(backend: str):
     return module.FaceTracker, "cv2"
 
 
-def _apply_deadzone(
-    raw: tuple[float, float, float],
-    prev: tuple[float, float, float] | None,
-    deadzone_cm: float,
-) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """Suppress small XY movement while keeping Z responsive."""
-    if prev is None:
-        return raw, raw
-    if math.hypot(raw[0] - prev[0], raw[1] - prev[1]) < deadzone_cm:
-        return (prev[0], prev[1], raw[2]), prev
-    return raw, raw
+def _validated_live_calibration(
+    settings: OverlaySettings | None,
+) -> tuple[float | None, float | None]:
+    """Return safe (IPD cm, FOV degrees) values from live shared settings."""
+    if settings is None:
+        return None, None
+
+    ipd_mm = _finite_float(settings.ipd_mm)
+    ipd_cm = ipd_mm / 10.0 if ipd_mm is not None and ipd_mm > 0.0 else None
+
+    camera_fov_deg = _finite_float(settings.camera_fov_deg)
+    if camera_fov_deg is None or not (0.0 < camera_fov_deg < 180.0):
+        camera_fov_deg = None
+    return ipd_cm, camera_fov_deg
+
+
+def _measurement_noise(settings: OverlaySettings | None) -> float:
+    """Return finite positive Kalman measurement noise from live settings."""
+    if settings is None:
+        return _DEFAULT_SMOOTHING_R
+    parsed = _finite_float(settings.smoothing_alpha)
+    if parsed is None or parsed <= 0.0:
+        return _DEFAULT_SMOOTHING_R
+    return max(parsed, 1e-6)
+
+
+def _apply_live_calibration(
+    tracker: FaceTrackerLike,
+    settings: OverlaySettings | None,
+    previous: tuple[float | None, float | None] | None,
+) -> tuple[float | None, float | None] | None:
+    """Apply changed, validated calibration before measuring the next frame."""
+    calibration = _validated_live_calibration(settings)
+    if calibration == previous:
+        return previous
+
+    real_ipd_cm, camera_fov_deg = calibration
+    values: dict[str, float] = {}
+    if real_ipd_cm is not None:
+        values["real_ipd_cm"] = real_ipd_cm
+    if camera_fov_deg is not None:
+        values["camera_fov_deg"] = camera_fov_deg
+    if not values:
+        return previous
+
+    set_calibration = getattr(tracker, "set_calibration", None)
+    if not callable(set_calibration):
+        return previous
+    set_calibration(**values)
+    return calibration
+
+
+def _validated_pose(
+    position: HeadPosition | None,
+) -> tuple[float, float, float] | None:
+    """Reject malformed tracker output before it can poison smoothing/parallax."""
+    if position is None:
+        return None
+    x = _finite_float(position.x_cm)
+    y = _finite_float(position.y_cm)
+    z = _finite_float(position.z_cm)
+    if x is None or y is None or z is None or z <= 0.0:
+        return None
+    return x, y, z
 
 
 def _limit_pose_step(
@@ -164,9 +284,16 @@ class TrackingLoop:
         self._camera_tilt_deg: float = camera_tilt_deg
         self._config_path: Optional[str] = config_path
 
-    def run(self, camera_index: int = 0, max_frames: Optional[int] = None) -> None:
+    def run(
+        self,
+        camera_index: int = 0,
+        camera_width: int = 0,
+        camera_height: int = 0,
+        camera_fps: float = 0.0,
+        max_frames: Optional[int] = None,
+    ) -> None:
         """Run the tracking loop. Blocks until max_frames reached or Ctrl+C."""
-        cap = _open_camera(camera_index)
+        cap = _open_camera(camera_index, camera_width, camera_height, camera_fps)
         if not cap.isOpened():
             cap.release()
             raise RuntimeError(f"Could not open camera {camera_index}")
@@ -174,6 +301,7 @@ class TrackingLoop:
         consecutive_read_failures = 0
         reopen_attempts = 0
         settings_reader = SharedSettingsReader()
+        applied_calibration: tuple[float | None, float | None] | None = None
         try:
             while not self._should_stop():
                 ok, frame = cap.read()
@@ -193,7 +321,9 @@ class TrackingLoop:
                         f"[G3D] Camera read stalled; reopening "
                         f"({reopen_attempts}/{_CAMERA_MAX_REOPEN_ATTEMPTS})"
                     )
-                    cap = _open_camera(camera_index)
+                    cap = _open_camera(
+                        camera_index, camera_width, camera_height, camera_fps
+                    )
                     if not cap.isOpened():
                         cap.release()
                         raise RuntimeError(
@@ -207,32 +337,39 @@ class TrackingLoop:
 
                 self._on_frame(frame)
 
-                pos: Optional[HeadPosition] = self._tracker.process_frame(frame)
+                # Apply GUI calibration before processing this frame so the
+                # depth estimate never lags a live calibration update by one frame.
+                settings = settings_reader.read()
+                applied_calibration = _apply_live_calibration(
+                    self._tracker, settings, applied_calibration
+                )
+                raw_position = _validated_pose(self._tracker.process_frame(frame))
 
-                if pos is not None:
+                if raw_position is not None:
                     measurement_s = time.monotonic()
                     self._last_face_ms = measurement_s * 1000.0
-                    settings = settings_reader.read()
-                    deadzone_cm = (settings.deadzone_mm / 10.0) if settings else 0.5
-                    smoothing_r = settings.smoothing_alpha if settings else 0.1
-                    self._smoother.set_measurement_noise(max(smoothing_r, 1e-6))
-                    raw = _limit_pose_step(
-                        (pos.x_cm, pos.y_cm, pos.z_cm),
-                        self._last_raw_pos,
+                    self._smoother.set_measurement_noise(
+                        _measurement_noise(settings)
                     )
-                    effective, self._last_raw_pos = _apply_deadzone(
-                        raw, self._last_raw_pos, deadzone_cm
-                    )
+                    raw = _limit_pose_step(raw_position, self._last_raw_pos)
+                    self._last_raw_pos = raw
+                    effective = raw
                     dt_s = (
                         measurement_s - self._last_measurement_s
-                        if self._last_measurement_s is not None else None
+                        if self._last_measurement_s is not None
+                        else None
                     )
                     self._last_measurement_s = measurement_s
                     if dt_s is None:
-                        smoothed = self._smoother.update(effective[0], effective[1], effective[2])
+                        smoothed = self._smoother.update(
+                            effective[0], effective[1], effective[2]
+                        )
                     else:
                         smoothed = self._smoother.update(
-                            effective[0], effective[1], effective[2], dt_seconds=dt_s
+                            effective[0],
+                            effective[1],
+                            effective[2],
+                            dt_seconds=dt_s,
                         )
                     self._last_smoothed = smoothed
                     x, y, z = smoothed
@@ -247,19 +384,20 @@ class TrackingLoop:
                         x, y, z = 0.0, 0.0, 60.0
                         status = "paused"
                     else:
-                        x, y, z = self._last_smoothed  # replay last output, do not update filter
+                        x, y, z = self._last_smoothed
                         status = "hold"
 
                 # A neutral fallback is screen-space neutral. Rotating (0, 0, 60)
                 # creates a large false Y movement whenever the camera is tilted.
                 if status != "paused":
-                    x, y, z = _apply_camera_tilt(x, y, z, self._camera_tilt_deg)
+                    x, y, z = _apply_camera_tilt(
+                        x, y, z, self._camera_tilt_deg
+                    )
                 write_state = getattr(self._writer, "write_state", None)
                 if callable(write_state):
                     write_state(status)
-                # Publish the pose last.  TrackerProcess treats a new pose
-                # timestamp as the commit marker and then reads G3D_State, so
-                # writing state first keeps the two channels on the same sample.
+                # Publish the pose last. TrackerProcess treats a new pose timestamp
+                # as the commit marker and then reads G3D_State.
                 self._writer.write(x=x, y=y, z=z)
                 self._on_position(x, y, z, status)
                 frame_count += 1
@@ -277,7 +415,9 @@ class TrackingLoop:
     def _on_frame(self, frame: object) -> None:  # noqa: ARG002
         """Called with each captured frame before face detection."""
 
-    def _on_position(self, x: float, y: float, z: float, status: str) -> None:  # noqa: ARG002
+    def _on_position(
+        self, x: float, y: float, z: float, status: str
+    ) -> None:  # noqa: ARG002
         """Called after each position is computed and written."""
 
 
@@ -297,11 +437,10 @@ def _load_config(path: str = "config.yaml") -> dict[str, Any]:
 def _make_tray_image():
     """Create a simple 64x64 icon for the system tray."""
     from PIL import Image, ImageDraw
+
     img = Image.new("RGBA", (64, 64), (30, 30, 30, 255))
     draw = ImageDraw.Draw(img)
-    # Green circle = face detected indicator
     draw.ellipse([8, 8, 56, 56], fill=(60, 200, 60, 255))
-    # White dot in centre
     draw.ellipse([26, 26, 38, 38], fill=(255, 255, 255, 255))
     return img
 
@@ -330,8 +469,6 @@ def main() -> None:
     )
 
     stop_event = threading.Event()
-
-    # System tray icon (optional — skipped if pystray unavailable)
     tray_icon = None
     try:
         import pystray
@@ -356,13 +493,17 @@ def main() -> None:
     print(f"[G3D] Tracking backend: {selected_backend}")
     print("[G3D] Writing to shared memory (G3D + FT_SharedMem)")
 
-    with face_tracker_cls(
-        real_ipd_cm=_resolve_ipd_cm(cfg),
-        screen_width_cm=scr["width_cm"],
-        screen_height_cm=scr["height_cm"],
-        camera_fov_deg=float(trk.get("camera_fov_deg", cfg.get("overlay", {}).get("camera_fov_deg", 60.0))),
-    ) as tracker, FreetracWriter() as ft_writer, SharedMemoryWriter() as g3d_writer, TrackingStateWriter() as state_writer:
-        # Combined writer: forwards every position to both sinks
+    with (
+        face_tracker_cls(
+            real_ipd_cm=_resolve_ipd_cm(cfg),
+            screen_width_cm=scr["width_cm"],
+            screen_height_cm=scr["height_cm"],
+            camera_fov_deg=_resolve_camera_fov_deg(cfg),
+        ) as tracker,
+        FreetracWriter() as ft_writer,
+        SharedMemoryWriter() as g3d_writer,
+        TrackingStateWriter() as state_writer,
+    ):
         class _MultiWriter:
             def write(self, x: float, y: float, z: float) -> None:
                 ft_writer.write(x=x, y=y, z=z)
@@ -381,7 +522,12 @@ def main() -> None:
             config_path=args.config,
         )
         try:
-            loop.run(camera_index=cam["index"])
+            loop.run(
+                camera_index=int(cam["index"]),
+                camera_width=int(cam.get("width", 0)),
+                camera_height=int(cam.get("height", 0)),
+                camera_fps=float(cam.get("fps", 0.0)),
+            )
         except KeyboardInterrupt:
             pass
 

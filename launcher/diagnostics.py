@@ -14,7 +14,12 @@ from typing import Sequence
 import cv2
 import yaml
 
-from launcher.overlay_process import _project_root, find_depth_model, find_overlay_exe
+from launcher.overlay_process import (
+    _project_root,
+    find_depth_model,
+    find_overlay_exe,
+    missing_overlay_runtime_assets,
+)
 from launcher.game_profile_store import ProfileStoreError, load_profiles
 from launcher.game_profiles import evaluate_profile
 from tracker.display_backends import (
@@ -34,6 +39,7 @@ _CAPTURE_REASON_GUIDANCE = {
     "duplicate_unavailable": "desktop capture is unavailable or protected for this output; use a normal local desktop session",
     "device_lost": "the graphics device was reset; wait for the overlay to rebind after the display stabilizes",
     "adapter_changed": "the target moved to another graphics adapter; wait for the overlay to rebuild its renderer",
+    "depth_unavailable": "depth inference failed; rebuild the runtime and verify DirectML/model compatibility",
 }
 
 
@@ -161,7 +167,12 @@ def collect_diagnostics(
 
     if overlay_exe is None:
         problems.append("overlay executable missing")
-    if depth_model is None:
+    else:
+        for asset in missing_overlay_runtime_assets(overlay_exe):
+            problems.append(f"overlay runtime asset missing: {asset}")
+    if depth_model is None and not any(
+        problem.startswith("overlay runtime asset missing") for problem in problems
+    ):
         problems.append("depth model missing")
 
     config = _load_config(cfg_path, problems)
@@ -227,7 +238,7 @@ def collect_diagnostics(
         if 0 < overlay_summary.depth_hz < _DEPTH_HZ_READY_MIN:
             problems.append(f"depth inference too slow: {overlay_summary.depth_hz}Hz")
         elif overlay_summary.depth_hz <= 0:
-            warnings.append("overlay log reports no active depth inference")
+            problems.append("overlay log reports no active depth inference")
         if not overlay_summary.has_frame:
             warnings.append("overlay log reports no captured frame")
             if require_live_runtime:

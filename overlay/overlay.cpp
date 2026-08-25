@@ -5,6 +5,7 @@
 //
 // Requirements: game must run in Windowed Fullscreen (not exclusive fullscreen).
 // Quit: right-click tray icon, or Ctrl+Shift+G (global hotkey)
+// Recenter the tracked viewing position: Ctrl+R
 //
 // Usage: Glassless3DOverlay.exe [screen_width_cm] [screen_height_cm] [strength] [virtual_depth_cm]
 //   virtual_depth_cm — how far behind the screen the virtual plane sits.
@@ -473,7 +474,9 @@ float4 main(PS_IN i) : SV_Target {
         return float4(edge, edge, edge, 1.0);
     }
 
-    float2 uv_final = localUV + ApplyConfidenceProtectedParallax(d_final, hz, sw, sh, vd, eyeX, eyeY) * fade;
+    // Inverse texture lookup: subtract the projected screen displacement so
+    // a virtual point behind the panel follows the viewer like a real window.
+    float2 uv_final = localUV - ApplyConfidenceProtectedParallax(d_final, hz, sw, sh, vd, eyeX, eyeY) * fade;
 
     // OOB safety (fade should have already prevented it — this is belt &
     // suspenders). saturate() would stretch the edge pixel and cause image
@@ -599,10 +602,10 @@ static const void*               g_seqView = nullptr;
 static HANDLE                    g_stateH    = nullptr;
 static const void*               g_stateView = nullptr;
 // Monocular depth inferencer (Depth Anything V2 Small via ONNX Runtime + DirectML).
-// When null / failed to init, the overlay falls back to a uniform 0.5 depth texture
-// so the parallax math still runs (effectively the old flat-plane behavior).
+// The overlay is not shown unless real depth inference initialized. A uniform
+// far-plane texture remains available only for shader diagnostics and recovery.
 static DepthInferencer*          g_depth       = nullptr;
-static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=0.5 used when g_depth is null
+static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=1.0 diagnostic fallback
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
 static ID3D11Query*              g_gpuDisjoint = nullptr;
 static ID3D11Query*              g_gpuStart    = nullptr;
@@ -1212,12 +1215,15 @@ static bool  g_hasFrame       = false;  // true once we have at least one captur
 static bool  g_overlayRevealed = false; // alpha stays zero until first successful present
 static bool  g_overlayVisible = false;
 static bool  g_wantScreenshot = false;  // Ctrl+Shift+S: save next rendered frame
+static bool  g_recenterRequested = true; // first valid pose and Ctrl+R establish rest
 
 static const int  HOTKEY_QUIT       = 1;
 static const int  HOTKEY_DEBUG      = 2;
 static const int  HOTKEY_SCREENSHOT = 3;
-static const UINT WM_TRAYICON   = WM_USER + 1;
-static const UINT TRAY_MENU_QUIT = 1001;
+static const int  HOTKEY_RECENTER   = 4;
+static const UINT WM_TRAYICON       = WM_USER + 1;
+static const UINT TRAY_MENU_QUIT    = 1001;
+static const UINT TRAY_MENU_RECENTER = 1002;
 static NOTIFYICONDATAW g_nid     = {};
 
 // ── Error helper ──────────────────────────────────────────────────────────
@@ -1237,6 +1243,7 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_HOTKEY && wp == HOTKEY_QUIT)  { Log("WndProc: WM_HOTKEY quit"); g_running = false; PostQuitMessage(0); }
     if (msg == WM_HOTKEY && wp == HOTKEY_DEBUG)      { g_debugDepthMode = (g_debugDepthMode + 1) % kDebugDepthModeCount; Log("WndProc: debug depth mode %d", g_debugDepthMode); }
     if (msg == WM_HOTKEY && wp == HOTKEY_SCREENSHOT) { g_wantScreenshot = true; Log("WndProc: screenshot queued"); }
+    if (msg == WM_HOTKEY && wp == HOTKEY_RECENTER)   { g_recenterRequested = true; Log("WndProc: recenter requested"); }
     if (msg == WM_DPICHANGED) {
         const RECT* suggested = reinterpret_cast<const RECT*>(lp);
         if (suggested && !g_useTargetWindow) {
@@ -1263,11 +1270,17 @@ static LRESULT CALLBACK WndProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
         if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
             POINT pt; GetCursorPos(&pt);
             HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, TRAY_MENU_RECENTER, L"Recenter (Ctrl+R)");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(menu, MF_STRING, TRAY_MENU_QUIT, L"Quit Overlay");
             SetForegroundWindow(hw);
             TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hw, nullptr);
             DestroyMenu(menu);
         }
+    }
+    if (msg == WM_COMMAND && LOWORD(wp) == TRAY_MENU_RECENTER) {
+        g_recenterRequested = true;
+        Log("WndProc: tray recenter requested");
     }
     if (msg == WM_COMMAND && LOWORD(wp) == TRAY_MENU_QUIT) {
         Log("WndProc: tray Quit");
@@ -1906,12 +1919,12 @@ static std::wstring FindDepthModel() {
     return std::wstring();
 }
 
-// Create a 1x1 R16_FLOAT=0.0 texture + SRV used when depth inference is unavailable.
-// depth=0.0 means "farthest" in our convention, so the scene sits at the virtual
-// far plane and behaves exactly like the pre-depth flat-plane overlay.
+// Create a 1x1 R16_FLOAT=1.0 texture + SRV used only while the real
+// depth pipeline is unavailable. The project convention is 0=near, 1=far.
 static bool CreateFallbackDepthSrv() {
-    // IEEE 754 half 0.0 is all zero bits.
-    uint16_t zero = 0;
+    // IEEE 754 half 1.0 = 0x3C00. A far plane gives deterministic motion in
+    // diagnostics instead of the previous zero-depth, zero-parallax no-op.
+    uint16_t farDepth = 0x3C00u;
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = 1; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
     td.Format = DXGI_FORMAT_R16_FLOAT;
@@ -1920,7 +1933,7 @@ static bool CreateFallbackDepthSrv() {
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
     D3D11_SUBRESOURCE_DATA sr = {};
-    sr.pSysMem = &zero;
+    sr.pSysMem = &farDepth;
     sr.SysMemPitch = sizeof(uint16_t);
 
     HRESULT hr = g_dev->CreateTexture2D(&td, &sr, &g_fallbackTex);
@@ -1932,22 +1945,22 @@ static bool CreateFallbackDepthSrv() {
     sd.Texture2D.MipLevels = 1;
     hr = g_dev->CreateShaderResourceView(g_fallbackTex, &sd, &g_fallbackSrv);
     if (FAILED(hr)) { LogHR("CreateShaderResourceView(fallback depth)", hr); return false; }
-    Log("Fallback depth SRV created (1x1 R16F=0.0)");
+    Log("Fallback depth SRV created (1x1 R16F=1.0, diagnostic only)");
     return true;
 }
 
-// Attempt to bring up monocular depth inference. Non-fatal: on any failure we
-// fall back to the 1x1 zero-depth SRV so the overlay still runs.
-static void InitDepth() {
+// Bring up monocular depth inference. The visible effect requires a real
+// depth stream; failure is reported to capture recovery instead of silently
+// presenting a flat or no-op fallback.
+static bool InitDepth() {
     std::wstring model = FindDepthModel();
     if (model.empty()) {
-        Log("InitDepth: model file not found — running without per-pixel depth. "
-            "Run scripts/bootstrap.py to download it.");
-        return;
+        Log("InitDepth: model file not found. Run scripts/bootstrap.py.");
+        return false;
     }
     if (!g_capTex) {
-        Log("InitDepth: capture texture not ready, skipping depth init");
-        return;
+        Log("InitDepth: capture texture not ready");
+        return false;
     }
     D3D11_TEXTURE2D_DESC cd = {};
     g_capTex->GetDesc(&cd);
@@ -1956,12 +1969,13 @@ static void InitDepth() {
     if (!d->init(g_dev, g_ctx, model, (int)cd.Width, (int)cd.Height)) {
         Log("InitDepth: DepthInferencer::init failed: %s", d->last_error());
         delete d;
-        return;
+        return false;
     }
     g_depth = d;
     g_depth->set_performance_mode(g_depthMode);
     Log("InitDepth: depth inference online (capture %ux%u, model 518x518)",
         cd.Width, cd.Height);
+    return true;
 }
 
 static const char* CaptureStateName(CaptureState state) {
@@ -1995,6 +2009,7 @@ static void UpdateOverlayVisibility() {
         && nowMs - g_lastCaptureFrameMs <= kCaptureFrameStaleMs;
     const bool visible = g_captureState == CaptureState::Running
         && g_hasFrame
+        && g_depth != nullptr
         && (g_targetExePath.empty() || (targetForeground && captureFresh));
     if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
@@ -2190,7 +2205,13 @@ static void TickCaptureRebind() {
         hr = InitDuplication();
     }
     if (SUCCEEDED(hr)) {
-        InitDepth();
+        if (!InitDepth()) {
+            DestroyCaptureResources();
+            g_bindingDirty = false;
+            g_rebindRetry.RecordFailure(GetTickCount64());
+            SetCaptureState(CaptureState::Unavailable, "depth_unavailable");
+            return;
+        }
         g_rebindRetry.Reset(GetTickCount64());
         const char* boundReason = usingWgc ? "bound_target_wgc" : "bound_desktop";
         SetCaptureState(CaptureState::Running, boundReason);
@@ -2308,7 +2329,7 @@ static bool RecreateWgcFramePool(UINT width, UINT height) {
     if (!CreateWgcCaptureTextures(width, height)) return false;
     g_wgcWidth = width;
     g_wgcHeight = height;
-    InitDepth();
+    if (!InitDepth()) return false;
     Log("WGC frame pool recreated in-place: %ux%u", width, height);
     UpdateOverlayVisibility();
     return true;
@@ -2821,6 +2842,8 @@ static bool Init(HINSTANCE hInst) {
     Log("RegisterHotKey(Ctrl+D depth debug): ok=%d GLE=%lu", hkd ? 1 : 0, hkd ? 0 : GetLastError());
     BOOL hks = RegisterHotKey(g_hwnd, HOTKEY_SCREENSHOT, MOD_CONTROL | MOD_SHIFT, 'S');
     Log("RegisterHotKey(Ctrl+Shift+S screenshot): ok=%d GLE=%lu", hks ? 1 : 0, hks ? 0 : GetLastError());
+    BOOL hkr = RegisterHotKey(g_hwnd, HOTKEY_RECENTER, MOD_CONTROL, 'R');
+    Log("RegisterHotKey(Ctrl+R recenter): ok=%d GLE=%lu", hkr ? 1 : 0, hkr ? 0 : GetLastError());
 
     // System tray icon
     g_nid.cbSize           = sizeof(g_nid);
@@ -2829,7 +2852,7 @@ static bool Init(HINSTANCE hInst) {
     g_nid.uFlags           = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_nid.szTip, L"Glassless3D Overlay — right-click to quit");
+    wcscpy_s(g_nid.szTip, L"Glassless3D Overlay — Ctrl+R to recenter");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     const BindingStatus initialBinding = RefreshCaptureBinding();
@@ -2958,46 +2981,26 @@ static void Frame() {
         hz += ClampAbs(OneEuroPredictedVelocity(g_oeZ) * predictSec, kPredictMaxDeltaCm);
     }
 
-    // Drift correction: the camera is rarely perfectly centered on the user,
-    // so raw headX/headY can have a large static offset even at rest (10-20 cm
-    // is common).  Feeding that raw offset to the shader permanently shifts the
-    // parallax sample, making the overlay look like a "floating second screen."
-    //
-    // Fix: maintain an EMA of the user's "rest" position.  Parallax is applied
-    // relative to that baseline, so the overlay is transparent when the user is
-    // stationary and depth appears only when they move their head.
-    //
-    // Two-speed alpha:
-    //   • First 300 frames (~5 s at 60 fps): alpha=0.05 → fast convergence, EMA
-    //     reaches >99 % of rest position within ~2 seconds.
-    //   • After 300 frames: alpha=0.001 → very slow long-term drift so the
-    //     baseline adapts if the user repositions without ever restarting.
-    static float g_emaX = 0.0f, g_emaY = 0.0f;
-    static int   g_emaFrames = 0;
-    static bool  g_emaInit = false;
+    // Explicit rest calibration. A moving rest EMA absorbs slow deliberate
+    // motion and can make the effect appear dead. The first valid pose sets rest;
+    // Ctrl+R or face reacquisition requests a new rest sample.
+    static float g_restX = 0.0f, g_restY = 0.0f;
+    static bool  g_restValid = false;
 
-    if (poseFresh && newPoseSample) {
-        if (!g_emaInit) {
-            g_emaX = hx; g_emaY = hy;
-            g_emaInit = true;
-        }
-        const float alpha = (g_emaFrames < 300) ? 0.05f : 0.001f;
-        g_emaX = alpha * hx + (1.0f - alpha) * g_emaX;
-        g_emaY = alpha * hy + (1.0f - alpha) * g_emaY;
-        g_emaFrames++;
-
-        if (g_emaFrames == 300)
-            Log("DriftEMA calibrated: restX=%.2f restY=%.2f (will now use relative head position)", g_emaX, g_emaY);
+    if (poseFresh && newPoseSample && (g_recenterRequested || !g_restValid)) {
+        g_restX = hx;
+        g_restY = hy;
+        g_restValid = true;
+        g_recenterRequested = false;
+        Log("Recentered: restX=%.2f restY=%.2f", g_restX, g_restY);
     } else if (g_stateView && (!trackerStateFresh || trackerState != 1)) {
-        // Face loss is an explicit neutral/recenter boundary. Do not retain a
-        // stale rest position and create a jump when the viewer returns.
-        g_emaInit = false;
-        g_emaFrames = 0;
+        g_restValid = false;
+        g_recenterRequested = true;
     }
 
-    // Relative displacement from rest — what the shader actually uses.
-    float dx = g_emaInit ? (hx - g_emaX) : 0.0f;
-    float dy = g_emaInit ? (hy - g_emaY) : 0.0f;
+    // Relative displacement from the explicit rest pose.
+    float dx = g_restValid ? (hx - g_restX) : 0.0f;
+    float dy = g_restValid ? (hy - g_restY) : 0.0f;
 
     // Soft hysteretic deadzone: below g_deadzoneCm output is 0, above 2·dz
     // output is the raw displacement, and between a smoothstep re-engages
@@ -3015,7 +3018,7 @@ static void Frame() {
     if (TEST_WOBBLE) {
         double t = (double)GetTickCount() / 1000.0;
         wobble = 4.0f * (float)sin(t * 2.0);
-        hx += wobble;
+        dx += wobble;
     }
 
     {
@@ -3058,7 +3061,7 @@ static void Frame() {
             (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode),
             g_lastCaptureCpuMs, g_lastGpuMs, g_lastPresentCpuMs, g_lastFrameCpuMs, g_displayBackend,
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
-            hx - wobble, hy, hz, g_emaX, g_emaY, dx - wobble, dy, wobble, g_strength, g_virtualDepth,
+            hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
     }
 
@@ -3278,6 +3281,7 @@ static void Cleanup() {
     UnregisterHotKey(g_hwnd, HOTKEY_QUIT);
     UnregisterHotKey(g_hwnd, HOTKEY_DEBUG);
     UnregisterHotKey(g_hwnd, HOTKEY_SCREENSHOT);
+    UnregisterHotKey(g_hwnd, HOTKEY_RECENTER);
     if (g_shmView) UnmapViewOfFile((void*)g_shmView);
     if (g_shmH)    CloseHandle(g_shmH);
     if (g_seqView) UnmapViewOfFile((void*)g_seqView);

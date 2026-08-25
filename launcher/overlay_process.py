@@ -23,7 +23,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 OVERLAY_EXE_NAME = "Glassless3DOverlay.exe"
-DEPTH_MODEL_REL = os.path.join("models", "depth_anything_v2_small_fp16.onnx")
+DEPTH_MODEL_RELS = (
+    os.path.join("models", "video_depth_anything_vits_518.onnx"),
+    os.path.join("models", "depth_anything_v2_small_fp16.onnx"),
+)
+DEPTH_MODEL_REL = DEPTH_MODEL_RELS[-1]  # backward-compatible display path
+RUNTIME_DLL_NAMES = ("onnxruntime.dll", "DirectML.dll")
 
 
 def _project_root() -> Path:
@@ -53,10 +58,26 @@ def find_overlay_exe() -> Optional[Path]:
 
 
 def find_depth_model() -> Optional[Path]:
-    """Locate the Depth Anything V2 ONNX model, or return None."""
+    """Locate the preferred supported depth model, or return None."""
     root = _project_root()
-    p = root / DEPTH_MODEL_REL
-    return p if p.is_file() else None
+    for relative in DEPTH_MODEL_RELS:
+        candidate = root / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def missing_overlay_runtime_assets(exe: Path) -> list[str]:
+    """Return human-readable assets required before the overlay may start."""
+    root = _project_root()
+    missing: list[str] = []
+    if find_depth_model() is None:
+        missing.append("models/<Video Depth Anything or Depth Anything V2 ONNX model>")
+    for name in RUNTIME_DLL_NAMES:
+        candidates = (exe.parent / name, root / name)
+        if not any(candidate.is_file() for candidate in candidates):
+            missing.append(name)
+    return missing
 
 
 class OverlayStartError(RuntimeError):
@@ -233,9 +254,8 @@ class OverlayProcess:
     ) -> Path:
         """Launch the overlay. Returns the path of the exe actually spawned.
 
-        Raises OverlayStartError if the binary is missing or launch fails.
-        A missing model is only a warning; the overlay has a fallback path
-        (1x1 zero depth texture) so it can still run at flat depth.
+        Raises OverlayStartError if the binary or any required runtime asset
+        is missing, or if process launch fails.
         """
         normalized_target = (
             target_executable.strip() or None
@@ -278,14 +298,12 @@ class OverlayProcess:
 
         _retire_stale_overlay_instances(exe)
 
-        # Model absence is non-fatal — note it but continue.
-        model = find_depth_model()
-        if model is None:
-            print(
-                f"[overlay] WARNING: depth model not found at "
-                f"{DEPTH_MODEL_REL}. The overlay will still start, but only with "
-                "flat fallback depth until the model is restored.",
-                file=sys.stderr,
+        missing = missing_overlay_runtime_assets(exe)
+        if missing:
+            formatted = ", ".join(missing)
+            raise OverlayStartError(
+                "Glassless3D overlay runtime is incomplete. Missing: "
+                f"{formatted}. Run `python scripts/bootstrap.py`, then try again."
             )
 
         # CWD = project root so the overlay's <exe>/models/ search hits.

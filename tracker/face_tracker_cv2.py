@@ -54,6 +54,19 @@ class FaceTracker:
             data + "haarcascade_eye.xml"
         )
 
+    def set_calibration(
+        self, *, real_ipd_cm: float | None = None, camera_fov_deg: float | None = None
+    ) -> None:
+        """Apply live camera calibration for subsequent frames."""
+        if real_ipd_cm is not None and real_ipd_cm > 0.0:
+            self._real_ipd_cm = float(real_ipd_cm)
+        if camera_fov_deg is not None:
+            if not (0.0 < camera_fov_deg < 180.0):
+                raise ValueError(
+                    f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}"
+                )
+            self._camera_fov_deg = float(camera_fov_deg)
+
     def process_frame(self, frame_bgr: np.ndarray) -> Optional[HeadPosition]:
         """Process one BGR frame. Returns None if no face detected."""
         h, w = frame_bgr.shape[:2]

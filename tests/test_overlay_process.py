@@ -5,7 +5,7 @@ The overlay is a real Windows binary with GPU/D3D dependencies, so these
 tests mock subprocess.Popen and filesystem lookups. We verify:
   * find_overlay_exe walks the candidate list correctly
   * OverlayProcess.start raises cleanly when the exe is missing
-  * missing depth model is non-fatal (warns but continues)
+  * missing runtime assets block startup with an actionable error
   * stop() gracefully handles already-stopped, terminates, then kills on timeout
   * is_running / poll_exit_code reflect the underlying Popen state
 """
@@ -26,6 +26,13 @@ from launcher.overlay_process import (
     find_depth_model,
     find_overlay_exe,
 )
+
+
+@pytest.fixture(autouse=True)
+def _runtime_ready_by_default(monkeypatch):
+    monkeypatch.setattr(
+        overlay_process, "missing_overlay_runtime_assets", lambda _exe: []
+    )
 
 
 # ── find_overlay_exe ────────────────────────────────────────────────────────
@@ -146,21 +153,27 @@ def test_start_retires_stale_exact_overlay_and_passes_live_pid(tmp_path, monkeyp
     ]
 
 
-def test_start_warns_but_succeeds_without_model(tmp_path, monkeypatch, capsys):
+def test_start_rejects_missing_runtime_assets(tmp_path, monkeypatch):
     exe = tmp_path / "Glassless3DOverlay.exe"
     exe.write_bytes(b"")
     monkeypatch.setattr(overlay_process, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
-    monkeypatch.setattr(overlay_process, "find_depth_model", lambda: None)
+    monkeypatch.setattr(
+        overlay_process,
+        "missing_overlay_runtime_assets",
+        lambda _exe: ["onnxruntime.dll", "models/<depth model>"],
+    )
 
     fake_popen = MagicMock()
-    fake_popen.return_value.poll.return_value = None
     with patch.object(overlay_process.subprocess, "Popen", fake_popen):
-        OverlayProcess().start()
+        with pytest.raises(OverlayStartError) as exc_info:
+            OverlayProcess().start()
 
-    err = capsys.readouterr().err
-    assert "depth model not found" in err.lower()
-    assert "flat fallback depth" in err.lower()
+    message = str(exc_info.value).lower()
+    assert "runtime is incomplete" in message
+    assert "onnxruntime.dll" in message
+    assert "bootstrap.py" in message
+    fake_popen.assert_not_called()
 
 
 def test_start_wraps_subprocess_launch_failure(tmp_path, monkeypatch):

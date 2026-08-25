@@ -144,7 +144,8 @@ def test_tracker_filter_and_rest_calibration_only_advance_on_new_samples():
     assert "bool newPoseSample = false" in source
     assert "if (poseFresh && newPoseSample)" in source
     assert "OneEuroFilter(g_oeX" in source
-    assert "g_emaFrames++" in source
+    assert "g_recenterRequested || !g_restValid" in source
+    assert "g_emaFrames++" not in source
     assert "G3D_State" in source
     assert "trackerState == 1" in source
 

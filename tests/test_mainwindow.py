@@ -1,5 +1,6 @@
 # tests/test_mainwindow.py
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1077,7 +1078,9 @@ def test_open_debug_monitor_starts_diagnostics_module(qapp, tmp_path):
 
     args = popen.call_args.args[0]
     assert args[1:] == ["-m", "tracker.debug_monitor"]
-    assert popen.call_args.kwargs["cwd"].endswith("Glassless 3d")
+    assert Path(popen.call_args.kwargs["cwd"]).resolve() == (
+        Path(__file__).resolve().parents[1]
+    )
     assert win._debug_monitor_proc is fake_proc
 
 
