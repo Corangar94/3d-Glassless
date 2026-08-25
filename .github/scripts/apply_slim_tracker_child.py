@@ -1,20 +1,19 @@
 from pathlib import Path
 
-path = Path("tracker/main.py")
-text = path.read_text(encoding="utf-8")
 
-
-def replace_once(old: str, new: str, label: str) -> None:
-    global text
+def replace_once(path: str, old: str, new: str, label: str) -> None:
+    target = Path(path)
+    text = target.read_text(encoding="utf-8")
     if new and new in text:
         return
     count = text.count(old)
     if count != 1:
         raise RuntimeError(f"{label}: expected one match, found {count}")
-    text = text.replace(old, new, 1)
+    target.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
 
 
 replace_once(
+    "tracker/main.py",
     '''def _make_tray_image():
     from PIL import Image, ImageDraw
     image = Image.new("RGBA", (64, 64), (30, 30, 30, 255))
@@ -29,6 +28,7 @@ replace_once(
     "Pillow tray-image helper",
 )
 replace_once(
+    "tracker/main.py",
     '''    stop_event = threading.Event()
     tray_icon = None
     try:
@@ -52,11 +52,22 @@ replace_once(
     "child pystray startup",
 )
 replace_once(
+    "tracker/main.py",
     '''    if tray_icon is not None:
         tray_icon.stop()
 ''',
     "",
     "child pystray shutdown",
 )
-
-path.write_text(text, encoding="utf-8", newline="\n")
+replace_once(
+    "tests/test_release_packaging.py",
+    '''    assert 'collect_all(\\n    "mediapipe"\\n)' in source
+''',
+    '''    assert "prepare_slim_mediapipe_runtime" in source
+    assert "collect_all" not in source
+    assert '"PIL"' in source
+    assert '"matplotlib"' in source
+    assert '"sounddevice"' in source
+''',
+    "standalone spec MediaPipe contract",
+)
