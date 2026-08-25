@@ -16,7 +16,7 @@ Layout (88 bytes, little-endian):
     float   smoothing_alpha    (Kalman measurement noise r)
     float   deadzone_mm
     uint32  display_backend    (0=desktop, 1=stereo, 2=quilt)
-    uint32  depth_mode         (0=quality, 1=balanced, 2=fast)
+    uint32  depth_mode         (0=quality, 1=balanced, 2=fast, 3=auto)
     uint32  version            (monotonic counter)
     uint32  stereo_layout      (0=full_sbs, 1=half_sbs)
     uint32  eye_order          (0=left_right, 1=right_left)
@@ -66,7 +66,7 @@ class OverlaySettings:
     smoothing_alpha: float = 0.1
     deadzone_mm: float = 5.0
     display_backend: int = 0
-    depth_mode: int = 1
+    depth_mode: int = 3
     stereo_layout: int = 0
     eye_order: int = 0
     panel_width_px: int = 0

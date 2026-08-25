@@ -9,6 +9,8 @@ from typing import Any, Optional, Protocol
 import cv2
 import yaml
 
+from tracker.camera_geometry import CameraGeometry
+from tracker.camera_quality import CameraQualityMonitor, try_lock_camera_controls
 from tracker.face_tracker_cv2 import HeadPosition
 from tracker.freetrack import FreetracWriter
 from tracker.pose import FilteredPose, monotonic_ms
@@ -222,7 +224,7 @@ def _tilt_filtered_pose(pose: FilteredPose, tilt_deg: float) -> FilteredPose:
 
 
 class TrackingLoop:
-    def __init__(self, tracker: FaceTrackerLike, writer: PoseWriterLike, smoother: HeadSmoother | AdaptivePoseFilter, hold_ms: int = 500, stop_event: Optional[threading.Event] = None, camera_tilt_deg: float = 0.0, config_path: Optional[str] = None) -> None:
+    def __init__(self, tracker: FaceTrackerLike, writer: PoseWriterLike, smoother: HeadSmoother | AdaptivePoseFilter, hold_ms: int = 500, stop_event: Optional[threading.Event] = None, camera_tilt_deg: float = 0.0, config_path: Optional[str] = None, camera_quality_monitor: CameraQualityMonitor | None = None, lock_camera_controls: bool = False) -> None:
         self._tracker, self._writer, self._smoother = tracker, writer, smoother
         self._hold_ms = hold_ms
         self._last_face_ms: Optional[float] = None
@@ -231,6 +233,8 @@ class TrackingLoop:
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_measurement_s: float | None = None
         self._stop_event, self._camera_tilt_deg, self._config_path = stop_event, camera_tilt_deg, config_path
+        self._camera_quality_monitor = camera_quality_monitor
+        self._lock_camera_controls = bool(lock_camera_controls)
 
     def _process_frame(self, frame: object, capture_timestamp_ms: int) -> HeadPosition | None:
         try:
@@ -273,6 +277,8 @@ class TrackingLoop:
         frame_count = consecutive_read_failures = reopen_attempts = 0
         settings_reader = SharedSettingsReader()
         applied_calibration: tuple[float | None, float | None] | None = None
+        last_quality_log_ms = 0
+        controls_lock_attempted = False
         try:
             while not self._should_stop():
                 ok, frame = cap.read()
@@ -296,6 +302,33 @@ class TrackingLoop:
 
                 consecutive_read_failures = reopen_attempts = 0
                 self._on_frame(frame)
+                if self._camera_quality_monitor is not None:
+                    camera_quality = self._camera_quality_monitor.update(
+                        frame, capture_timestamp_ms
+                    )
+                    if capture_timestamp_ms - last_quality_log_ms >= 2000:
+                        problems = ", ".join(camera_quality.problems) or "none"
+                        fps_text = (
+                            f"{camera_quality.fps:.1f}"
+                            if camera_quality.fps is not None
+                            else "unknown"
+                        )
+                        print(
+                            "[G3D] Camera quality "
+                            f"{camera_quality.quality}: brightness={camera_quality.brightness:.2f} "
+                            f"jitter={camera_quality.brightness_jitter:.3f} "
+                            f"sharpness={camera_quality.sharpness:.1f} "
+                            f"fps={fps_text} problems={problems}"
+                        )
+                        last_quality_log_ms = capture_timestamp_ms
+                    if (
+                        self._lock_camera_controls
+                        and not controls_lock_attempted
+                        and camera_quality.stable_for_lock
+                    ):
+                        controls_lock_attempted = True
+                        result = try_lock_camera_controls(cap)
+                        print(f"[G3D] Camera control lock result: {result}")
                 settings = settings_reader.read()
                 applied_calibration = _apply_live_calibration(self._tracker, settings, applied_calibration)
                 self._smoother.set_measurement_noise(_measurement_noise(settings))
@@ -371,6 +404,16 @@ def main() -> None:
     cam, scr, trk = cfg["camera"], cfg["screen"], cfg["tracking"]
     tracker_backend = args.tracking_backend or trk.get("tracker_backend", "auto")
     face_tracker_cls, selected_backend = _load_face_tracker_class(tracker_backend)
+    camera_geometry = CameraGeometry.from_config(
+        cfg,
+        fallback_width=int(cam.get("width", 0)),
+        fallback_height=int(cam.get("height", 0)),
+    )
+    camera_quality_monitor = CameraQualityMonitor(
+        window_size=int(cam.get("quality_window_frames", 45)),
+        minimum_sharpness=float(cam.get("minimum_sharpness", 35.0)),
+        minimum_fps=float(cam.get("minimum_fps", 20.0)),
+    )
     smoother = AdaptivePoseFilter(process_noise=float(trk.get("smoothing_q", 0.01)), measurement_noise=float(trk.get("smoothing_r", 0.1)), prediction_horizon_ms=float(trk.get("prediction_horizon_ms", 35.0)), max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)))
 
     stop_event = threading.Event()
@@ -391,7 +434,7 @@ def main() -> None:
     print("[G3D] Writing G3D legacy pose, G3D_PoseV2, and FT_SharedMem")
 
     with (
-        face_tracker_cls(real_ipd_cm=_resolve_ipd_cm(cfg), screen_width_cm=scr["width_cm"], screen_height_cm=scr["height_cm"], camera_fov_deg=_resolve_camera_fov_deg(cfg), async_mode=bool(trk.get("live_stream", True)), min_tracking_confidence=float(trk.get("min_tracking_confidence", 0.5))) as tracker,
+        face_tracker_cls(real_ipd_cm=_resolve_ipd_cm(cfg), screen_width_cm=scr["width_cm"], screen_height_cm=scr["height_cm"], camera_fov_deg=_resolve_camera_fov_deg(cfg), async_mode=bool(trk.get("live_stream", True)), min_tracking_confidence=float(trk.get("min_tracking_confidence", 0.5)), camera_geometry=camera_geometry) as tracker,
         FreetracWriter() as ft_writer,
         SharedMemoryWriter() as g3d_writer,
         PoseStateWriter() as pose_writer,
@@ -404,7 +447,7 @@ def main() -> None:
                 pose_writer.write(pose, valid=valid); self.write(x=pose.x_cm, y=pose.y_cm, z=pose.z_cm)
             def write_state(self, state: str) -> None:
                 state_writer.write(state)
-        loop = TrackingLoop(tracker=tracker, writer=_MultiWriter(), smoother=smoother, hold_ms=int(trk["hold_ms"]), stop_event=stop_event, camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)), config_path=args.config)
+        loop = TrackingLoop(tracker=tracker, writer=_MultiWriter(), smoother=smoother, hold_ms=int(trk["hold_ms"]), stop_event=stop_event, camera_tilt_deg=float(trk.get("camera_tilt_deg", 0.0)), config_path=args.config, camera_quality_monitor=camera_quality_monitor, lock_camera_controls=bool(cam.get("lock_controls_after_warmup", False)))
         try:
             loop.run(camera_index=int(cam["index"]), camera_width=int(cam.get("width", 0)), camera_height=int(cam.get("height", 0)), camera_fps=float(cam.get("fps", 0.0)))
         except KeyboardInterrupt:

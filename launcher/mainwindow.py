@@ -115,6 +115,7 @@ _DEPTH_MODES = {
     "quality": 0,
     "balanced": 1,
     "fast": 2,
+    "auto": 3,
 }
 _STEREO_LAYOUTS = {"full_sbs": 0, "half_sbs": 1}
 _EYE_ORDERS = {"left_right": 0, "right_left": 1}
@@ -123,6 +124,7 @@ _DEPTH_MODE_LABELS = {
     0: "Quality",
     1: "Balanced",
     2: "Fast",
+    3: "Auto",
 }
 _PROFILE_CONTEXT_LABELS = {
     PlayContext.ONLINE_MULTIPLAYER: "Online / multiplayer",
@@ -1000,7 +1002,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._comfort_status)
 
         self._depth_mode_combo = QComboBox()
-        for label, code in (("Quality depth", 0), ("Balanced depth", 1), ("Fast depth", 2)):
+        for label, code in (("Auto depth", 3), ("Quality depth", 0), ("Balanced depth", 1), ("Fast depth", 2)):
             self._depth_mode_combo.addItem(label, code)
         self._depth_mode_combo.setMinimumWidth(0)
         self._depth_mode_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)

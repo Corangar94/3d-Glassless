@@ -8,6 +8,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from tracker.camera_geometry import CameraGeometry
 from tracker.pose import HeadPosition, monotonic_ms
 
 
@@ -19,12 +20,14 @@ class FaceTracker:
         screen_height_cm: float,
         camera_fov_deg: float = 60.0,
         model_path: str = "",
+        camera_geometry: CameraGeometry | None = None,
         **_options: object,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
         self._real_ipd_cm = float(real_ipd_cm)
         self._camera_fov_deg = float(camera_fov_deg)
+        self._camera_geometry = camera_geometry
         cv2_data = getattr(cv2, "data", None)
         data = str(getattr(cv2_data, "haarcascades", ""))
         self._face_cc = cv2.CascadeClassifier(
@@ -62,7 +65,12 @@ class FaceTracker:
             return None
 
         fx, fy, fw, fh = max(faces, key=lambda face: face[2] * face[3])
-        focal_px = w / (2.0 * math.tan(math.radians(self._camera_fov_deg / 2.0)))
+        geometry = self._camera_geometry
+        focal_px = (
+            geometry.focal_lengths(w, h)[0]
+            if geometry is not None and geometry.intrinsics is not None
+            else w / (2.0 * math.tan(math.radians(self._camera_fov_deg / 2.0)))
+        )
         roi = gray[fy : fy + fh, fx : fx + fw]
         eyes = self._eye_cc.detectMultiScale(
             roi, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20)
@@ -89,13 +97,25 @@ class FaceTracker:
             z_cm = (focal_px * self._real_ipd_cm) / ipd_px
         else:
             z_cm = (focal_px * self._real_ipd_cm * 2.5) / max(fw, 1.0)
-        aspect = w / max(h, 1)
-        phys_half_w = z_cm * math.tan(math.radians(self._camera_fov_deg / 2.0))
-        phys_half_h = phys_half_w / aspect
+        if geometry is not None and geometry.intrinsics is not None:
+            x_cm, y_cm, screen_z_cm = geometry.pixel_depth_to_screen(
+                cx_norm * w,
+                cy_norm * h,
+                z_cm,
+                image_width=w,
+                image_height=h,
+            )
+        else:
+            aspect = w / max(h, 1)
+            phys_half_w = z_cm * math.tan(math.radians(self._camera_fov_deg / 2.0))
+            phys_half_h = phys_half_w / aspect
+            x_cm = -((cx_norm - 0.5) * 2.0 * phys_half_w)
+            y_cm = -((cy_norm - 0.5) * 2.0 * phys_half_h)
+            screen_z_cm = z_cm
         return HeadPosition(
-            x_cm=-((cx_norm - 0.5) * 2.0 * phys_half_w),
-            y_cm=-((cy_norm - 0.5) * 2.0 * phys_half_h),
-            z_cm=z_cm,
+            x_cm=x_cm,
+            y_cm=y_cm,
+            z_cm=screen_z_cm,
             confidence=confidence,
             capture_timestamp_ms=(
                 monotonic_ms()

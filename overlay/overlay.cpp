@@ -792,7 +792,7 @@ static float    g_depthGamma  = 1.0f;
 static float    g_focusRadius = 0.1f;
 static float    g_deadzoneCm  = 0.5f; // soft deadzone on dx/dy (default 5 mm)
 static uint32_t g_displayBackend = 0;  // 0=desktop, 1=stereo, 2=quilt
-static uint32_t g_depthMode = 1;       // 0=quality, 1=balanced, 2=fast
+static uint32_t g_depthMode = 3;       // 0=quality, 1=balanced, 2=fast, 3=auto
 static float g_ipdCm = 6.4f;
 static uint32_t g_stereoLayout = 0;    // 0=full_sbs, 1=half_sbs
 static uint32_t g_eyeOrder = 0;        // 0=left_right, 1=right_left
@@ -805,6 +805,7 @@ static const char* DepthModeName(uint32_t mode) {
     switch (mode) {
         case 0: return "quality";
         case 2: return "fast";
+        case 3: return "auto";
         default: return "balanced";
     }
 }
@@ -1937,7 +1938,12 @@ static void ApplySettings() {
     g_panelHeightPx = panelHeightPx;
     g_focusPlaneCm = focusPlaneCm;
     g_trackingMode = trackingMode;
-    if (g_depth) g_depth->set_performance_mode(g_depthMode);
+    if (g_depth) {
+        g_depth->set_performance_mode(g_depthMode);
+        g_depth->set_runtime_load(
+            static_cast<float>(g_lastFrameCpuMs),
+            static_cast<float>(g_lastGpuMs));
+    }
 }
 
 // Query the primary monitor's physical size via EDID.
@@ -2083,8 +2089,8 @@ static bool InitDepth() {
     }
     g_depth = d;
     g_depth->set_performance_mode(g_depthMode);
-    Log("InitDepth: depth inference online (capture %ux%u, model 518x518)",
-        cd.Width, cd.Height);
+    Log("InitDepth: depth inference online (capture %ux%u, requested_mode=%s)",
+        cd.Width, cd.Height, DepthModeName(g_depthMode));
     return true;
 }
 
@@ -3191,12 +3197,19 @@ static void Frame() {
         else if (changesThisSec == 0)   shmStatus = "STALE (tracker running but not writing?)";
         else                            shmStatus = "LIVE";
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
-            "depth[total=%llu %dHz mode=%s] timing[capture_cpu=%.3f draw_gpu=%.3f present_cpu=%.3f frame_cpu=%.3f] backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
+            "depth[total=%llu %dHz mode=%s active=%s profile=%dx%d tiles=%d inference_ms=%.2f blend_ms=%.1f age_ms=%u] timing[capture_cpu=%.3f draw_gpu=%.3f present_cpu=%.3f frame_cpu=%.3f] backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
             "head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f "
             "hasFrame=%d capture=%s capture_reason=%s",
             frameCount, g_acquireOk, g_acquireTimeout, g_acquireLost, g_acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
             (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode),
+            g_depth ? DepthModeName(g_depth->active_performance_mode()) : "balanced",
+            g_depth ? g_depth->active_model_width() : 0,
+            g_depth ? g_depth->active_model_height() : 0,
+            g_depth ? g_depth->active_scheduled_tiles() : 0,
+            g_depth ? g_depth->last_inference_ms() : 0.0f,
+            g_depth ? g_depth->blend_duration_ms() : 0.0f,
+            g_depth ? g_depth->depth_age_ms() : 0u,
             g_lastCaptureCpuMs, g_lastGpuMs, g_lastPresentCpuMs, g_lastFrameCpuMs, g_displayBackend,
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,

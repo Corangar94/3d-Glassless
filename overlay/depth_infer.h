@@ -53,9 +53,21 @@ public:
     bool run(ID3D11Texture2D* captured_bgra8);
 
     // Runtime performance/quality mode from G3D_Settings:
-    // 0=quality, 1=balanced, 2=fast.
+    // 0=quality, 1=balanced, 2=fast, 3=auto.
     void set_performance_mode(uint32_t mode);
     uint32_t performance_mode() const;
+    uint32_t active_performance_mode() const;
+
+    // Feed recent render cost to the automatic controller. Negative values are
+    // ignored, allowing unsupported GPU timing queries to degrade safely.
+    void set_runtime_load(float frame_cpu_ms, float gpu_ms);
+
+    int active_model_width() const;
+    int active_model_height() const;
+    int active_scheduled_tiles() const;
+    float last_inference_ms() const;
+    float blend_duration_ms() const;
+    uint32_t depth_age_ms() const;
 
     // Two depth SRVs for render-rate interpolation.
     // The shader lerps between prev_srv (depth at last inference) and

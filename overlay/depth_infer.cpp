@@ -204,9 +204,14 @@ struct DepthInferImpl {
 
     // ORT state
     std::unique_ptr<Ort::Env>            env;
-    std::unique_ptr<Ort::SessionOptions> opts;
-    std::unique_ptr<Ort::Session>        session;
-    std::unique_ptr<Ort::RunOptions>     run_options;
+    struct FixedProfileSession {
+        std::unique_ptr<Ort::SessionOptions> options;
+        std::unique_ptr<Ort::Session> session;
+        std::unique_ptr<Ort::RunOptions> run_options;
+    };
+    std::array<FixedProfileSession, 3> profile_sessions;
+    std::wstring model_path_copy;
+    int dml_device_id = 0;
     Ort::AllocatorWithDefaultOptions     allocator;
     std::string                          input_name;
     std::string                          output_name;
@@ -256,6 +261,12 @@ struct DepthInferImpl {
     std::atomic<int>                     active_model_width{518};
     std::atomic<int>                     active_model_height{294};
     std::atomic<int>                     active_scheduled_tiles{1};
+    std::atomic<uint32_t>                active_performance_mode{1};
+    std::atomic<float>                   runtime_frame_cpu_ms{0.0f};
+    std::atomic<float>                   runtime_gpu_ms{0.0f};
+    std::atomic<uint64_t>                last_depth_upload_ms{0};
+    uint32_t                             auto_candidate_mode = 1;
+    uint32_t                             auto_candidate_streak = 0;
     DepthProfile                         pending_profile{};
     DepthProfile                         running_profile{};
     std::vector<int>                     pending_tiles;
@@ -350,6 +361,52 @@ struct DepthInferImpl {
         }
         ++scheduler_cycle;
         return selected;
+    }
+
+    static uint64_t steady_milliseconds() {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    uint32_t resolve_performance_mode(uint32_t requested) {
+        if (requested <= 2) {
+            active_performance_mode.store(requested, std::memory_order_relaxed);
+            auto_candidate_mode = requested;
+            auto_candidate_streak = 0;
+            return requested;
+        }
+        const uint32_t current = active_performance_mode.load(std::memory_order_relaxed);
+        const float inference = last_inference_ms.load(std::memory_order_relaxed);
+        const float frame_cpu = runtime_frame_cpu_ms.load(std::memory_order_relaxed);
+        const float gpu = runtime_gpu_ms.load(std::memory_order_relaxed);
+        const float render_cost = std::max(frame_cpu, gpu);
+        uint32_t target = 1;
+        if ((inference > 105.0f && inference > 0.0f) || render_cost > 13.0f
+            || tile_count >= 4) {
+            target = 2;
+        } else if (inference > 0.0f && inference < 48.0f
+                   && render_cost < 7.0f && tile_count <= 2) {
+            target = 0;
+        } else if (inference > 80.0f || render_cost > 10.0f) {
+            target = 2;
+        }
+        if (target == current) {
+            auto_candidate_mode = target;
+            auto_candidate_streak = 0;
+            return current;
+        }
+        if (target != auto_candidate_mode) {
+            auto_candidate_mode = target;
+            auto_candidate_streak = 1;
+            return current;
+        }
+        const uint32_t required = target == 2 ? 2u : 5u;
+        if (++auto_candidate_streak >= required) {
+            active_performance_mode.store(target, std::memory_order_relaxed);
+            auto_candidate_streak = 0;
+            return target;
+        }
+        return current;
     }
 
     uint32_t adaptive_interval_ms(const DepthProfile& profile) const {
@@ -541,48 +598,79 @@ float4 main(I i):SV_Target {
         return true;
     }
 
-    bool create_ort_session(const std::wstring& model_path) {
+    FixedProfileSession& fixed_session(uint32_t mode) {
+        return profile_sessions[mode > 2 ? 1 : mode];
+    }
+
+    bool ensure_fixed_session(uint32_t mode) {
+        mode = mode > 2 ? 1 : mode;
+        FixedProfileSession& fixed = fixed_session(mode);
+        if (fixed.session) return true;
         try {
-            env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "Glassless3D");
-            opts = std::make_unique<Ort::SessionOptions>();
-            opts->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            // DirectML EP — GPU inference on NVIDIA/AMD/Intel.
-            // device_id 0 is the default adapter; matches our D3D11 device.
+            const DepthProfile profile = profile_for_mode(mode);
+            fixed.options = std::make_unique<Ort::SessionOptions>();
+            fixed.options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            fixed.options->DisableMemPattern();
+            fixed.options->SetExecutionMode(ORT_SEQUENTIAL);
             OrtApi const& api = Ort::GetApi();
-            const int dml_device_id = resolve_dml_device_id();
-            OrtStatus* st = OrtSessionOptionsAppendExecutionProvider_DML(*opts, dml_device_id);
-            if (st != nullptr) {
-                last_err = std::string("Append DML EP failed: ") + api.GetErrorMessage(st);
-                api.ReleaseStatus(st);
+            // ONNX Runtime 1.20.1 exposes symbolic-dimension overrides through
+            // the stable C API. The MinGW C++ wrapper in the NuGet package does
+            // not project these methods, so use the supported C entry point and
+            // retain normal C++ exception semantics via Ort::ThrowOnError.
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "batch_size", 1));
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "height", profile.height));
+            Ort::ThrowOnError(api.AddFreeDimensionOverrideByName(
+                *fixed.options, "width", profile.width));
+            OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_DML(
+                *fixed.options, dml_device_id);
+            if (status != nullptr) {
+                last_err = std::string("Append DML EP failed: ")
+                    + api.GetErrorMessage(status);
+                api.ReleaseStatus(status);
+                fixed.options.reset();
                 return false;
             }
-            // DML requires these on session options.
-            opts->DisableMemPattern();
-            opts->SetExecutionMode(ORT_SEQUENTIAL);
-
-            session = std::make_unique<Ort::Session>(*env, model_path.c_str(), *opts);
-            // Keep one RunOptions object alive for the worker lifetime so
-            // cleanup() can interrupt a device-stalled Run before joining.
-            run_options = std::make_unique<Ort::RunOptions>();
-
-            size_t num_in = session->GetInputCount();
-            size_t num_out = session->GetOutputCount();
-            if (num_in != 1 || num_out != 1) {
-                char buf[128];
-                std::snprintf(buf, sizeof(buf),
-                    "Unexpected model I/O: inputs=%zu outputs=%zu", num_in, num_out);
-                last_err = buf;
-                return false;
+            fixed.session = std::make_unique<Ort::Session>(
+                *env, model_path_copy.c_str(), *fixed.options);
+            fixed.run_options = std::make_unique<Ort::RunOptions>();
+            if (input_name.empty() || output_name.empty()) {
+                if (fixed.session->GetInputCount() != 1
+                    || fixed.session->GetOutputCount() != 1) {
+                    last_err = "Unexpected model input/output count";
+                    return false;
+                }
+                Ort::AllocatedStringPtr input = fixed.session->GetInputNameAllocated(0, allocator);
+                Ort::AllocatedStringPtr output = fixed.session->GetOutputNameAllocated(0, allocator);
+                input_name = input.get();
+                output_name = output.get();
             }
-            Ort::AllocatedStringPtr in_name  = session->GetInputNameAllocated(0, allocator);
-            Ort::AllocatedStringPtr out_name = session->GetOutputNameAllocated(0, allocator);
-            input_name  = in_name.get();
-            output_name = out_name.get();
-        } catch (const Ort::Exception& e) {
-            last_err = std::string("ORT init exception: ") + e.what();
+            return true;
+        } catch (const Ort::Exception& exception) {
+            last_err = std::string("Fixed-profile ORT session exception: ")
+                + exception.what();
+            fixed.run_options.reset();
+            fixed.session.reset();
+            fixed.options.reset();
             return false;
         }
-        return true;
+    }
+
+    bool create_ort_session(const std::wstring& model_path) {
+        try {
+            env = std::make_unique<Ort::Env>(
+                ORT_LOGGING_LEVEL_WARNING, "Glassless3D");
+            model_path_copy = model_path;
+            dml_device_id = resolve_dml_device_id();
+            // Balanced is the startup default. Fast and quality sessions are
+            // created lazily only when selected, avoiding three copies of the
+            // model weights on every machine.
+            return ensure_fixed_session(1);
+        } catch (const Ort::Exception& exception) {
+            last_err = std::string("ORT init exception: ") + exception.what();
+            return false;
+        }
     }
 
     // CPU: downsample a center-cropped BGRA8 captured frame -> NCHW fp32 RGB
@@ -883,11 +971,13 @@ float4 main(I i):SV_Target {
             blend_started = now;
             blend_active = true;
             has_valid_depth = true;
+            last_depth_upload_ms.store(steady_milliseconds(), std::memory_order_relaxed);
         }
         if (worker_busy) return true;
 
-        const DepthProfile requested = profile_for_mode(
-            performance_mode.load(std::memory_order_relaxed));
+        const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
+        const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
+        const DepthProfile requested = profile_for_mode(resolved_mode);
         if (last_submit.time_since_epoch().count() != 0) {
             const uint32_t elapsed_ms = static_cast<uint32_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -981,8 +1071,14 @@ float4 main(I i):SV_Target {
                         tile_input_count, shape.data(), shape.size());
                     const char* input_names[] = {input_name.c_str()};
                     const char* output_names[] = {output_name.c_str()};
-                    auto outputs = session->Run(
-                        *run_options, input_names, &input, 1, output_names, 1);
+                    if (!ensure_fixed_session(running_profile.mode)) {
+                        error = last_err;
+                        ok = false;
+                        break;
+                    }
+                    FixedProfileSession& fixed = fixed_session(running_profile.mode);
+                    auto outputs = fixed.session->Run(
+                        *fixed.run_options, input_names, &input, 1, output_names, 1);
                     if (outputs.size() != 1) {
                         error = "Run returned no outputs"; ok = false; break;
                     }
@@ -1158,9 +1254,10 @@ float4 main(I i):SV_Target {
             // DirectML may be blocked in Run while its D3D device is being
             // removed. ORT's termination flag is thread-safe and makes that
             // Run return, allowing the worker join to complete.
-            if (run_options) {
+            for (auto& fixed : profile_sessions) {
+                if (!fixed.run_options) continue;
                 try {
-                    run_options->SetTerminate();
+                    fixed.run_options->SetTerminate();
                 } catch (...) {
                     // cleanup/destruction must not throw; join remains the
                     // final synchronization point for the session lifetime.
@@ -1184,9 +1281,12 @@ float4 main(I i):SV_Target {
         for (auto& stage : stage_bgra) {
             if (stage) { stage->Release(); stage = nullptr; }
         }
-        session.reset();
-        run_options.reset();
-        opts.reset();
+        for (auto& fixed : profile_sessions) {
+            fixed.run_options.reset();
+            fixed.session.reset();
+            fixed.options.reset();
+        }
+        model_path_copy.clear();
         env.reset();
         input_pending = false;
         worker_running = false;
@@ -1234,6 +1334,9 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     }
     impl_->stop.store(false, std::memory_order_relaxed);
     impl_->inferences.store(0, std::memory_order_relaxed);
+    impl_->active_performance_mode.store(1, std::memory_order_relaxed);
+    impl_->last_inference_ms.store(0.0f, std::memory_order_relaxed);
+    impl_->last_depth_upload_ms.store(0, std::memory_order_relaxed);
     impl_->dev = dev;
     impl_->ctx = ctx;
     impl_->cap_w = capture_w;
@@ -1252,7 +1355,7 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
 }
 
 bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
-    if (!impl_ || !impl_->session) {
+    if (!impl_ || !impl_->env || !impl_->fixed_session(1).session) {
         impl_->last_err = "DepthInferencer not initialized";
         return false;
     }
@@ -1261,13 +1364,57 @@ bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
 
 void DepthInferencer::set_performance_mode(uint32_t mode) {
     if (!impl_) return;
-    if (mode > 2) mode = 1;
+    if (mode > 3) mode = 3;
     impl_->performance_mode.store(mode, std::memory_order_relaxed);
+    if (mode <= 2) {
+        impl_->active_performance_mode.store(mode, std::memory_order_relaxed);
+    }
 }
 
 uint32_t DepthInferencer::performance_mode() const {
     if (!impl_) return 1;
     return impl_->performance_mode.load(std::memory_order_relaxed);
+}
+
+uint32_t DepthInferencer::active_performance_mode() const {
+    if (!impl_) return 1;
+    return impl_->active_performance_mode.load(std::memory_order_relaxed);
+}
+
+void DepthInferencer::set_runtime_load(float frame_cpu_ms, float gpu_ms) {
+    if (!impl_) return;
+    if (std::isfinite(frame_cpu_ms) && frame_cpu_ms >= 0.0f)
+        impl_->runtime_frame_cpu_ms.store(frame_cpu_ms, std::memory_order_relaxed);
+    if (std::isfinite(gpu_ms) && gpu_ms >= 0.0f)
+        impl_->runtime_gpu_ms.store(gpu_ms, std::memory_order_relaxed);
+}
+
+int DepthInferencer::active_model_width() const {
+    return impl_ ? impl_->active_model_width.load(std::memory_order_relaxed) : 0;
+}
+
+int DepthInferencer::active_model_height() const {
+    return impl_ ? impl_->active_model_height.load(std::memory_order_relaxed) : 0;
+}
+
+int DepthInferencer::active_scheduled_tiles() const {
+    return impl_ ? impl_->active_scheduled_tiles.load(std::memory_order_relaxed) : 0;
+}
+
+float DepthInferencer::last_inference_ms() const {
+    return impl_ ? impl_->last_inference_ms.load(std::memory_order_relaxed) : 0.0f;
+}
+
+float DepthInferencer::blend_duration_ms() const {
+    return impl_ ? impl_->blend_duration_sec * 1000.0f : 0.0f;
+}
+
+uint32_t DepthInferencer::depth_age_ms() const {
+    if (!impl_) return 0;
+    const uint64_t uploaded = impl_->last_depth_upload_ms.load(std::memory_order_relaxed);
+    if (uploaded == 0) return 0;
+    const uint64_t now = DepthInferImpl::steady_milliseconds();
+    return static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX, now - uploaded));
 }
 
 ID3D11ShaderResourceView* DepthInferencer::depth_srv() const {

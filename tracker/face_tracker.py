@@ -12,6 +12,7 @@ import mediapipe as mp
 import numpy as np
 from mediapipe import tasks
 
+from tracker.camera_geometry import CameraGeometry
 from tracker.pose import HeadPosition, monotonic_ms
 
 _LEFT_IRIS_CENTER = 468
@@ -120,6 +121,7 @@ class FaceTracker:
         *,
         async_mode: bool = True,
         min_tracking_confidence: float = 0.5,
+        camera_geometry: CameraGeometry | None = None,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
@@ -127,6 +129,7 @@ class FaceTracker:
         self._screen_width_cm = float(screen_width_cm)
         self._screen_height_cm = float(screen_height_cm)
         self._camera_fov_deg = float(camera_fov_deg)
+        self._camera_geometry = camera_geometry
         self._async_mode = bool(async_mode)
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
@@ -192,27 +195,51 @@ class FaceTracker:
         right_iris = np.array(
             [right.x * image_width, right.y * image_height], dtype=np.float64
         )
-        ipd_px = float(np.linalg.norm(right_iris - left_iris))
-        if not math.isfinite(ipd_px) or ipd_px < 1.0:
-            return None
-
-        z_cm = estimate_z_cm(
-            ipd_px,
-            image_width,
-            self._real_ipd_cm,
-            self._camera_fov_deg,
-            yaw_deg,
-        )
-        center_x = float((left.x + right.x) * 0.5)
-        center_y = float((left.y + right.y) * 0.5)
-        x_cm, y_cm = estimate_xy_cm(
-            center_x,
-            center_y,
-            z_cm,
-            self._camera_fov_deg,
-            image_width,
-            image_height,
-        )
+        geometry = self._camera_geometry
+        if geometry is not None and geometry.intrinsics is not None:
+            rectified = geometry.rectified_pixels(
+                (left_iris, right_iris),
+                image_width=image_width,
+                image_height=image_height,
+            )
+            ipd_px = float(np.linalg.norm(rectified[1] - rectified[0]))
+            focal_x, _focal_y = geometry.focal_lengths(image_width, image_height)
+            yaw_scale = max(0.45, abs(math.cos(math.radians(yaw_deg))))
+            z_camera_cm = (
+                focal_x * self._real_ipd_cm * yaw_scale / max(ipd_px, 1.0)
+            )
+            center_px = (left_iris + right_iris) * 0.5
+            x_cm, y_cm, z_cm = geometry.pixel_depth_to_screen(
+                float(center_px[0]),
+                float(center_px[1]),
+                z_camera_cm,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            yaw_deg, pitch_deg, roll_deg = geometry.orientation_to_screen(
+                yaw_deg, pitch_deg, roll_deg
+            )
+        else:
+            ipd_px = float(np.linalg.norm(right_iris - left_iris))
+            if not math.isfinite(ipd_px) or ipd_px < 1.0:
+                return None
+            z_cm = estimate_z_cm(
+                ipd_px,
+                image_width,
+                self._real_ipd_cm,
+                self._camera_fov_deg,
+                yaw_deg,
+            )
+            center_x = float((left.x + right.x) * 0.5)
+            center_y = float((left.y + right.y) * 0.5)
+            x_cm, y_cm = estimate_xy_cm(
+                center_x,
+                center_y,
+                z_cm,
+                self._camera_fov_deg,
+                image_width,
+                image_height,
+            )
         return HeadPosition(
             x_cm=x_cm,
             y_cm=y_cm,
