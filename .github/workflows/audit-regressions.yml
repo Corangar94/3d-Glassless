@@ -88,22 +88,25 @@ jobs:
       - name: Install project and test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Apply depth and camera geometry runtime overhaul
+      - name: Apply complete quality runtime overhaul
         run: |
           python .github/scripts/apply_depth_overhaul.py
           python .github/scripts/apply_fixed_profile_sessions.py
+          python .github/scripts/apply_depth_auto_telemetry.py
           python .github/scripts/write_depth_profile_tests.py
           python .github/scripts/fix_depth_contract_tests.py
           python .github/scripts/apply_camera_geometry_runtime.py
+          python .github/scripts/apply_auto_ui_diagnostics.py
 
       - name: Compile Python sources
         run: python -m compileall -q launcher tracker scripts tests
 
-      - name: Run focused quality and geometry regressions
+      - name: Run focused quality, geometry, and telemetry regressions
         run: >-
           python -m pytest
           tests/test_depth_profiles_native.py
           tests/test_fixed_depth_sessions.py
+          tests/test_depth_auto_telemetry.py
           tests/test_camera_geometry.py
           tests/test_face_tracker.py
           tests/test_face_tracker_live.py
@@ -111,6 +114,7 @@ jobs:
           tests/test_overlay_backend_shader.py
           tests/test_overlay_capture_resilience.py
           tests/test_phase0_head_coupled.py
+          tests/test_wizard.py
           -q
 
       - name: Build the complete native runtime
@@ -121,9 +125,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add overlay/depth_infer.cpp tracker/face_tracker.py tracker/face_tracker_cv2.py tracker/main.py tests/test_depth_profiles_native.py tests/test_overlay_capture_resilience.py Glassless3DOverlay.exe
+          git add overlay/depth_infer.cpp overlay/depth_infer.h overlay/overlay.cpp tracker/face_tracker.py tracker/face_tracker_cv2.py tracker/main.py tracker/shared_settings.py launcher/mainwindow.py launcher/wizard.py launcher/diagnostics.py config.yaml tests/test_depth_profiles_native.py tests/test_overlay_capture_resilience.py Glassless3DOverlay.exe
           if (git diff --cached --quiet) {
             throw "quality overhaul produced no source changes"
           }
-          git commit -m "Add adaptive depth profiles and calibrated camera geometry"
+          git commit -m "Complete adaptive depth, calibration, and runtime telemetry"
           git push origin HEAD:feature/full-quality-performance-overhaul
