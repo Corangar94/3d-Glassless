@@ -275,11 +275,14 @@ def test_depth_cleanup_releases_both_current_and_previous_depth_resources():
 def test_depth_worker_run_can_be_terminated_before_join():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 
-    assert "std::unique_ptr<Ort::RunOptions>" in source
-    assert "session->Run(" in source
-    assert "*run_options" in source
-    assert "run_options->SetTerminate()" in source
-    assert source.index("run_options->SetTerminate()") < source.index("worker.join()")
+    assert "std::unique_ptr<Ort::RunOptions> run_options;" in source
+    assert "fixed.session->Run(" in source
+    assert "*fixed.run_options" in source
+    assert "for (auto& fixed : profile_sessions)" in source
+    assert "fixed.run_options->SetTerminate();" in source
+    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+        "worker.join()"
+    )
 
 
 def test_acquire_device_loss_enters_device_recovery_before_generic_rebind():
