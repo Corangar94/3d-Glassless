@@ -30,12 +30,15 @@ def test_setup_py_is_a_fail_closed_retired_installer_shim():
 def test_pyinstaller_does_not_redistribute_reshade_binaries_or_shaders():
     source = (ROOT / "Glassless3D.spec").read_text(encoding="utf-8")
 
-    datas = source.split("datas=[", 1)[1].split("],", 1)[0]
-    assert "ReShade32.dll" not in datas
-    assert "ReShade64.dll" not in datas
-    assert "Glassless3D.addon" not in datas
-    assert "shaders/Glassless3D" not in datas
-    assert "reshade.me" in datas
+    runtime_data_block = source.split("runtime_datas = [", 1)[1].split(
+        "]\n\nruntime_binaries", 1
+    )[0]
+    assert "ReShade32.dll" not in runtime_data_block
+    assert "ReShade64.dll" not in runtime_data_block
+    assert "Glassless3D.addon" not in runtime_data_block
+    assert "shaders/Glassless3D" not in runtime_data_block
+    assert "reshade.me" in runtime_data_block
+    assert "datas=runtime_datas" in source
 
 
 def test_pyinstaller_includes_frozen_tracker_child_modules():
