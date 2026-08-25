@@ -22,7 +22,12 @@ def test_depth_profiles_have_lazy_session_cache():
 def test_each_session_has_its_own_interruptible_run_options():
     source = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
 
+    assert "std::unique_ptr<Ort::RunOptions> run_options;" in source
     assert "fixed.run_options = std::make_unique<Ort::RunOptions>()" in source
     assert "fixed.session->Run(" in source
     assert "*fixed.run_options" in source
-    assert "if (fixed.run_options) fixed.run_options->SetTerminate()" in source
+    assert "for (auto& fixed : profile_sessions)" in source
+    assert "fixed.run_options->SetTerminate();" in source
+    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+        "worker.join()"
+    )
