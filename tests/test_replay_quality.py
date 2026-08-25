@@ -17,10 +17,11 @@ def test_display_projection_does_not_advance_measurement_state():
     axis.update(0.0, 1000)
     axis.update(1.0, 1033)
     measurement_timestamp = axis.state_timestamp_ms
+    at_measurement, _ = axis.project(measurement_timestamp)
 
     projected, velocity = axis.project(1100)
 
-    assert projected > 1.0
+    assert projected > at_measurement
     assert velocity > 0.0
     assert axis.state_timestamp_ms == measurement_timestamp
 
