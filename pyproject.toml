@@ -6,7 +6,18 @@ build-backend = "hatchling.build"
 name = "glassless3d"
 version = "0.1.0"
 description = "Windows head-tracked glasses-free 3D desktop overlay"
+readme = "README.md"
 requires-python = ">=3.11,<3.13"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
 dependencies = [
   "mediapipe==0.10.33",
   "numpy>=1.26.4,<3.0",
@@ -16,9 +27,14 @@ dependencies = [
   "wmi>=1.5; platform_system == 'Windows'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Corangar94/3d-Glassless"
+Issues = "https://github.com/Corangar94/3d-Glassless/issues"
+Source = "https://github.com/Corangar94/3d-Glassless"
+
 [project.optional-dependencies]
 dev = [
-  "pyinstaller>=6.11,<7",
+  "pyinstaller==6.22.2",
   "pyright>=1.1.400",
   "pytest==8.1.1",
   "pytest-qt>=4.4",
@@ -28,9 +44,11 @@ dev = [
 glassless3d = "launcher.app:main"
 glassless3d-tracker = "tracker.main:main"
 glassless3d-diagnostics = "launcher.diagnostics:main"
+glassless3d-software-acceptance = "scripts.software_acceptance:main"
+glassless3d-replay-quality = "scripts.replay_quality:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["launcher", "tracker"]
+packages = ["launcher", "tracker", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
