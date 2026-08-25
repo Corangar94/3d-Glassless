@@ -29,6 +29,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 jobs:
   package-windows-x64:
@@ -136,6 +138,7 @@ jobs:
             --summary-json release/package-summary.json
 
       - name: Verify candidate archive and checksums
+        id: package_paths
         shell: pwsh
         run: |
           $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
@@ -146,10 +149,28 @@ jobs:
           if ($actual -ne $summary.archive_sha256) {
             throw "release archive digest mismatch"
           }
+          $sbom = Get-ChildItem -Path release -Filter '*-windows-x64.sbom.cdx.json' |
+            Select-Object -First 1
+          if ($null -eq $sbom) {
+            throw "package-specific CycloneDX SBOM is missing"
+          }
+          "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
+          "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
           Write-Host "Package: $($summary.package_name)"
           Write-Host "SHA256: $actual"
           Write-Host "License present: $($summary.license_present)"
           Write-Host "Third-party notices present: $($summary.third_party_notices_present)"
+
+      - name: Attest standalone package build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.package_paths.outputs.archive }}
+
+      - name: Attest standalone package SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.package_paths.outputs.archive }}
+          sbom-path: ${{ steps.package_paths.outputs.sbom }}
 
       - name: Upload standalone release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
