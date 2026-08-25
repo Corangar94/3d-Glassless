@@ -48,14 +48,14 @@ replace_once(
     "start clears paused state",
 )
 replace_once(
-    '''        self._runtime_requested = False
+    '''    def _stop_tracking(self) -> None:
+        self._runtime_requested = False
         self._recovery_generation += 1
-        self._tracker_failure_reason = None
 ''',
-    '''        self._runtime_requested = False
+    '''    def _stop_tracking(self) -> None:
+        self._runtime_requested = False
         self._recovery_paused = False
         self._recovery_generation += 1
-        self._tracker_failure_reason = None
 ''',
     "manual stop clears paused state",
 )
@@ -71,23 +71,37 @@ replace_once(
     "retirement preserves retry action",
 )
 replace_once(
-    '''        self._runtime_requested = False
+    '''    def _pause_recovery(
+        self,
+        component: str,
+        reason: str,
+        retry_after_s: float,
+    ) -> None:
+        self._runtime_requested = False
         self._recovery_generation += 1
-        self._tracker_recovery_pending = False
 ''',
-    '''        self._runtime_requested = False
+    '''    def _pause_recovery(
+        self,
+        component: str,
+        reason: str,
+        retry_after_s: float,
+    ) -> None:
+        self._runtime_requested = False
         self._recovery_paused = True
         self._recovery_generation += 1
-        self._tracker_recovery_pending = False
 ''',
     "circuit marks recovery paused",
 )
 replace_once(
-    '''        self._overlay.stop_async()
+    '''        self._tracker_recovery_pending = False
+        self._overlay_recovery_pending = False
+        self._overlay.stop_async()
         self._overlay_started = False
         if self._hidden_for_overlay:
 ''',
-    '''        self._overlay.stop_async()
+    '''        self._tracker_recovery_pending = False
+        self._overlay_recovery_pending = False
+        self._overlay.stop_async()
         self._overlay_started = False
         if self._thread is not None:
             self._tracker_stop_pending = True
@@ -97,11 +111,13 @@ replace_once(
     "circuit retires tracker too",
 )
 replace_once(
-    '''        self._recovery.reset()
+    '''    def _manual_recover_runtime(self) -> None:
+        self._recovery.reset()
         self._recovery_generation += 1
         self._runtime_requested = True
 ''',
-    '''        self._recovery.reset()
+    '''    def _manual_recover_runtime(self) -> None:
+        self._recovery.reset()
         self._recovery_generation += 1
         self._runtime_requested = True
         self._recovery_paused = False
