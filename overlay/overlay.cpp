@@ -41,6 +41,7 @@
 
 #include "capture_recovery.h"
 #include "depth_infer.h"
+#include "parallax_health.h"
 
 namespace g3d::wgc {
 
@@ -676,6 +677,9 @@ static double                    g_lastCaptureCpuMs = 0.0;
 static double                    g_lastPresentCpuMs = 0.0;
 static double                    g_lastFrameCpuMs = 0.0;
 static int                       g_gpuTimingSamples = 0;
+static float                     g_parallaxHealthScale = 0.0f;
+static float                     g_parallaxHealthTarget = 0.0f;
+static uint64_t                  g_parallaxHealthLastMs = 0;
 
 class ScopedCpuTimer {
 public:
@@ -3045,6 +3049,7 @@ static void Frame() {
     float poseVelocityX = 0.f, poseVelocityY = 0.f, poseVelocityZ = 0.f;
     float poseConfidence = 0.f;
     float poseYaw = 0.f, posePitch = 0.f, poseRoll = 0.f;
+    uint32_t poseAgeMs = kPoseStaleMs + 1;
     uint32_t ts = 0;
     DWORD nowMs = GetTickCount();
     bool poseFresh = false;
@@ -3053,6 +3058,7 @@ static void Frame() {
     PoseV2 poseV2 = {};
     if (g_poseV2View && ReadStablePoseV2(&poseV2)) {
         const DWORD publishAgeMs = nowMs - poseV2.publishTs;
+        poseAgeMs = publishAgeMs;
         usingPoseV2 = true;
         hx = poseV2.x; hy = poseV2.y; hz = poseV2.z;
         poseVelocityX = poseV2.vx;
@@ -3087,7 +3093,8 @@ static void Frame() {
             lastPoseChangeMs = nowMs;
             seenPose = true;
         }
-        poseFresh = seenPose && (nowMs - lastPoseChangeMs <= kPoseStaleMs);
+        poseAgeMs = seenPose ? (nowMs - lastPoseChangeMs) : kPoseStaleMs + 1;
+        poseFresh = seenPose && (poseAgeMs <= kPoseStaleMs);
     }
 
     uint32_t trackerStateTs = 0;
@@ -3172,6 +3179,32 @@ static void Frame() {
     }
     UpdateOverlayVisibility();
 
+    // Convert upstream tracking/depth health into a continuous comfort
+    // envelope. Pose confidence/age degrades parallax before the hard stale
+    // cutoff, while recovery ramps back more slowly to avoid a visible pop.
+    const uint32_t depthAgeMs = g_depth ? g_depth->depth_age_ms() : 0u;
+    const bool depthReady = g_depth && g_depth->inferences_completed() > 0;
+    const g3d::parallax::HealthInputs healthInputs = {
+        poseFresh,
+        depthReady,
+        usingPoseV2,
+        usingPoseV2 ? poseConfidence : 1.0f,
+        poseAgeMs,
+        depthAgeMs,
+    };
+    g_parallaxHealthTarget = g3d::parallax::TargetScale(healthInputs);
+    const uint64_t healthNowMs = GetTickCount64();
+    const float healthDt = g_parallaxHealthLastMs == 0
+        ? 1.0f / 120.0f
+        : static_cast<float>(std::min<uint64_t>(250, healthNowMs - g_parallaxHealthLastMs)) / 1000.0f;
+    g_parallaxHealthLastMs = healthNowMs;
+    g_parallaxHealthScale = g3d::parallax::SlewScale(
+        g_parallaxHealthScale,
+        g_parallaxHealthTarget,
+        healthDt);
+    const bool healthAnimating = std::fabs(
+        g_parallaxHealthScale - g_parallaxHealthTarget) > 0.0025f;
+
     // Periodic summary based on wall time. Capture recovery can intentionally
     // throttle the loop, so frame counts are not a reliable one-second clock.
     static int lastChanges = 0;
@@ -3214,6 +3247,15 @@ static void Frame() {
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
+        Log("ParallaxHealth scale=%.3f target=%.3f pose_fresh=%d pose_source=%s pose_confidence=%.3f pose_age_ms=%u depth_ready=%d depth_age_ms=%u",
+            g_parallaxHealthScale,
+            g_parallaxHealthTarget,
+            poseFresh ? 1 : 0,
+            usingPoseV2 ? "v2" : "legacy",
+            usingPoseV2 ? poseConfidence : 1.0f,
+            poseAgeMs,
+            depthReady ? 1 : 0,
+            depthAgeMs);
         if (g_depth) {
             Log("DepthIO path=%s fallbacks=%llu",
                 g_depth->gpu_io_active() ? "persistent_dml_binding" : "cpu_marshalling_fallback",
@@ -3253,7 +3295,8 @@ static void Frame() {
         || poseFresh != lastRenderedPoseFresh
         || g_presentRetryPending
         || g_wantScreenshot;
-    const bool animationDue = (motionActive || blendActive) && (nowMs - lastRenderMs >= 8);
+    const bool animationDue = (motionActive || blendActive || healthAnimating)
+        && (nowMs - lastRenderMs >= 8);
     if (g_captureBackend == CaptureBackend::WindowsGraphicsCapture
         && !newActivity && !animationDue) {
         return;
@@ -3278,7 +3321,9 @@ static void Frame() {
     float depthBlend = g_depth ? g_depth->depth_blend() : 1.0f;
     CBuf cb = {
         dx, dy, hz,
-        g_strengthX, g_strengthY, g_screenW, g_screenH, g_virtualDepth,
+        g_strengthX * g_parallaxHealthScale,
+        g_strengthY * g_parallaxHealthScale,
+        g_screenW, g_screenH, g_virtualDepth,
         (float)g_debugDepthMode,
         g_depthGamma, g_focusRadius, (float)g_depthCurve,
         cropX0, cropW, depthBlend, (float)g_displayBackend,

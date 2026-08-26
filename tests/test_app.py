@@ -1,7 +1,6 @@
 # tests/test_app.py
 import os
-import pytest
-from PySide6.QtWidgets import QApplication
+from pathlib import Path
 
 from launcher.app import (
     CONFIG_PATH,
@@ -11,12 +10,6 @@ from launcher.app import (
     _parse_args,
     _request_app_shutdown,
 )
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    return app
 
 
 def test_is_first_run_true_when_config_absent(tmp_path):
@@ -33,9 +26,18 @@ def test_is_first_run_false_when_config_exists(tmp_path):
 
 def test_load_config_returns_dict(tmp_path):
     import yaml
-    cfg = {"camera": {"index": 0}, "screen": {"width_cm": 60.0, "height_cm": 34.0},
-           "tracking": {"ipd_cm": 6.3, "smoothing_q": 0.01, "smoothing_r": 0.1, "hold_ms": 500},
-           "gui": {"compact_mode": False}}
+
+    cfg = {
+        "camera": {"index": 0},
+        "screen": {"width_cm": 60.0, "height_cm": 34.0},
+        "tracking": {
+            "ipd_cm": 6.3,
+            "smoothing_q": 2.0,
+            "smoothing_r": 0.1,
+            "hold_ms": 500,
+        },
+        "gui": {"compact_mode": False},
+    }
     path = str(tmp_path / "config.yaml")
     with open(path, "w") as f:
         yaml.dump(cfg, f)
@@ -91,3 +93,14 @@ def test_sigint_handler_requests_app_shutdown():
     handler(None, None)
 
     assert calls == ["close", "quit"]
+
+
+def test_entrypoint_keeps_qt_imports_inside_runtime_functions():
+    source = Path("launcher/app.py").read_text(encoding="utf-8")
+    module_prefix = source[: source.index("CONFIG_PATH =")]
+
+    assert "from PySide6" not in module_prefix
+    assert "def _install_console_interrupt_handler" in source
+    assert "    from PySide6.QtCore import QTimer" in source
+    assert "def main(" in source
+    assert "    from PySide6.QtWidgets import QApplication, QWizard" in source
