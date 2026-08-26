@@ -219,6 +219,7 @@ def _tilt_filtered_pose(pose: FilteredPose, tilt_deg: float) -> FilteredPose:
         confidence=pose.confidence,
         capture_timestamp_ms=pose.capture_timestamp_ms,
         publish_timestamp_ms=pose.publish_timestamp_ms,
+        prediction_target_timestamp_ms=pose.prediction_target_timestamp_ms,
         predicted=pose.predicted,
     )
 

@@ -40,6 +40,7 @@ class PoseFlags(IntFlag):
     VALID = 1 << 0
     PREDICTED = 1 << 1
     ORIENTATION_VALID = 1 << 2
+    PREDICTION_LEAD_VALID = 1 << 3
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,13 @@ class PoseStateWriter:
         )
         if not all(math.isfinite(float(value)) for value in values):
             raise ValueError("pose packet contains non-finite values")
-        flags = PoseFlags.VALID if valid else PoseFlags(0)
+        # The old reserved uint32 now carries producer prediction lead.
+        # Mark that semantic explicitly so a newer overlay can remain safe when
+        # paired with an older V2 writer that still leaves the word at zero.
+        flags = (
+            (PoseFlags.VALID if valid else PoseFlags(0))
+            | PoseFlags.PREDICTION_LEAD_VALID
+        )
         if pose.predicted:
             flags |= PoseFlags.PREDICTED
         if any(

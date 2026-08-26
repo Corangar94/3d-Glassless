@@ -304,6 +304,7 @@ class AdaptivePoseFilter:
                 y_cm=0.0,
                 z_cm=60.0,
                 publish_timestamp_ms=publish_ms & _UINT32,
+                prediction_target_timestamp_ms=publish_ms & _UINT32,
             )
         target_ms = self._prediction_timestamp(
             self._last_capture_timestamp_ms,
@@ -338,6 +339,7 @@ class AdaptivePoseFilter:
             confidence=min(1.0, max(0.0, confidence)),
             capture_timestamp_ms=self._last_capture_timestamp_ms,
             publish_timestamp_ms=publish_ms & _UINT32,
+            prediction_target_timestamp_ms=target_ms,
             predicted=target_ms != self._last_capture_timestamp_ms,
         )
 
