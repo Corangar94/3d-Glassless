@@ -10,6 +10,12 @@ if(BUILD_TESTING)
     )
     target_compile_features(capture_recovery_tests PRIVATE cxx_std_17)
     add_test(NAME capture_recovery_tests COMMAND capture_recovery_tests)
+
+    add_executable(parallax_health_tests
+        parallax_health_tests.cpp
+    )
+    target_compile_features(parallax_health_tests PRIVATE cxx_std_17)
+    add_test(NAME parallax_health_tests COMMAND parallax_health_tests)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
