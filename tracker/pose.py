@@ -1,14 +1,39 @@
 """Shared tracker pose types used by every backend and transport."""
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 import math
+import os
 import time
 
 
+_UINT32_MASK = 0xFFFF_FFFF
+
+if os.name == "nt":
+    _kernel32 = ctypes.windll.kernel32
+    _kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+
+    def _wire_uptime_ms64() -> int:
+        """Return the Windows system-uptime clock used by the native overlay."""
+        return int(_kernel32.GetTickCount64())
+else:
+    def _wire_uptime_ms64() -> int:
+        """Portable fallback for non-Windows tooling and source analysis."""
+        return int(time.monotonic_ns() // 1_000_000)
+
+
 def monotonic_ms() -> int:
-    """Return a wrapping uint32-compatible monotonic millisecond timestamp."""
-    return int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
+    """Return the shared wire-clock timestamp as a wrapping uint32 value.
+
+    The native overlay computes shared-memory age with ``GetTickCount()``. A
+    generic monotonic clock is not guaranteed to share that epoch across APIs,
+    even when both clocks advance monotonically. On Windows, publish the low 32
+    bits of ``GetTickCount64()`` so Python writers and the native reader use the
+    same uptime epoch and the existing wrap-safe uint32 subtraction remains
+    valid for sessions spanning the 49.7-day GetTickCount rollover.
+    """
+    return _wire_uptime_ms64() & _UINT32_MASK
 
 
 def finite_or(value: object, fallback: float) -> float:

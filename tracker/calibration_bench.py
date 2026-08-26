@@ -20,6 +20,7 @@ from tracker.evaluation import (
     classify_tracking_quality,
     compute_tracking_metrics,
 )
+from tracker.pose import monotonic_ms as shared_uptime_ms
 from tracker.shared_memory import SharedMemoryReader
 
 
@@ -33,7 +34,9 @@ def capture_tracking_samples(
     """Sample G3D shared memory for duration_s and return pose samples."""
     own_reader = reader is None
     pose_reader = reader or SharedMemoryReader("G3D")
-    now_ms_fn = monotonic_ms or (lambda: int(time.monotonic() * 1000))
+    # Shared-memory freshness is cross-process, so its default clock must be
+    # the same Windows uptime domain used by the writer/native overlay.
+    now_ms_fn = monotonic_ms or shared_uptime_ms
     samples: list[PoseSample] = []
     sample_count = max(1, ceil(duration_s / max(interval_s, 0.001)))
     try:

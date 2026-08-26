@@ -1,0 +1,106 @@
+import ctypes
+import os
+
+import pytest
+
+from tracker import pose
+from tracker import shared_memory
+from tracker.shared_memory import (
+    SharedMemoryReader,
+    SharedMemoryWriter,
+    TrackingStateReader,
+    TrackingStateWriter,
+)
+
+
+UINT32_MASK = 0xFFFF_FFFF
+
+
+def _uint32_elapsed(newer: int, older: int) -> int:
+    return (int(newer) - int(older)) & UINT32_MASK
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows wire clock contract")
+def test_wire_clock_matches_native_gettickcount_epoch():
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetTickCount.restype = ctypes.c_ulong
+
+    before = int(kernel32.GetTickCount()) & UINT32_MASK
+    published = pose.monotonic_ms()
+    after = int(kernel32.GetTickCount()) & UINT32_MASK
+
+    bracket = _uint32_elapsed(after, before)
+    offset = _uint32_elapsed(published, before)
+    # The Python timestamp should land inside the same native uptime interval.
+    # This remains correct even if the thread is preempted or uint32 wraps.
+    assert bracket < 10_000
+    assert offset <= bracket
+
+
+def test_wire_clock_wraps_to_uint32(monkeypatch):
+    monkeypatch.setattr(pose, "_wire_uptime_ms64", lambda: 0x1_0000_0017)
+
+    assert pose.monotonic_ms() == 0x17
+
+
+def test_legacy_pose_writer_uses_shared_wire_clock(monkeypatch):
+    timestamp = 0xF1234567
+    monkeypatch.setattr(shared_memory, "monotonic_ms", lambda: timestamp)
+
+    with SharedMemoryWriter(name="G3D_WIRE_CLOCK_TEST") as writer:
+        reader = SharedMemoryReader(name="G3D_WIRE_CLOCK_TEST")
+        try:
+            writer.write(x=1.0, y=2.0, z=63.0)
+            snapshot = reader.read()
+        finally:
+            reader.close()
+
+    assert snapshot is not None
+    assert snapshot[3] == timestamp
+
+
+def test_tracking_state_writer_uses_shared_wire_clock(monkeypatch):
+    timestamp = 0xE7654321
+    monkeypatch.setattr(shared_memory, "monotonic_ms", lambda: timestamp)
+
+    with TrackingStateWriter(name="G3D_STATE_WIRE_CLOCK_TEST") as writer:
+        reader = TrackingStateReader(name="G3D_STATE_WIRE_CLOCK_TEST")
+        try:
+            writer.write("tracking")
+            snapshot = reader.read()
+        finally:
+            reader.close()
+
+    assert snapshot == ("tracking", timestamp)
+
+
+def test_legacy_writers_do_not_create_a_second_clock_domain():
+    source = open("tracker/shared_memory.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms" in source
+    assert "time.monotonic_ns" not in source
+    assert source.count("ts = monotonic_ms()") == 2
+
+
+def test_debug_monitor_uses_shared_wire_clock_for_freshness():
+    source = open("tracker/debug_monitor.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms" in source
+    assert "now_ms = monotonic_ms()" in source
+    assert "time.monotonic() * 1000" not in source
+
+
+def test_calibration_bench_uses_shared_wire_clock_for_freshness():
+    source = open("tracker/calibration_bench.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms as shared_uptime_ms" in source
+    assert "now_ms_fn = monotonic_ms or shared_uptime_ms" in source
+    assert "lambda: int(time.monotonic() * 1000)" not in source
+
+
+def test_native_overlay_computes_v2_and_state_age_from_gettickcount():
+    source = open("overlay/overlay.cpp", encoding="utf-8").read()
+
+    assert "DWORD nowMs = GetTickCount();" in source
+    assert "nowMs - poseV2.publishTs" in source
+    assert "nowMs - trackerStateTs" in source
