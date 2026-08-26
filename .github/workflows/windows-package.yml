@@ -55,8 +55,13 @@ jobs:
           python -m pip install --disable-pip-version-check pip-audit==2.10.1
 
       - name: Verify packaging contracts
+        # This subset intentionally contains no pytest-qt fixtures. Disable the
+        # plugin here so its global event-loop hook cannot initialize/process a
+        # QApplication inside the packaging preflight process. The complete
+        # Windows test job still exercises all GUI tests with pytest-qt enabled.
         run: >-
           python -m pytest
+          -p no:pytest-qt
           tests/test_release_packaging.py
           tests/test_app.py
           tests/test_tracker_process.py
@@ -138,48 +143,42 @@ jobs:
             --summary-json release/package-summary.json
 
       - name: Verify candidate archive and checksums
-        id: package_paths
         shell: pwsh
         run: |
-          $summary = Get-Content release/package-summary.json -Raw | ConvertFrom-Json
+          $summary = Get-Content -Raw release/package-summary.json | ConvertFrom-Json
           if (-not (Test-Path -LiteralPath $summary.archive)) {
-            throw "release archive is missing: $($summary.archive)"
+            throw "release archive missing: $($summary.archive)"
           }
-          $actual = (Get-FileHash -LiteralPath $summary.archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $summary.archive).Hash.ToLowerInvariant()
           if ($actual -ne $summary.archive_sha256) {
-            throw "release archive digest mismatch"
+            throw "release archive digest mismatch: expected=$($summary.archive_sha256) actual=$actual"
           }
-          $sbom = Get-ChildItem -Path release -Filter '*-windows-x64.sbom.cdx.json' |
-            Select-Object -First 1
-          if ($null -eq $sbom) {
-            throw "package-specific CycloneDX SBOM is missing"
+          if (-not $summary.software_acceptance_passed) {
+            throw "release summary reports failed software acceptance"
           }
-          "archive=$($summary.archive)" >> $env:GITHUB_OUTPUT
-          "sbom=$($sbom.FullName)" >> $env:GITHUB_OUTPUT
-          Write-Host "Package: $($summary.package_name)"
-          Write-Host "SHA256: $actual"
+          Write-Host "Package SHA-256: $actual"
           Write-Host "License present: $($summary.license_present)"
           Write-Host "Third-party notices present: $($summary.third_party_notices_present)"
 
       - name: Attest standalone package build provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        id: package-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
         with:
-          subject-path: ${{ steps.package_paths.outputs.archive }}
+          subject-path: release/Glassless3D-*-windows-x64.zip
 
       - name: Attest standalone package SBOM
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
         with:
-          subject-path: ${{ steps.package_paths.outputs.archive }}
-          sbom-path: ${{ steps.package_paths.outputs.sbom }}
+          subject-path: release/Glassless3D-*-windows-x64.zip
+          sbom-path: release/python-environment.sbom.cdx.json
 
       - name: Upload standalone release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: glassless3d-windows-x64-package
           path: |
-            release/*.zip
-            release/*.sha256
-            release/*.manifest.json
-            release/*.sbom.cdx.json
+            release/Glassless3D-*-windows-x64.zip
+            release/Glassless3D-*-windows-x64.zip.sha256
             release/package-summary.json
+            release/python-environment.sbom.cdx.json
           if-no-files-found: error
