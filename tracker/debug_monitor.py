@@ -44,7 +44,6 @@ def _is_stale(timestamp_ms: int, now_ms: int, threshold_ms: int = 500) -> bool:
     return age > threshold_ms
 
 
-import time
 from collections import deque
 
 from PySide6.QtCore import QTimer
@@ -54,6 +53,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
+from tracker.pose import monotonic_ms
 from tracker.shared_memory import SharedMemoryReader
 from tracker.shared_settings import OverlaySettings, SharedSettingsReader
 from tracker.evaluation import PoseSample, classify_tracking_quality, compute_tracking_metrics
@@ -170,7 +170,9 @@ class MonitorWidget(QWidget):
         root.addWidget(set_box)
 
     def _poll(self) -> None:
-        now_ms = int(time.monotonic() * 1000)
+        # Shared-memory freshness must use the same Windows uptime epoch as the
+        # tracker/native overlay, not a generic process-local monotonic clock.
+        now_ms = monotonic_ms()
         pose = self._pose_reader.read()
         settings = self._settings_reader.read() or _DEFAULT_SETTINGS
 
