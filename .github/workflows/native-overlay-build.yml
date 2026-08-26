@@ -37,6 +37,20 @@ jobs:
       - name: Build the complete Windows overlay runtime
         run: python scripts/bootstrap.py
 
+      - name: Run native C++ regression tests
+        shell: pwsh
+        run: |
+          $compiler = Get-ChildItem -LiteralPath vendor/_mingw64 -Recurse -Filter g++.exe -File |
+            Select-Object -First 1
+          if (-not $compiler) {
+            throw 'verified MinGW g++.exe was not found after bootstrap'
+          }
+          $env:PATH = "$($compiler.DirectoryName);$env:PATH"
+          ctest --test-dir overlay/build_mingw --output-on-failure -C Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "native CTest suite failed with exit code $LASTEXITCODE"
+          }
+
       - name: Verify native output
         shell: pwsh
         run: |
