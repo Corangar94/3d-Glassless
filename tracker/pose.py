@@ -82,7 +82,15 @@ class HeadPosition:
 
 @dataclass(frozen=True)
 class FilteredPose:
-    """Filtered and display-time-predicted pose published to the overlay."""
+    """Filtered pose projected to a known producer target timestamp.
+
+    ``publish_timestamp_ms`` is when the Python tracker publishes the packet.
+    ``prediction_target_timestamp_ms`` is the wire-clock instant represented by
+    the x/y/z values. They are normally equal, but an optional producer horizon
+    may place the pose slightly into the future. The native renderer uses this
+    distinction to compensate only the remaining publish-to-render latency,
+    preventing accidental double prediction.
+    """
 
     x_cm: float
     y_cm: float
@@ -96,6 +104,7 @@ class FilteredPose:
     confidence: float = 0.0
     capture_timestamp_ms: int = 0
     publish_timestamp_ms: int = 0
+    prediction_target_timestamp_ms: int = 0
     predicted: bool = False
 
     @property
