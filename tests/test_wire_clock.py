@@ -16,10 +16,8 @@ from tracker.shared_memory import (
 UINT32_MASK = 0xFFFF_FFFF
 
 
-def _uint32_distance(a: int, b: int) -> int:
-    forward = (int(a) - int(b)) & UINT32_MASK
-    backward = (int(b) - int(a)) & UINT32_MASK
-    return min(forward, backward)
+def _uint32_elapsed(newer: int, older: int) -> int:
+    return (int(newer) - int(older)) & UINT32_MASK
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows wire clock contract")
@@ -31,10 +29,12 @@ def test_wire_clock_matches_native_gettickcount_epoch():
     published = pose.monotonic_ms()
     after = int(kernel32.GetTickCount()) & UINT32_MASK
 
-    assert min(
-        _uint32_distance(published, before),
-        _uint32_distance(published, after),
-    ) <= 10
+    bracket = _uint32_elapsed(after, before)
+    offset = _uint32_elapsed(published, before)
+    # The Python timestamp should land inside the same native uptime interval.
+    # This remains correct even if the thread is preempted or uint32 wraps.
+    assert bracket < 10_000
+    assert offset <= bracket
 
 
 def test_wire_clock_wraps_to_uint32(monkeypatch):
