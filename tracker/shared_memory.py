@@ -2,11 +2,12 @@
 import ctypes
 from enum import IntEnum
 import struct
-import time
+
+from tracker.pose import monotonic_ms
 
 STRUCT_FORMAT = "<fffI"   # little-endian: float x, float y, float z, uint32 timestamp
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 16
-STATE_STRUCT_FORMAT = "<II"  # state code, monotonic timestamp_ms
+STATE_STRUCT_FORMAT = "<II"  # state code, shared uptime timestamp_ms
 STATE_STRUCT_SIZE = struct.calcsize(STATE_STRUCT_FORMAT)
 SEQ_STRUCT_SIZE = 4
 
@@ -76,11 +77,11 @@ class SharedMemoryWriter:
         self.write(x=0.0, y=0.0, z=60.0)
 
     def write(self, x: float, y: float, z: float) -> None:
-        """Write head position to shared memory with a millisecond timestamp."""
+        """Write head position using the native overlay's shared uptime clock."""
         view = self._view
         if view is None:
             raise RuntimeError("write() called after close()")
-        ts = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
+        ts = monotonic_ms()
         data = struct.pack(STRUCT_FORMAT, x, y, z, ts)
         seq_word = ctypes.c_uint32.from_address(self._seq_view) if self._seq_view else None
         if seq_word is not None:
@@ -237,7 +238,7 @@ class TrackingStateWriter:
                 raise ValueError(f"unknown tracking state: {state!r}") from exc
         else:
             code = TrackingState(state)
-        ts = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
+        ts = monotonic_ms()
         ctypes.memmove(
             self._view,
             struct.pack(STATE_STRUCT_FORMAT, int(code), ts),
