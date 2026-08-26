@@ -74,6 +74,22 @@ def test_tracking_state_writer_uses_shared_wire_clock(monkeypatch):
     assert snapshot == ("tracking", timestamp)
 
 
+def test_legacy_writers_do_not_create_a_second_clock_domain():
+    source = open("tracker/shared_memory.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms" in source
+    assert "time.monotonic_ns" not in source
+    assert source.count("ts = monotonic_ms()") == 2
+
+
+def test_debug_monitor_uses_shared_wire_clock_for_freshness():
+    source = open("tracker/debug_monitor.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms" in source
+    assert "now_ms = monotonic_ms()" in source
+    assert "time.monotonic() * 1000" not in source
+
+
 def test_native_overlay_computes_v2_and_state_age_from_gettickcount():
     source = open("overlay/overlay.cpp", encoding="utf-8").read()
 
