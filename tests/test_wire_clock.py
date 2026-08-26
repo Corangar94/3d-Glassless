@@ -90,6 +90,14 @@ def test_debug_monitor_uses_shared_wire_clock_for_freshness():
     assert "time.monotonic() * 1000" not in source
 
 
+def test_calibration_bench_uses_shared_wire_clock_for_freshness():
+    source = open("tracker/calibration_bench.py", encoding="utf-8").read()
+
+    assert "from tracker.pose import monotonic_ms as shared_uptime_ms" in source
+    assert "now_ms_fn = monotonic_ms or shared_uptime_ms" in source
+    assert "lambda: int(time.monotonic() * 1000)" not in source
+
+
 def test_native_overlay_computes_v2_and_state_age_from_gettickcount():
     source = open("overlay/overlay.cpp", encoding="utf-8").read()
 
