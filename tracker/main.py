@@ -13,7 +13,7 @@ from tracker.camera_geometry import CameraGeometry
 from tracker.camera_quality import CameraQualityMonitor, try_lock_camera_controls
 from tracker.face_tracker_cv2 import HeadPosition
 from tracker.freetrack import FreetracWriter
-from tracker.pose import FilteredPose, monotonic_ms
+from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
 from tracker.pose_shared_memory import PoseStateWriter
 from tracker.shared_memory import SharedMemoryWriter, TrackingStateWriter
@@ -307,7 +307,7 @@ class TrackingLoop:
                     camera_quality = self._camera_quality_monitor.update(
                         frame, capture_timestamp_ms
                     )
-                    if capture_timestamp_ms - last_quality_log_ms >= 2000:
+                    if elapsed_u32_ms(capture_timestamp_ms, last_quality_log_ms) >= 2000:
                         problems = ", ".join(camera_quality.problems) or "none"
                         fps_text = (
                             f"{camera_quality.fps:.1f}"
