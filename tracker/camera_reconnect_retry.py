@@ -6,6 +6,14 @@ import math
 import time
 from typing import Callable
 
+from tracker.safe_video_capture import install_safe_video_capture
+
+
+# ``tracker.main`` imports this module before it constructs any capture handle.
+# Install the adapter here so constructor, state-query, property, read, and
+# cleanup failures all become ordinary values consumed by the recovery policy.
+install_safe_video_capture()
+
 
 Clock = Callable[[], float]
 
