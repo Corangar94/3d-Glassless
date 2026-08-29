@@ -14,6 +14,7 @@ from mediapipe import tasks
 
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
 from tracker.pose import HeadPosition, monotonic_ms
+from tracker.timestamp_expansion import expand_u32_timestamp
 
 _LEFT_IRIS_CENTER = 468
 _RIGHT_IRIS_CENTER = 473
@@ -132,7 +133,8 @@ class FaceTracker:
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms = 0
-        self._last_submitted_timestamp_ms = 0
+        self._last_submitted_wire_timestamp_ms: int | None = None
+        self._last_submitted_media_timestamp_ms: int | None = None
         self._closed = False
 
         options = tasks.vision.FaceLandmarkerOptions(
@@ -276,22 +278,29 @@ class FaceTracker:
         capture_timestamp_ms: int | None = None,
     ) -> HeadPosition | None:
         h, w = frame_bgr.shape[:2]
-        timestamp_ms = monotonic_ms() if capture_timestamp_ms is None else int(capture_timestamp_ms)
-        timestamp_ms &= 0xFFFF_FFFF
-        if timestamp_ms <= self._last_submitted_timestamp_ms:
-            timestamp_ms = (self._last_submitted_timestamp_ms + 1) & 0xFFFF_FFFF
-        self._last_submitted_timestamp_ms = timestamp_ms
+        wire_timestamp_ms = (
+            monotonic_ms() if capture_timestamp_ms is None else int(capture_timestamp_ms)
+        ) & 0xFFFF_FFFF
 
         rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         if self._async_mode:
+            media_timestamp_ms = expand_u32_timestamp(
+                wire_timestamp_ms,
+                self._last_submitted_wire_timestamp_ms,
+                self._last_submitted_media_timestamp_ms,
+            )
+            if media_timestamp_ms is None:
+                return self._poll_latest()
+            self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
+            self._last_submitted_media_timestamp_ms = media_timestamp_ms
             try:
-                self._landmarker.detect_async(image, timestamp_ms)
+                self._landmarker.detect_async(image, media_timestamp_ms)
             except (RuntimeError, ValueError):
                 pass
             return self._poll_latest()
         result = self._landmarker.detect(image)
-        return self._pose_from_result(result, w, h, timestamp_ms)
+        return self._pose_from_result(result, w, h, wire_timestamp_ms)
 
     def close(self) -> None:
         self._closed = True
