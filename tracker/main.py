@@ -34,6 +34,16 @@ _CAMERA_BACKENDS: tuple[tuple[int | None, str], ...] = (
     (cv2.CAP_MSMF, "CAP_MSMF"),
     (None, "default backend"),
 )
+# Direct TrackingLoop users retain a fast, deterministic failure contract.
+# The packaged tracker passes the longer application policy from config.yaml.
+_DIRECT_LOOP_RECONNECT_POLICY = CameraReconnectPolicy(
+    immediate_retries=1,
+    max_failures=2,
+    base_delay_s=0.0,
+    max_delay_s=0.0,
+    max_outage_s=5.0,
+    heartbeat_s=1.0,
+)
 
 
 class FaceTrackerLike(Protocol):
@@ -168,14 +178,7 @@ def _open_camera(
     backend_start_index: int = 0,
     metadata: dict[str, object] | None = None,
 ) -> cv2.VideoCapture:
-    """Open a camera, rotating Windows backends from the requested candidate.
-
-    Some drivers successfully create a DirectShow handle but never deliver a
-    frame. Reopening from candidate zero would select the same broken backend on
-    every attempt. The tracking loop therefore starts each capture-session retry
-    at the candidate after the one that stalled, while this helper still falls
-    through every backend if the preferred candidate cannot open at all.
-    """
+    """Open a camera, rotating Windows backends from the requested candidate."""
     if metadata is not None:
         metadata.clear()
     candidate_count = len(_CAMERA_BACKENDS)
@@ -201,7 +204,7 @@ def _open_camera(
                 )
             return cap
         cap.release()
-    if last_cap is None:  # defensive: candidate list is intentionally nonempty
+    if last_cap is None:
         raise RuntimeError("No camera backends are configured")
     return last_cap
 
@@ -394,7 +397,7 @@ class TrackingLoop:
             CameraControlLockRetry() if self._lock_camera_controls else None
         )
         self._camera_reconnect = CameraReconnectBudget(
-            camera_reconnect_policy or CameraReconnectPolicy()
+            camera_reconnect_policy or _DIRECT_LOOP_RECONNECT_POLICY
         )
 
     def _process_frame(
@@ -510,9 +513,9 @@ class TrackingLoop:
             self._publish_camera_unavailable()
         if not decision.allowed:
             raise RuntimeError(
-                f"Camera {camera_index} recovery exhausted after "
-                f"{decision.failure_count} failures over "
-                f"{decision.outage_elapsed_s:.1f}s: {decision.reason}"
+                f"Could not open camera {camera_index}: local recovery "
+                f"exhausted after {decision.failure_count} failures over "
+                f"{decision.outage_elapsed_s:.1f}s ({decision.reason})"
             )
         retry_text = (
             "immediately"
@@ -613,7 +616,14 @@ class TrackingLoop:
             applied_calibration: tuple[float | None, float | None] | None = None
             last_quality_log_ms = 0
             while not self._should_stop():
-                ok, frame = cap.read()
+                try:
+                    ok, frame = cap.read()
+                except (cv2.error, OSError, RuntimeError, ValueError) as error:
+                    print(
+                        "[G3D] Camera read raised "
+                        f"{type(error).__name__}; treating it as a stalled frame"
+                    )
+                    ok, frame = False, None
                 capture_timestamp_ms = monotonic_ms()
                 if not ok:
                     consecutive_read_failures += 1
@@ -756,8 +766,6 @@ class TrackingLoop:
                         output = self._neutral_pose()
                         status = "paused"
                     else:
-                        # Preserve the public state contract: a predicted/replayed
-                        # pose during an async result gap is still a hold sample.
                         output = self._predict_filter()
                         status = "hold"
 
