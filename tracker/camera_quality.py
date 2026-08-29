@@ -62,6 +62,18 @@ class CameraQualityMonitor:
         )
         self._last_timestamp_ms: int | None = None
 
+    def reset(self) -> None:
+        """Forget samples from a retired capture session.
+
+        A reopened webcam may have a different cadence, exposure state, focus,
+        or even a different physical device behind the same index. Carrying the
+        previous deque across that boundary can report false exposure hunting,
+        calculate a bogus FPS interval, and immediately lock controls from stale
+        evidence. Start the warm-up window again for every capture session.
+        """
+        self._samples.clear()
+        self._last_timestamp_ms = None
+
     def update(self, frame_bgr: np.ndarray, timestamp_ms: int) -> CameraQualityStatus:
         if frame_bgr.ndim != 3 or frame_bgr.shape[0] <= 0 or frame_bgr.shape[1] <= 0:
             raise ValueError("camera quality requires a non-empty BGR frame")
