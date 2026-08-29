@@ -80,9 +80,13 @@ def test_valid_grayscale_and_color_numpy_frames_pass():
 
     gray_cap = _safe((True, grayscale))
     color_cap = _safe((True, color))
+    gray_ok, gray_returned = gray_cap.read()
+    color_ok, color_returned = color_cap.read()
 
-    assert gray_cap.read() == (True, grayscale)
-    assert color_cap.read() == (True, color)
+    assert gray_ok
+    assert gray_returned is grayscale
+    assert color_ok
+    assert color_returned is color
     assert gray_cap.failures == ()
     assert color_cap.failures == ()
 
@@ -98,8 +102,10 @@ def test_failed_status_never_propagates_a_stale_frame_object():
 def test_opaque_frame_types_remain_compatible():
     opaque = _OpaqueFrame()
     cap = _safe((True, opaque))
+    ok, returned = cap.read()
 
-    assert cap.read() == (True, opaque)
+    assert ok
+    assert returned is opaque
     assert cap.failures == ()
 
 
