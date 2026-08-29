@@ -9,6 +9,7 @@ import time
 import cv2
 import yaml
 
+from tracker.calibration_runtime_sync import synchronize_runtime_projection
 from tracker.camera_calibration import (
     calibrate_intrinsics,
     capture_checkerboard_observations,
@@ -18,7 +19,11 @@ from tracker.camera_calibration import (
     parse_pattern_size,
     update_config_camera_geometry,
 )
-from tracker.camera_geometry import CameraExtrinsics, CameraGeometry
+from tracker.camera_geometry import (
+    CameraExtrinsics,
+    CameraGeometry,
+    euler_degrees_from_rotation_matrix,
+)
 from tracker.face_tracker import FaceTracker
 from tracker.pose import monotonic_ms
 
@@ -67,6 +72,7 @@ def _intrinsics_command(args: argparse.Namespace) -> int:
         mirror_x=not args.no_mirror_x,
     )
     update_config_camera_geometry(args.config, geometry, calibration_result=result)
+    synchronize_runtime_projection(args.config, geometry)
     print(
         "Camera intrinsics saved:",
         f"{result.intrinsics.width}x{result.intrinsics.height}",
@@ -111,6 +117,21 @@ def _center_command(args: argparse.Namespace) -> int:
         raise RuntimeError("run the intrinsics calibration before center alignment")
     ipd_cm = float(args.ipd_cm or tracking.get("ipd_cm", 6.4))
     fov = float(tracking.get("camera_fov_deg", 90.0))
+
+    saved_yaw, saved_pitch, saved_roll = euler_degrees_from_rotation_matrix(
+        geometry.extrinsics.rotation_matrix
+    )
+    mount_yaw = saved_yaw if args.mount_yaw_deg is None else float(args.mount_yaw_deg)
+    mount_pitch = (
+        saved_pitch if args.mount_pitch_deg is None else float(args.mount_pitch_deg)
+    )
+    mount_roll = saved_roll if args.mount_roll_deg is None else float(args.mount_roll_deg)
+    base_extrinsics = CameraExtrinsics.from_euler_and_translation(
+        yaw_deg=mount_yaw,
+        pitch_deg=mount_pitch,
+        roll_deg=mount_roll,
+    )
+
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_MSMF)
     if not cap.isOpened():
         cap.release()
@@ -131,21 +152,21 @@ def _center_command(args: argparse.Namespace) -> int:
         "Sit in the normal viewing position, look at the screen center, and remain still."
     )
     try:
+        # Collect camera-basis points with identity extrinsics. Applying the
+        # saved mount rotation here and again in center_align_geometry would
+        # rotate samples twice whenever the camera is not axis-aligned.
+        measurement_geometry = CameraGeometry(
+            intrinsics=geometry.intrinsics,
+            extrinsics=CameraExtrinsics(),
+            mirror_x=geometry.mirror_x,
+        )
         with FaceTracker(
             real_ipd_cm=ipd_cm,
             screen_width_cm=float(config.get("screen", {}).get("width_cm", 60.0)),
             screen_height_cm=float(config.get("screen", {}).get("height_cm", 34.0)),
             camera_fov_deg=fov,
             async_mode=False,
-            camera_geometry=CameraGeometry(
-                intrinsics=geometry.intrinsics,
-                extrinsics=CameraExtrinsics.from_euler_and_translation(
-                    yaw_deg=args.mount_yaw_deg,
-                    pitch_deg=args.mount_pitch_deg,
-                    roll_deg=args.mount_roll_deg,
-                ),
-                mirror_x=geometry.mirror_x,
-            ),
+            camera_geometry=measurement_geometry,
         ) as tracker:
             while len(samples) < args.samples and time.monotonic() - started < args.timeout:
                 ok, frame = cap.read()
@@ -166,11 +187,7 @@ def _center_command(args: argparse.Namespace) -> int:
         raise RuntimeError(f"only collected {len(samples)} reliable center-pose samples")
     base = CameraGeometry(
         intrinsics=geometry.intrinsics,
-        extrinsics=CameraExtrinsics.from_euler_and_translation(
-            yaw_deg=args.mount_yaw_deg,
-            pitch_deg=args.mount_pitch_deg,
-            roll_deg=args.mount_roll_deg,
-        ),
+        extrinsics=base_extrinsics,
         mirror_x=geometry.mirror_x,
     )
     aligned = center_align_geometry(
@@ -179,6 +196,11 @@ def _center_command(args: argparse.Namespace) -> int:
         viewer_distance_cm=args.viewer_distance_cm,
     )
     update_config_camera_geometry(args.config, aligned)
+    synchronize_runtime_projection(
+        args.config,
+        aligned,
+        viewer_distance_cm=args.viewer_distance_cm,
+    )
     print(
         "Camera-to-screen alignment saved:",
         aligned.extrinsics.translation_camera_origin_cm,
@@ -203,7 +225,11 @@ def build_parser() -> argparse.ArgumentParser:
         "intrinsics", help="calibrate lens and focal parameters"
     )
     intrinsics.add_argument("--config", type=Path, default=Path("config.yaml"))
-    intrinsics.add_argument("--images", nargs="*", help="image paths or globs; omit for live capture")
+    intrinsics.add_argument(
+        "--images",
+        nargs="*",
+        help="image paths or globs; omit for live capture",
+    )
     intrinsics.add_argument("--camera-index", type=int, default=0)
     intrinsics.add_argument("--width", type=int, default=1280)
     intrinsics.add_argument("--height", type=int, default=720)
@@ -235,9 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     center.add_argument("--minimum-confidence", type=float, default=0.6)
     center.add_argument("--viewer-distance-cm", type=float, required=True)
     center.add_argument("--ipd-cm", type=float)
-    center.add_argument("--mount-yaw-deg", type=float, default=0.0)
-    center.add_argument("--mount-pitch-deg", type=float, default=0.0)
-    center.add_argument("--mount-roll-deg", type=float, default=0.0)
+    # Omitted values preserve the rotation saved by the intrinsics step.
+    center.add_argument("--mount-yaw-deg", type=float)
+    center.add_argument("--mount-pitch-deg", type=float)
+    center.add_argument("--mount-roll-deg", type=float)
     center.set_defaults(func=_center_command)
     return parser
 

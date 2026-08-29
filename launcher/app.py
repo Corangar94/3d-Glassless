@@ -54,6 +54,11 @@ def _parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, list
         default=CONFIG_PATH,
         help="Path to the launcher config.yaml. Defaults to %%APPDATA%%/Glassless3D/config.yaml.",
     )
+    parser.add_argument(
+        "--calibrate-camera",
+        action="store_true",
+        help="Open the full webcam intrinsics and camera-to-screen calibration wizard.",
+    )
     return parser.parse_known_args(argv)
 
 
