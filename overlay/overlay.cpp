@@ -42,6 +42,7 @@
 #include "capture_recovery.h"
 #include "depth_infer.h"
 #include "parallax_health.h"
+#include "pose_prediction.h"
 
 namespace g3d::wgc {
 
@@ -213,6 +214,7 @@ static constexpr uint32_t POSE_V2_MAGIC = 0x32443347u;
 static constexpr uint32_t POSE_V2_VERSION = 2u;
 static constexpr uint32_t POSE_V2_VALID = 1u << 0;
 static constexpr uint32_t POSE_V2_PREDICTED = 1u << 1;
+static constexpr uint32_t POSE_V2_PREDICTION_LEAD_VALID = 1u << 3;
 #pragma pack(push, 1)
 struct HeadPose { float x, y, z; uint32_t ts; };
 struct PoseV2 {
@@ -221,7 +223,7 @@ struct PoseV2 {
     float vx, vy, vz;
     float yaw, pitch, roll;
     float confidence;
-    uint32_t captureTs, publishTs, flags, reserved;
+    uint32_t captureTs, publishTs, flags, predictionLeadMs;
 };
 static_assert(sizeof(PoseV2) == 64, "PoseV2 must match tracker.pose_shared_memory");
 struct TrackerState { uint32_t state; uint32_t ts; }; // 0=paused, 1=tracking, 2=hold
@@ -3050,6 +3052,8 @@ static void Frame() {
     float poseConfidence = 0.f;
     float poseYaw = 0.f, posePitch = 0.f, poseRoll = 0.f;
     uint32_t poseAgeMs = kPoseStaleMs + 1;
+    uint32_t nativeResidualPredictionMs = 0;
+    float nativePredictDx = 0.0f, nativePredictDy = 0.0f, nativePredictDz = 0.0f;
     uint32_t ts = 0;
     DWORD nowMs = GetTickCount();
     bool poseFresh = false;
@@ -3081,6 +3085,23 @@ static void Frame() {
             && hz > 0.0f
             && poseConfidence >= 0.05f
             && publishAgeMs <= kPoseStaleMs;
+
+        const bool predictionLeadKnown =
+            (poseV2.flags & POSE_V2_PREDICTION_LEAD_VALID) != 0;
+        const auto nativePrediction = g3d::pose_prediction::Extrapolate(
+            hx, hy, hz,
+            poseVelocityX, poseVelocityY, poseVelocityZ,
+            publishAgeMs,
+            predictionLeadKnown ? poseV2.predictionLeadMs : publishAgeMs,
+            poseConfidence,
+            poseFresh && predictionLeadKnown);
+        hx = nativePrediction.x;
+        hy = nativePrediction.y;
+        hz = nativePrediction.z;
+        nativeResidualPredictionMs = nativePrediction.residual_ms;
+        nativePredictDx = nativePrediction.delta_x_cm;
+        nativePredictDy = nativePrediction.delta_y_cm;
+        nativePredictDz = nativePrediction.delta_z_cm;
     } else if (g_shmView) {
         HeadPose p;
         if (!ReadStablePose(&p)) return;
@@ -3262,9 +3283,11 @@ static void Frame() {
                 static_cast<unsigned long long>(g_depth->gpu_io_fallbacks()));
         }
         if (usingPoseV2) {
-            Log("PoseV2 source=predicted confidence=%.3f velocity=(%.2f,%.2f,%.2f) orientation=(%.1f,%.1f,%.1f) capture_ts=%u publish_ts=%u flags=0x%X",
+            Log("PoseV2 source=predicted confidence=%.3f velocity=(%.2f,%.2f,%.2f) orientation=(%.1f,%.1f,%.1f) capture_ts=%u publish_ts=%u producer_lead_ms=%u native_residual_ms=%u native_delta=(%.3f,%.3f,%.3f) flags=0x%X",
                 poseConfidence, poseVelocityX, poseVelocityY, poseVelocityZ,
                 poseYaw, posePitch, poseRoll, poseV2.captureTs, poseV2.publishTs,
+                poseV2.predictionLeadMs, nativeResidualPredictionMs,
+                nativePredictDx, nativePredictDy, nativePredictDz,
                 poseV2.flags);
         }
     }

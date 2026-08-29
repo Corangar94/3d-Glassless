@@ -16,6 +16,12 @@ if(BUILD_TESTING)
     )
     target_compile_features(parallax_health_tests PRIVATE cxx_std_17)
     add_test(NAME parallax_health_tests COMMAND parallax_health_tests)
+
+    add_executable(pose_prediction_tests
+        pose_prediction_tests.cpp
+    )
+    target_compile_features(pose_prediction_tests PRIVATE cxx_std_17)
+    add_test(NAME pose_prediction_tests COMMAND pose_prediction_tests)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
