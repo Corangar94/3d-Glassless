@@ -3,6 +3,13 @@ camera:
   height: 720
   index: 0
   width: 1280
+  reconnect:
+    immediate_retries: 1
+    max_failures: 8
+    base_delay_s: 0.5
+    max_delay_s: 8.0
+    max_outage_s: 45.0
+    heartbeat_s: 1.0
 overlay:
   depth_curve: 2
   depth_gamma: 2.0
