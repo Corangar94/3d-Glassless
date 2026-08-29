@@ -133,6 +133,7 @@ class FaceTracker:
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms = 0
+        self._last_submitted_wire_timestamp_ms: int | None = None
         self._last_submitted_media_timestamp_ms: int | None = None
         self._closed = False
 
@@ -286,8 +287,12 @@ class FaceTracker:
         if self._async_mode:
             media_timestamp_ms = expand_u32_timestamp(
                 wire_timestamp_ms,
+                self._last_submitted_wire_timestamp_ms,
                 self._last_submitted_media_timestamp_ms,
             )
+            if media_timestamp_ms is None:
+                return self._poll_latest()
+            self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
             self._last_submitted_media_timestamp_ms = media_timestamp_ms
             try:
                 self._landmarker.detect_async(image, media_timestamp_ms)
