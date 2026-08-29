@@ -9,6 +9,7 @@ from typing import Any, Optional, Protocol
 import cv2
 import yaml
 
+from tracker.camera_control_retry import CameraControlLockRetry
 from tracker.camera_geometry import CameraGeometry
 from tracker.camera_quality import CameraQualityMonitor, try_lock_camera_controls
 from tracker.face_tracker_cv2 import HeadPosition
@@ -276,6 +277,9 @@ class TrackingLoop:
         self._stop_event, self._camera_tilt_deg, self._config_path = stop_event, camera_tilt_deg, config_path
         self._camera_quality_monitor = camera_quality_monitor
         self._lock_camera_controls = bool(lock_camera_controls)
+        self._camera_control_lock_retry = (
+            CameraControlLockRetry() if self._lock_camera_controls else None
+        )
 
     def _process_frame(self, frame: object, capture_timestamp_ms: int) -> HeadPosition | None:
         try:
@@ -331,6 +335,8 @@ class TrackingLoop:
             reset_smoother()
         if self._camera_quality_monitor is not None:
             self._camera_quality_monitor.reset()
+        if self._camera_control_lock_retry is not None:
+            self._camera_control_lock_retry.reset()
 
         self._last_face_ms = None
         self._last_smoothed = (0.0, 0.0, 60.0)
@@ -363,7 +369,6 @@ class TrackingLoop:
         settings_reader = SharedSettingsReader()
         applied_calibration: tuple[float | None, float | None] | None = None
         last_quality_log_ms = 0
-        controls_lock_attempted = False
         try:
             while not self._should_stop():
                 ok, frame = cap.read()
@@ -374,7 +379,6 @@ class TrackingLoop:
                         time.sleep(0.02)
                         continue
                     last_quality_log_ms = self._reset_capture_session()
-                    controls_lock_attempted = False
                     applied_calibration = None
                     cap.release()
                     reopen_attempts += 1
@@ -427,14 +431,31 @@ class TrackingLoop:
                             f"fps={fps_text} problems={problems}"
                         )
                         last_quality_log_ms = capture_timestamp_ms
-                    if (
-                        self._lock_camera_controls
-                        and not controls_lock_attempted
-                        and camera_quality.stable_for_lock
+                    retry = self._camera_control_lock_retry
+                    if retry is not None and retry.should_attempt(
+                        capture_timestamp_ms,
+                        stable_for_lock=camera_quality.stable_for_lock,
                     ):
-                        controls_lock_attempted = True
                         result = try_lock_camera_controls(cap)
-                        print(f"[G3D] Camera control lock result: {result}")
+                        complete = retry.record_result(
+                            capture_timestamp_ms,
+                            result,
+                        )
+                        if complete:
+                            print(
+                                "[G3D] Camera control lock complete: "
+                                f"{result}"
+                            )
+                        elif retry.exhausted:
+                            print(
+                                "[G3D] Camera control lock unavailable after "
+                                f"{retry.attempts} attempts; continuing: {result}"
+                            )
+                        else:
+                            print(
+                                "[G3D] Camera control lock incomplete; "
+                                f"retrying in {retry.retry_interval_ms} ms: {result}"
+                            )
                 settings = settings_reader.read()
                 applied_calibration = _apply_live_calibration(self._tracker, settings, applied_calibration)
                 self._smoother.set_measurement_noise(_measurement_noise(settings))
