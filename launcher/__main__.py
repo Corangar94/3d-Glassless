@@ -1,4 +1,4 @@
-"""Dispatch the GUI or the private tracker child in frozen builds."""
+"""Dispatch the GUI, private tracker, or camera-calibration child."""
 from __future__ import annotations
 
 import sys
@@ -11,6 +11,15 @@ def _select_main(argv: list[str]) -> Callable[[], None]:
         from tracker.main import main
 
         return main
+
+    if "--camera-calibration-child" in argv:
+        argv.remove("--camera-calibration-child")
+        from scripts.calibrate_camera import main as calibration_main
+
+        def _run_calibration() -> None:
+            raise SystemExit(calibration_main())
+
+        return _run_calibration
 
     from launcher.app import main
 
