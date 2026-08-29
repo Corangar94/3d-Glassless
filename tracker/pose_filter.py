@@ -4,7 +4,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from tracker.pose import FilteredPose, HeadPosition, monotonic_ms
+from tracker.pose import (
+    FilteredPose,
+    HeadPosition,
+    monotonic_ms,
+    normalize_wire_timestamp,
+)
 
 _UINT32 = 0xFFFF_FFFF
 
@@ -259,7 +264,9 @@ class AdaptivePoseFilter:
             self._max_prediction_ms,
             max(0.0, measurement_age_ms) + self._prediction_horizon_ms,
         )
-        return (int(capture_ms) + int(round(ahead_ms))) & _UINT32
+        return normalize_wire_timestamp(
+            int(capture_ms) + int(round(ahead_ms))
+        )
 
     def update_pose(
         self,
@@ -268,14 +275,14 @@ class AdaptivePoseFilter:
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
         capture_ms = (
-            int(pose.capture_timestamp_ms) & _UINT32
+            normalize_wire_timestamp(pose.capture_timestamp_ms)
             if pose.capture_timestamp_ms
             else monotonic_ms()
         )
         publish_ms = (
             monotonic_ms()
             if publish_timestamp_ms is None
-            else int(publish_timestamp_ms)
+            else normalize_wire_timestamp(publish_timestamp_ms)
         )
         confidence = min(1.0, max(0.05, float(pose.confidence)))
         self._x.update(pose.x_cm, capture_ms, confidence=confidence)
@@ -296,15 +303,15 @@ class AdaptivePoseFilter:
         publish_ms = (
             monotonic_ms()
             if publish_timestamp_ms is None
-            else int(publish_timestamp_ms)
+            else normalize_wire_timestamp(publish_timestamp_ms)
         )
         if not self._x.initialized:
             return FilteredPose(
                 x_cm=0.0,
                 y_cm=0.0,
                 z_cm=60.0,
-                publish_timestamp_ms=publish_ms & _UINT32,
-                prediction_target_timestamp_ms=publish_ms & _UINT32,
+                publish_timestamp_ms=publish_ms,
+                prediction_target_timestamp_ms=publish_ms,
             )
         target_ms = self._prediction_timestamp(
             self._last_capture_timestamp_ms,
@@ -338,7 +345,7 @@ class AdaptivePoseFilter:
             roll_deg=roll,
             confidence=min(1.0, max(0.0, confidence)),
             capture_timestamp_ms=self._last_capture_timestamp_ms,
-            publish_timestamp_ms=publish_ms & _UINT32,
+            publish_timestamp_ms=publish_ms,
             prediction_target_timestamp_ms=target_ms,
             predicted=target_ms != self._last_capture_timestamp_ms,
         )
@@ -353,11 +360,10 @@ class AdaptivePoseFilter:
         self._synthetic_timestamp_ms = (
             monotonic_ms()
             if dt_seconds is None
-            else (
+            else normalize_wire_timestamp(
                 self._synthetic_timestamp_ms
                 + max(1, int(dt_seconds * 1000.0))
             )
-            & _UINT32
         )
         return self.update_pose(
             HeadPosition(
