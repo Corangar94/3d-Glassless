@@ -35,9 +35,10 @@ def test_wire_clock_matches_native_gettickcount_epoch():
     bracket = _uint32_elapsed(after, before)
     offset = _uint32_elapsed(published, before)
     # Timestamp zero is reserved. At the exact rollover instant Python publishes
-    # UINT32_MAX, which is one millisecond old relative to native zero.
+    # UINT32_MAX, which is one millisecond old relative to native zero. Allow the
+    # bracket to advance another millisecond between the three clock reads.
     if before == 0 or after == 0:
-        assert _uint32_elapsed(after, published) <= 1
+        assert _uint32_elapsed(after, published) <= max(2, bracket + 1)
     else:
         assert bracket < 10_000
         assert offset <= bracket
