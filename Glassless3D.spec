@@ -35,15 +35,20 @@ runtime_binaries = [
 
 hidden_imports = [
     *mediapipe_hiddenimports,
-    # The frozen executable dispatches this private child mode at runtime.
+    # The frozen executable dispatches these private/optional modes at runtime.
     "tracker.main",
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",
     "tracker.camera_geometry",
+    "tracker.camera_calibration",
+    "tracker.calibration_runtime_sync",
     "tracker.camera_quality",
     "tracker.pose",
     "tracker.pose_filter",
     "tracker.pose_shared_memory",
+    "launcher.camera_calibration_process",
+    "launcher.camera_calibration_wizard",
+    "scripts.calibrate_camera",
     "wmi",
     "win32com",
     "win32com.client",
