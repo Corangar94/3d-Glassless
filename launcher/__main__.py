@@ -1,8 +1,17 @@
 """Dispatch the GUI, private tracker, or camera-calibration tools."""
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
+
+
+def _ensure_child_streams() -> None:
+    """Give windowed frozen children harmless streams when no console exists."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
 def _select_main(argv: list[str]) -> Callable[[], None]:
@@ -14,6 +23,7 @@ def _select_main(argv: list[str]) -> Callable[[], None]:
 
     if "--camera-calibration-child" in argv:
         argv.remove("--camera-calibration-child")
+        _ensure_child_streams()
         from scripts.calibrate_camera import main as calibration_main
 
         def _run_calibration_child() -> None:
