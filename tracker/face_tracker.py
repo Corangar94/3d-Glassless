@@ -12,7 +12,7 @@ import mediapipe as mp
 import numpy as np
 from mediapipe import tasks
 
-from tracker.camera_geometry import CameraGeometry
+from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
 from tracker.pose import HeadPosition, monotonic_ms
 
 _LEFT_IRIS_CENTER = 468
@@ -70,23 +70,21 @@ def _normalized_rotation(matrix: np.ndarray) -> np.ndarray | None:
 
 
 def matrix_to_euler_degrees(matrix: object) -> tuple[float, float, float]:
-    """Return yaw, pitch and roll from a MediaPipe facial transform."""
+    """Return yaw, pitch and roll using the calibrated camera convention.
+
+    MediaPipe's facial transform is first projected onto the nearest proper
+    rotation matrix, then decomposed with the same Rz(roll) @ Rx(pitch) @
+    Ry(yaw) convention used by ``CameraGeometry``. Keeping one convention is
+    important for compound head rotations because yaw also drives iris
+    foreshortening correction in the distance estimate.
+    """
     try:
         rotation = _normalized_rotation(np.asarray(matrix))
     except (TypeError, ValueError, np.linalg.LinAlgError):
         rotation = None
     if rotation is None:
         return 0.0, 0.0, 0.0
-    sy = math.hypot(float(rotation[0, 0]), float(rotation[1, 0]))
-    if sy >= 1e-6:
-        pitch = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
-        yaw = math.atan2(-float(rotation[2, 0]), sy)
-        roll = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
-    else:
-        pitch = math.atan2(-float(rotation[1, 2]), float(rotation[1, 1]))
-        yaw = math.atan2(-float(rotation[2, 0]), sy)
-        roll = 0.0
-    return tuple(math.degrees(value) for value in (yaw, pitch, roll))
+    return euler_degrees_from_rotation_matrix(rotation)
 
 
 def _landmark_confidence(landmarks: list[Any]) -> float:
