@@ -9,6 +9,7 @@ import time
 import cv2
 import yaml
 
+from tracker.calibration_runtime_sync import synchronize_runtime_projection
 from tracker.camera_calibration import (
     calibrate_intrinsics,
     capture_checkerboard_observations,
@@ -67,6 +68,7 @@ def _intrinsics_command(args: argparse.Namespace) -> int:
         mirror_x=not args.no_mirror_x,
     )
     update_config_camera_geometry(args.config, geometry, calibration_result=result)
+    synchronize_runtime_projection(args.config, geometry)
     print(
         "Camera intrinsics saved:",
         f"{result.intrinsics.width}x{result.intrinsics.height}",
@@ -179,6 +181,11 @@ def _center_command(args: argparse.Namespace) -> int:
         viewer_distance_cm=args.viewer_distance_cm,
     )
     update_config_camera_geometry(args.config, aligned)
+    synchronize_runtime_projection(
+        args.config,
+        aligned,
+        viewer_distance_cm=args.viewer_distance_cm,
+    )
     print(
         "Camera-to-screen alignment saved:",
         aligned.extrinsics.translation_camera_origin_cm,
