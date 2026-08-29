@@ -125,8 +125,12 @@ class CameraQualityMonitor:
         sharpness = float(statistics.median(sharpness_values))
         interval = float(statistics.median(intervals)) if intervals else 0.0
         fps = 1000.0 / interval if interval > 0.0 else None
-        dark_fraction = float(statistics.median(sample.dark_fraction for sample in self._samples))
-        clipped_fraction = float(statistics.median(sample.clipped_fraction for sample in self._samples))
+        dark_fraction = float(
+            statistics.median(sample.dark_fraction for sample in self._samples)
+        )
+        clipped_fraction = float(
+            statistics.median(sample.clipped_fraction for sample in self._samples)
+        )
         problems: list[str] = []
         if brightness < self._brightness_range[0] or dark_fraction > 0.35:
             problems.append("underexposed")
@@ -139,7 +143,9 @@ class CameraQualityMonitor:
         if len(self._samples) >= 12 and brightness_jitter > 0.045:
             problems.append("exposure is hunting")
         severe = any(
-            problem.startswith(("underexposed", "overexposed", "soft", "camera cadence"))
+            problem.startswith(
+                ("underexposed", "overexposed", "soft", "camera cadence")
+            )
             for problem in problems
         )
         quality = "DANGER" if severe else ("WARN" if problems else "GOOD")
@@ -162,30 +168,111 @@ class CameraQualityMonitor:
         )
 
 
+def _read_camera_control(
+    cap: CameraLike,
+    property_id: int | None,
+    name: str,
+    errors: list[str],
+) -> float | None:
+    if property_id is None:
+        return None
+    try:
+        parsed = float(cap.get(property_id))
+    except Exception as error:  # hardware/backend boundary must remain fail-safe
+        errors.append(f"{name} read failed: {type(error).__name__}")
+        return None
+    if not math.isfinite(parsed):
+        errors.append(f"{name} read returned a non-finite value")
+        return None
+    return parsed
+
+
+def _write_camera_control(
+    cap: CameraLike,
+    property_id: int | None,
+    value: float,
+    name: str,
+    errors: list[str],
+) -> bool:
+    if property_id is None:
+        return False
+    try:
+        return bool(cap.set(property_id, float(value)))
+    except Exception as error:  # OpenCV backends may throw instead of returning False
+        errors.append(f"{name} write failed: {type(error).__name__}")
+        return False
+
+
 def try_lock_camera_controls(cap: CameraLike) -> dict[str, object]:
     """Best-effort focus/exposure locking after a stable warm-up.
 
-    Backends disagree on AUTO_EXPOSURE values, so this is opt-in and reports
-    every attempted property instead of pretending unsupported controls worked.
+    Camera backends disagree on supported properties, AUTO_EXPOSURE values, and
+    whether unsupported access returns ``False``/``None`` or raises. This
+    optional optimization must never terminate tracking. Values are restored
+    only after the corresponding automatic mode was successfully disabled.
     """
     result: dict[str, object] = {}
+    errors: list[str] = []
     autofocus = getattr(cv2, "CAP_PROP_AUTOFOCUS", None)
     focus = getattr(cv2, "CAP_PROP_FOCUS", None)
     auto_exposure = getattr(cv2, "CAP_PROP_AUTO_EXPOSURE", None)
     exposure = getattr(cv2, "CAP_PROP_EXPOSURE", None)
+
     if autofocus is not None:
-        result["focus_value"] = cap.get(focus) if focus is not None else None
-        result["autofocus_locked"] = bool(cap.set(autofocus, 0.0))
-        if focus is not None and math.isfinite(float(result["focus_value"])):
-            result["focus_preserved"] = bool(cap.set(focus, float(result["focus_value"])))
-    if auto_exposure is not None:
-        result["exposure_value"] = cap.get(exposure) if exposure is not None else None
-        locked = bool(cap.set(auto_exposure, 0.25))
-        if not locked:
-            locked = bool(cap.set(auto_exposure, 0.0))
-        result["auto_exposure_locked"] = locked
-        if exposure is not None and math.isfinite(float(result["exposure_value"])):
-            result["exposure_preserved"] = bool(
-                cap.set(exposure, float(result["exposure_value"]))
+        focus_value = _read_camera_control(cap, focus, "focus", errors)
+        autofocus_locked = _write_camera_control(
+            cap,
+            autofocus,
+            0.0,
+            "autofocus",
+            errors,
+        )
+        result["focus_value"] = focus_value
+        result["autofocus_locked"] = autofocus_locked
+        result["focus_preserved"] = bool(
+            autofocus_locked
+            and focus_value is not None
+            and _write_camera_control(
+                cap,
+                focus,
+                focus_value,
+                "focus",
+                errors,
             )
+        )
+
+    if auto_exposure is not None:
+        exposure_value = _read_camera_control(cap, exposure, "exposure", errors)
+        # DirectShow commonly uses 0.25 for manual mode; some MSMF/backends use 0.
+        auto_exposure_locked = _write_camera_control(
+            cap,
+            auto_exposure,
+            0.25,
+            "auto exposure",
+            errors,
+        )
+        if not auto_exposure_locked:
+            auto_exposure_locked = _write_camera_control(
+                cap,
+                auto_exposure,
+                0.0,
+                "auto exposure fallback",
+                errors,
+            )
+        result["exposure_value"] = exposure_value
+        result["auto_exposure_locked"] = auto_exposure_locked
+        result["exposure_preserved"] = bool(
+            auto_exposure_locked
+            and exposure_value is not None
+            and _write_camera_control(
+                cap,
+                exposure,
+                exposure_value,
+                "exposure",
+                errors,
+            )
+        )
+
+    if errors:
+        result["errors"] = tuple(errors)
     return result
