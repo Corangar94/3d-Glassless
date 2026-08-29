@@ -13,7 +13,7 @@ import numpy as np
 from mediapipe import tasks
 
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
-from tracker.pose import HeadPosition, monotonic_ms
+from tracker.pose import HeadPosition, monotonic_ms, normalize_wire_timestamp
 from tracker.timestamp_expansion import expand_u32_timestamp
 
 _LEFT_IRIS_CENTER = 468
@@ -132,7 +132,7 @@ class FaceTracker:
         self._async_mode = bool(async_mode)
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
-        self._last_delivered_timestamp_ms = 0
+        self._last_delivered_timestamp_ms: int | None = None
         self._last_submitted_wire_timestamp_ms: int | None = None
         self._last_submitted_media_timestamp_ms: int | None = None
         self._closed = False
@@ -267,7 +267,10 @@ class FaceTracker:
     def _poll_latest(self) -> HeadPosition | None:
         with self._lock:
             pose = self._latest_pose
-            if pose is None or pose.capture_timestamp_ms == self._last_delivered_timestamp_ms:
+            if (
+                pose is None
+                or pose.capture_timestamp_ms == self._last_delivered_timestamp_ms
+            ):
                 return None
             self._last_delivered_timestamp_ms = pose.capture_timestamp_ms
             return pose
@@ -279,8 +282,10 @@ class FaceTracker:
     ) -> HeadPosition | None:
         h, w = frame_bgr.shape[:2]
         wire_timestamp_ms = (
-            monotonic_ms() if capture_timestamp_ms is None else int(capture_timestamp_ms)
-        ) & 0xFFFF_FFFF
+            monotonic_ms()
+            if capture_timestamp_ms is None
+            else normalize_wire_timestamp(capture_timestamp_ms)
+        )
 
         rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)

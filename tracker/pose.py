@@ -23,17 +23,37 @@ else:
         return int(time.monotonic_ns() // 1_000_000)
 
 
+def normalize_wire_timestamp(timestamp_ms: int) -> int:
+    """Return a nonzero wrapping uint32 timestamp.
+
+    ``0`` is the existing Python pose contract's "timestamp missing" sentinel.
+    Windows uptime legitimately reaches zero at each 49.7-day rollover, so that
+    one instant is encoded as ``0xFFFFFFFF`` instead. Relative to the native
+    reader's raw ``GetTickCount() == 0`` value this is one millisecond old, and
+    all existing wrap-safe subtraction continues to work. Reserving zero avoids
+    silently replacing a real rollover sample with an unrelated later clock
+    read in filters, validation, and shared-memory writers.
+    """
+    wire = int(timestamp_ms) & _UINT32_MASK
+    return _UINT32_MASK if wire == 0 else wire
+
+
+def elapsed_u32_ms(newer_ms: int, older_ms: int) -> int:
+    """Return wrap-safe elapsed milliseconds on the shared uint32 clock."""
+    return (int(newer_ms) - int(older_ms)) & _UINT32_MASK
+
+
 def monotonic_ms() -> int:
-    """Return the shared wire-clock timestamp as a wrapping uint32 value.
+    """Return the shared nonzero wire-clock timestamp as a wrapping uint32.
 
     The native overlay computes shared-memory age with ``GetTickCount()``. A
     generic monotonic clock is not guaranteed to share that epoch across APIs,
     even when both clocks advance monotonically. On Windows, publish the low 32
     bits of ``GetTickCount64()`` so Python writers and the native reader use the
-    same uptime epoch and the existing wrap-safe uint32 subtraction remains
-    valid for sessions spanning the 49.7-day GetTickCount rollover.
+    same uptime epoch and wrap-safe uint32 subtraction remains valid. Timestamp
+    zero is reserved as "missing" and is encoded by ``normalize_wire_timestamp``.
     """
-    return _wire_uptime_ms64() & _UINT32_MASK
+    return normalize_wire_timestamp(_wire_uptime_ms64())
 
 
 def finite_or(value: object, fallback: float) -> float:
@@ -50,6 +70,7 @@ class HeadPosition:
 
     Translation uses centimeters in the existing Glassless3D convention.
     Orientation uses degrees: yaw left/right, pitch up/down, roll clockwise.
+    A zero capture timestamp means the producer did not supply camera time.
     """
 
     x_cm: float
@@ -76,7 +97,11 @@ class HeadPosition:
             pitch_deg=self.pitch_deg,
             roll_deg=self.roll_deg,
             confidence=self.confidence,
-            capture_timestamp_ms=monotonic_ms() if timestamp_ms is None else timestamp_ms,
+            capture_timestamp_ms=(
+                monotonic_ms()
+                if timestamp_ms is None
+                else normalize_wire_timestamp(timestamp_ms)
+            ),
         )
 
 
