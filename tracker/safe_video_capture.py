@@ -82,13 +82,12 @@ class SafeVideoCapture:
             return False, None
         try:
             result = self._capture.read()
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise TypeError("malformed capture result")
+            return bool(result[0]), result[1]
         except Exception as error:  # hardware/driver boundary
             self._record("read", error)
             return False, None
-        if not isinstance(result, tuple) or len(result) != 2:
-            self._record("read", TypeError("malformed capture result"))
-            return False, None
-        return bool(result[0]), result[1]
 
     def grab(self) -> bool:
         if self._capture is None or self._released:
@@ -104,13 +103,12 @@ class SafeVideoCapture:
             return False, None
         try:
             result = self._capture.retrieve(*args, **kwargs)
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise TypeError("malformed capture result")
+            return bool(result[0]), result[1]
         except Exception as error:  # hardware/driver boundary
             self._record("retrieve", error)
             return False, None
-        if not isinstance(result, tuple) or len(result) != 2:
-            self._record("retrieve", TypeError("malformed capture result"))
-            return False, None
-        return bool(result[0]), result[1]
 
     def set(self, property_id: int, value: float) -> bool:
         if self._capture is None or self._released:
