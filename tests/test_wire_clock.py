@@ -1,10 +1,13 @@
 import ctypes
 import os
+from pathlib import Path
 
 import pytest
 
 from tracker import pose
 from tracker import shared_memory
+from tracker.pose import HeadPosition
+from tracker.pose_filter import AdaptivePoseFilter
 from tracker.shared_memory import (
     SharedMemoryReader,
     SharedMemoryWriter,
@@ -31,16 +34,90 @@ def test_wire_clock_matches_native_gettickcount_epoch():
 
     bracket = _uint32_elapsed(after, before)
     offset = _uint32_elapsed(published, before)
-    # The Python timestamp should land inside the same native uptime interval.
-    # This remains correct even if the thread is preempted or uint32 wraps.
-    assert bracket < 10_000
-    assert offset <= bracket
+    # Timestamp zero is reserved. At the exact rollover instant Python publishes
+    # UINT32_MAX, which is one millisecond old relative to native zero.
+    if before == 0 or after == 0:
+        assert _uint32_elapsed(after, published) <= 1
+    else:
+        assert bracket < 10_000
+        assert offset <= bracket
 
 
 def test_wire_clock_wraps_to_uint32(monkeypatch):
     monkeypatch.setattr(pose, "_wire_uptime_ms64", lambda: 0x1_0000_0017)
 
     assert pose.monotonic_ms() == 0x17
+
+
+def test_wire_clock_reserves_zero_missing_sentinel(monkeypatch):
+    monkeypatch.setattr(pose, "_wire_uptime_ms64", lambda: 0x1_0000_0000)
+
+    assert pose.monotonic_ms() == UINT32_MASK
+    assert pose.normalize_wire_timestamp(0) == UINT32_MASK
+    assert pose.elapsed_u32_ms(0, UINT32_MASK) == 1
+
+
+def test_elapsed_wire_clock_is_wrap_safe():
+    assert pose.elapsed_u32_ms(5, 0xFFFF_FFFB) == 10
+    assert pose.elapsed_u32_ms(20, 10) == 10
+
+
+def test_missing_head_timestamp_uses_nonzero_normalized_fallback():
+    unstamped = HeadPosition(x_cm=0.0, y_cm=0.0, z_cm=60.0)
+
+    stamped = unstamped.with_timestamp_if_missing(timestamp_ms=0)
+
+    assert stamped.capture_timestamp_ms == UINT32_MASK
+
+
+def test_pose_filter_never_publishes_zero_timestamp(monkeypatch):
+    monkeypatch.setattr("tracker.pose_filter.monotonic_ms", lambda: UINT32_MASK)
+    filter_ = AdaptivePoseFilter(prediction_horizon_ms=1.0)
+
+    output = filter_.update_pose(
+        HeadPosition(
+            x_cm=0.0,
+            y_cm=0.0,
+            z_cm=60.0,
+            capture_timestamp_ms=0,
+        ),
+        publish_timestamp_ms=0,
+    )
+
+    assert output.capture_timestamp_ms == UINT32_MASK
+    assert output.publish_timestamp_ms == UINT32_MASK
+    assert output.prediction_target_timestamp_ms == UINT32_MASK
+
+
+def test_prediction_target_wraps_without_emitting_zero():
+    filter_ = AdaptivePoseFilter(
+        prediction_horizon_ms=10.0,
+        max_prediction_ms=20.0,
+    )
+    filter_.update_pose(
+        HeadPosition(
+            x_cm=0.0,
+            y_cm=0.0,
+            z_cm=60.0,
+            capture_timestamp_ms=0xFFFF_FFF8,
+        ),
+        publish_timestamp_ms=0xFFFF_FFF8,
+    )
+
+    output = filter_.predict(publish_timestamp_ms=2)
+
+    assert output.capture_timestamp_ms == 0xFFFF_FFF8
+    assert output.publish_timestamp_ms == 2
+    assert output.prediction_target_timestamp_ms == 12
+
+
+def test_tracker_backends_normalize_explicit_zero_capture_time():
+    mediapipe_source = Path("tracker/face_tracker.py").read_text(encoding="utf-8")
+    cv2_source = Path("tracker/face_tracker_cv2.py").read_text(encoding="utf-8")
+
+    assert "else normalize_wire_timestamp(capture_timestamp_ms)" in mediapipe_source
+    assert "else normalize_wire_timestamp(capture_timestamp_ms)" in cv2_source
+    assert "_last_delivered_timestamp_ms: int | None = None" in mediapipe_source
 
 
 def test_legacy_pose_writer_uses_shared_wire_clock(monkeypatch):
