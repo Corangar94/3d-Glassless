@@ -19,6 +19,10 @@ import cv2
 CaptureFactory = Callable[..., object]
 
 
+class InvalidCaptureFrameError(RuntimeError):
+    """The backend claimed success but did not provide a usable image frame."""
+
+
 @dataclass(frozen=True)
 class CaptureBoundaryFailure:
     """One contained driver/backend failure."""
@@ -28,6 +32,47 @@ class CaptureBoundaryFailure:
 
     def render(self) -> str:
         return f"{self.stage}:{self.error_type}"
+
+
+def _validated_capture_result(
+    stage: str,
+    result: object,
+) -> tuple[bool, object | None]:
+    """Normalize an OpenCV frame result and reject definitively invalid images."""
+    if not isinstance(result, tuple) or len(result) != 2:
+        raise TypeError(f"malformed {stage} result")
+    ok = bool(result[0])
+    frame = result[1]
+    if not ok:
+        # Never propagate a stale object returned alongside a failed status.
+        return False, None
+    if frame is None:
+        raise InvalidCaptureFrameError(f"{stage} returned a null frame")
+
+    # NumPy images expose shape/size.  Validate those when present, while
+    # allowing opaque OpenCV frame types (for example UMat) to continue.
+    try:
+        shape = getattr(frame, "shape", None)
+        if shape is not None:
+            dimensions = tuple(shape)
+            if (
+                len(dimensions) < 2
+                or int(dimensions[0]) <= 0
+                or int(dimensions[1]) <= 0
+            ):
+                raise InvalidCaptureFrameError(
+                    f"{stage} returned an empty or one-dimensional frame"
+                )
+        size = getattr(frame, "size", None)
+        if size is not None and int(size) <= 0:
+            raise InvalidCaptureFrameError(f"{stage} returned an empty frame")
+    except InvalidCaptureFrameError:
+        raise
+    except Exception as error:
+        raise InvalidCaptureFrameError(
+            f"{stage} returned unreadable frame metadata"
+        ) from error
+    return True, frame
 
 
 class SafeVideoCapture:
@@ -81,10 +126,7 @@ class SafeVideoCapture:
         if self._capture is None or self._released:
             return False, None
         try:
-            result = self._capture.read()
-            if not isinstance(result, tuple) or len(result) != 2:
-                raise TypeError("malformed capture result")
-            return bool(result[0]), result[1]
+            return _validated_capture_result("read", self._capture.read())
         except Exception as error:  # hardware/driver boundary
             self._record("read", error)
             return False, None
@@ -102,10 +144,10 @@ class SafeVideoCapture:
         if self._capture is None or self._released:
             return False, None
         try:
-            result = self._capture.retrieve(*args, **kwargs)
-            if not isinstance(result, tuple) or len(result) != 2:
-                raise TypeError("malformed capture result")
-            return bool(result[0]), result[1]
+            return _validated_capture_result(
+                "retrieve",
+                self._capture.retrieve(*args, **kwargs),
+            )
         except Exception as error:  # hardware/driver boundary
             self._record("retrieve", error)
             return False, None
