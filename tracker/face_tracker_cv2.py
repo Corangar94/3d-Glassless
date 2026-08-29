@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 from tracker.camera_geometry import CameraGeometry
-from tracker.pose import HeadPosition, monotonic_ms
+from tracker.pose import HeadPosition, monotonic_ms, normalize_wire_timestamp
 
 
 class FaceTracker:
@@ -120,7 +120,7 @@ class FaceTracker:
             capture_timestamp_ms=(
                 monotonic_ms()
                 if capture_timestamp_ms is None
-                else int(capture_timestamp_ms) & 0xFFFF_FFFF
+                else normalize_wire_timestamp(capture_timestamp_ms)
             ),
         )
 
