@@ -25,6 +25,11 @@ _CAMERA_READ_FAILURES_BEFORE_REOPEN = 3
 _CAMERA_MAX_REOPEN_ATTEMPTS = 3
 _DEFAULT_CAMERA_FOV_DEG = 90.0
 _DEFAULT_SMOOTHING_R = 0.1
+_CAMERA_BACKENDS: tuple[tuple[int | None, str], ...] = (
+    (cv2.CAP_DSHOW, "CAP_DSHOW"),
+    (cv2.CAP_MSMF, "CAP_MSMF"),
+    (None, "default backend"),
+)
 
 
 class FaceTrackerLike(Protocol):
@@ -111,19 +116,51 @@ def _log_camera_opened(index: int, backend_name: str, cap: cv2.VideoCapture) -> 
     print(f"[G3D] Camera {index} opened via {backend_name} at {width}x{height} @ {fps:.1f} fps")
 
 
-def _open_camera(index: int, width: int = 0, height: int = 0, fps: float = 0.0) -> cv2.VideoCapture:
-    for backend_id, backend_name in ((cv2.CAP_DSHOW, "CAP_DSHOW"), (cv2.CAP_MSMF, "CAP_MSMF")):
-        cap = cv2.VideoCapture(index, backend_id)
+def _open_camera(
+    index: int,
+    width: int = 0,
+    height: int = 0,
+    fps: float = 0.0,
+    *,
+    backend_start_index: int = 0,
+    metadata: dict[str, object] | None = None,
+) -> cv2.VideoCapture:
+    """Open a camera, rotating Windows backends from the requested candidate.
+
+    Some drivers successfully create a DirectShow handle but never deliver a
+    frame. Reopening from candidate zero would select the same broken backend on
+    every attempt. The tracking loop therefore starts each capture-session retry
+    at the candidate after the one that stalled, while this helper still falls
+    through every backend if the preferred candidate cannot open at all.
+    """
+    if metadata is not None:
+        metadata.clear()
+    candidate_count = len(_CAMERA_BACKENDS)
+    start_index = int(backend_start_index) % candidate_count
+    last_cap: cv2.VideoCapture | None = None
+    for offset in range(candidate_count):
+        backend_index = (start_index + offset) % candidate_count
+        backend_id, backend_name = _CAMERA_BACKENDS[backend_index]
+        cap = (
+            cv2.VideoCapture(index)
+            if backend_id is None
+            else cv2.VideoCapture(index, backend_id)
+        )
+        last_cap = cap
         if cap.isOpened():
             _configure_camera(cap, width, height, fps)
             _log_camera_opened(index, backend_name, cap)
+            if metadata is not None:
+                metadata.update(
+                    backend_index=backend_index,
+                    backend_id=backend_id,
+                    backend_name=backend_name,
+                )
             return cap
         cap.release()
-    cap = cv2.VideoCapture(index)
-    if cap.isOpened():
-        _configure_camera(cap, width, height, fps)
-        _log_camera_opened(index, "default backend", cap)
-    return cap
+    if last_cap is None:  # defensive: _CAMERA_BACKENDS is intentionally nonempty
+        raise RuntimeError("No camera backends are configured")
+    return last_cap
 
 
 def _load_face_tracker_class(backend: str):
@@ -310,10 +347,18 @@ class TrackingLoop:
         return timestamp_ms
 
     def run(self, camera_index: int = 0, camera_width: int = 0, camera_height: int = 0, camera_fps: float = 0.0, max_frames: Optional[int] = None) -> None:
-        cap = _open_camera(camera_index, camera_width, camera_height, camera_fps)
+        backend_metadata: dict[str, object] = {}
+        cap = _open_camera(
+            camera_index,
+            camera_width,
+            camera_height,
+            camera_fps,
+            metadata=backend_metadata,
+        )
         if not cap.isOpened():
             cap.release()
             raise RuntimeError(f"Could not open camera {camera_index}")
+        active_backend_index = int(backend_metadata.get("backend_index", 0))
         frame_count = consecutive_read_failures = reopen_attempts = 0
         settings_reader = SharedSettingsReader()
         applied_calibration: tuple[float | None, float | None] | None = None
@@ -335,11 +380,29 @@ class TrackingLoop:
                     reopen_attempts += 1
                     if reopen_attempts > _CAMERA_MAX_REOPEN_ATTEMPTS:
                         raise RuntimeError(f"Camera {camera_index} stopped delivering frames")
-                    print(f"[G3D] Camera read stalled; reopening ({reopen_attempts}/{_CAMERA_MAX_REOPEN_ATTEMPTS})")
-                    cap = _open_camera(camera_index, camera_width, camera_height, camera_fps)
+                    next_backend_index = (
+                        active_backend_index + 1
+                    ) % len(_CAMERA_BACKENDS)
+                    print(
+                        f"[G3D] Camera read stalled; reopening "
+                        f"({reopen_attempts}/{_CAMERA_MAX_REOPEN_ATTEMPTS}) "
+                        f"from {_CAMERA_BACKENDS[next_backend_index][1]}"
+                    )
+                    backend_metadata = {}
+                    cap = _open_camera(
+                        camera_index,
+                        camera_width,
+                        camera_height,
+                        camera_fps,
+                        backend_start_index=next_backend_index,
+                        metadata=backend_metadata,
+                    )
                     if not cap.isOpened():
                         cap.release()
                         raise RuntimeError(f"Could not reopen camera {camera_index}")
+                    active_backend_index = int(
+                        backend_metadata.get("backend_index", next_backend_index)
+                    )
                     consecutive_read_failures = 0
                     continue
 
