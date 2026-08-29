@@ -50,6 +50,15 @@ class FaceTracker:
                 )
             self._camera_fov_deg = float(camera_fov_deg)
 
+    def reset_session(self) -> None:
+        """Reset capture-session state.
+
+        The OpenCV fallback keeps no temporal detector state, but exposing the
+        same hook as the MediaPipe backend lets the tracking loop handle camera
+        reconnection uniformly.
+        """
+        return None
+
     def process_frame(
         self,
         frame_bgr: np.ndarray,

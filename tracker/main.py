@@ -31,6 +31,9 @@ class FaceTrackerLike(Protocol):
     def process_frame(self, frame_bgr: object, capture_timestamp_ms: int | None = None) -> HeadPosition | None:
         ...
 
+    def reset_session(self) -> None:
+        ...
+
 
 class PoseWriterLike(Protocol):
     def write(self, *, x: float, y: float, z: float) -> None:
@@ -260,6 +263,17 @@ class TrackingLoop:
             return self._smoother.predict()
         return self._last_output_pose
 
+    @staticmethod
+    def _neutral_pose(timestamp_ms: int | None = None) -> FilteredPose:
+        timestamp = monotonic_ms() if timestamp_ms is None else timestamp_ms
+        return FilteredPose(
+            x_cm=0.0,
+            y_cm=0.0,
+            z_cm=60.0,
+            publish_timestamp_ms=timestamp,
+            prediction_target_timestamp_ms=timestamp,
+        )
+
     def _publish(self, pose: FilteredPose, status: str) -> None:
         write_state = getattr(self._writer, "write_state", None)
         if callable(write_state):
@@ -269,6 +283,31 @@ class TrackingLoop:
         else:
             self._writer.write(x=pose.x_cm, y=pose.y_cm, z=pose.z_cm)
         self._on_position(pose.x_cm, pose.y_cm, pose.z_cm, status)
+
+    def _reset_capture_session(self) -> int:
+        """Clear every stateful input derived from the retired webcam handle."""
+        reset_tracker = getattr(self._tracker, "reset_session", None)
+        if callable(reset_tracker):
+            reset_tracker()
+        reset_smoother = getattr(self._smoother, "reset", None)
+        if callable(reset_smoother):
+            reset_smoother()
+        if self._camera_quality_monitor is not None:
+            self._camera_quality_monitor.reset()
+
+        self._last_face_ms = None
+        self._last_smoothed = (0.0, 0.0, 60.0)
+        self._last_raw_pos = None
+        self._last_measurement_s = None
+        timestamp_ms = monotonic_ms()
+        neutral = self._neutral_pose(timestamp_ms)
+        self._last_output_pose = neutral
+        self._publish(neutral, "paused")
+        print(
+            "[G3D] Camera capture session reset — cleared pose, filter, "
+            "quality, and control-lock history"
+        )
+        return timestamp_ms
 
     def run(self, camera_index: int = 0, camera_width: int = 0, camera_height: int = 0, camera_fps: float = 0.0, max_frames: Optional[int] = None) -> None:
         cap = _open_camera(camera_index, camera_width, camera_height, camera_fps)
@@ -289,6 +328,9 @@ class TrackingLoop:
                     if consecutive_read_failures < _CAMERA_READ_FAILURES_BEFORE_REOPEN:
                         time.sleep(0.02)
                         continue
+                    last_quality_log_ms = self._reset_capture_session()
+                    controls_lock_attempted = False
+                    applied_calibration = None
                     cap.release()
                     reopen_attempts += 1
                     if reopen_attempts > _CAMERA_MAX_REOPEN_ATTEMPTS:
@@ -345,7 +387,7 @@ class TrackingLoop:
                     now_ms = time.monotonic() * 1000.0
                     expired = self._last_face_ms is None or now_ms - self._last_face_ms > self._hold_ms
                     if expired:
-                        output = FilteredPose(x_cm=0.0, y_cm=0.0, z_cm=60.0, publish_timestamp_ms=monotonic_ms())
+                        output = self._neutral_pose()
                         status = "paused"
                     else:
                         # Preserve the public state contract: a predicted/replayed

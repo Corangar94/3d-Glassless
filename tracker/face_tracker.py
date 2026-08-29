@@ -135,6 +135,7 @@ class FaceTracker:
         self._last_delivered_timestamp_ms: int | None = None
         self._last_submitted_wire_timestamp_ms: int | None = None
         self._last_submitted_media_timestamp_ms: int | None = None
+        self._minimum_result_media_timestamp_ms: int | None = None
         self._closed = False
 
         options = tasks.vision.FaceLandmarkerOptions(
@@ -170,6 +171,25 @@ class FaceTracker:
                     f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}"
                 )
             self._camera_fov_deg = float(camera_fov_deg)
+
+    def reset_session(self) -> None:
+        """Forget poses that belong to a retired camera capture session.
+
+        The MediaPipe landmarker must keep its monotonically increasing private
+        timestamp timeline for its full lifetime, so submission timestamps are
+        deliberately not reset. Instead, the latest submitted timestamp becomes
+        a result floor. Any callback still in flight from the old webcam session
+        is discarded when it eventually arrives.
+        """
+        with self._lock:
+            self._latest_pose = None
+            self._last_delivered_timestamp_ms = None
+            submitted = self._last_submitted_media_timestamp_ms
+            if submitted is not None:
+                current = self._minimum_result_media_timestamp_ms
+                self._minimum_result_media_timestamp_ms = (
+                    submitted if current is None else max(current, submitted)
+                )
 
     def _pose_from_result(
         self,
@@ -262,6 +282,9 @@ class FaceTracker:
             else None
         )
         with self._lock:
+            floor = self._minimum_result_media_timestamp_ms
+            if floor is not None and int(timestamp_ms) <= floor:
+                return
             self._latest_pose = pose
 
     def _poll_latest(self) -> HeadPosition | None:
