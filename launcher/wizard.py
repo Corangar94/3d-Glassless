@@ -19,6 +19,22 @@ from launcher.edid import detect_screen_size_cm
 from launcher.overlay_process import find_depth_model, find_overlay_exe
 
 
+_CAMERA_PROBE_BACKENDS: tuple[tuple[int | None, str], ...] = (
+    (cv2.CAP_DSHOW, "DirectShow"),
+    (cv2.CAP_MSMF, "Media Foundation"),
+    (None, "default backend"),
+)
+
+_DEFAULT_CAMERA_RECONNECT = {
+    "immediate_retries": 1,
+    "max_failures": 8,
+    "base_delay_s": 0.5,
+    "max_delay_s": 8.0,
+    "max_outage_s": 45.0,
+    "heartbeat_s": 1.0,
+}
+
+
 # ── Page 1: Welcome ────────────────────────────────────────────────────────────
 
 class WelcomePage(QWizardPage):
@@ -73,14 +89,48 @@ class CameraScreenPage(QWizardPage):
             self._width_edit.setText(f"{dims[0]:.1f}")
             self._height_edit.setText(f"{dims[1]:.1f}")
 
+    @staticmethod
+    def _probe_camera_backend(
+        camera_index: int,
+        backend_id: int | None,
+    ) -> bool:
+        """Probe one backend without letting a driver exception break setup."""
+        cap = None
+        try:
+            cap = (
+                cv2.VideoCapture(camera_index)
+                if backend_id is None
+                else cv2.VideoCapture(camera_index, backend_id)
+            )
+            return bool(cap is not None and cap.isOpened())
+        except Exception:
+            # Webcam drivers and OpenCV backends disagree on whether unsupported
+            # operations return False or raise. First-run discovery must continue
+            # to the next backend and camera index in either case.
+            return False
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+    @classmethod
+    def _probe_camera(cls, camera_index: int) -> str | None:
+        for backend_id, backend_name in _CAMERA_PROBE_BACKENDS:
+            if cls._probe_camera_backend(camera_index, backend_id):
+                return backend_name
+        return None
+
     def _probe_cameras(self) -> None:
         self._camera_combo.clear()
-        for idx in range(5):
-            cap = cv2.VideoCapture(idx)
-            opened = cap.isOpened()
-            cap.release()
-            if opened:
-                self._camera_combo.addItem(f"Camera {idx}", idx)
+        for camera_index in range(5):
+            backend_name = self._probe_camera(camera_index)
+            if backend_name is not None:
+                self._camera_combo.addItem(
+                    f"Camera {camera_index} ({backend_name})",
+                    camera_index,
+                )
 
     def selected_camera_index(self) -> int:
         camera_index = self._camera_combo.currentData()
@@ -206,6 +256,7 @@ class DonePage(QWizardPage):
                 "width": 1280,
                 "height": 720,
                 "fps": 30,
+                "reconnect": dict(_DEFAULT_CAMERA_RECONNECT),
             },
             "screen": {
                 "width_cm": self._screen_width_cm,
