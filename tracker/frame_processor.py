@@ -4,16 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import inspect
-from typing import Callable, Protocol, TypeVar
-
-
-FrameT = TypeVar("FrameT")
-ResultT = TypeVar("ResultT")
-
-
-class _FrameProcessorLike(Protocol[FrameT, ResultT]):
-    def __call__(self, frame: FrameT, *args: object, **kwargs: object) -> ResultT:
-        ...
+from typing import Any, Callable
 
 
 class FrameCallMode(str, Enum):
@@ -68,11 +59,11 @@ def resolve_frame_call_mode(process_frame: Callable[..., object]) -> FrameCallMo
 class FrameProcessorAdapter:
     """Call one tracker method in its pre-resolved compatibility mode."""
 
-    process_frame: Callable[..., ResultT]
+    process_frame: Callable[..., Any]
     mode: FrameCallMode
 
     @classmethod
-    def from_tracker(cls, tracker: object) -> "FrameProcessorAdapter[object]":
+    def from_tracker(cls, tracker: object) -> "FrameProcessorAdapter":
         process_frame = getattr(tracker, "process_frame", None)
         if not callable(process_frame):
             raise TypeError("tracker.process_frame must be callable")
@@ -81,7 +72,7 @@ class FrameProcessorAdapter:
             mode=resolve_frame_call_mode(process_frame),
         )
 
-    def __call__(self, frame: FrameT, capture_timestamp_ms: int) -> ResultT:
+    def __call__(self, frame: object, capture_timestamp_ms: int) -> Any:
         if self.mode is FrameCallMode.TIMESTAMP_KEYWORD:
             return self.process_frame(
                 frame,
