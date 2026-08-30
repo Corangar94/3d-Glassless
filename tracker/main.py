@@ -17,6 +17,7 @@ from tracker.camera_reconnect_retry import (
     CameraReconnectPolicy,
 )
 from tracker.face_tracker_cv2 import HeadPosition
+from tracker.frame_processor import FrameProcessorAdapter
 from tracker.freetrack import FreetracWriter
 from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
@@ -376,6 +377,7 @@ class TrackingLoop:
         camera_reconnect_policy: CameraReconnectPolicy | None = None,
     ) -> None:
         self._tracker = tracker
+        self._frame_processor = FrameProcessorAdapter.from_tracker(tracker)
         self._writer = writer
         self._smoother = smoother
         self._hold_ms = hold_ms
@@ -405,13 +407,7 @@ class TrackingLoop:
         frame: object,
         capture_timestamp_ms: int,
     ) -> HeadPosition | None:
-        try:
-            return self._tracker.process_frame(
-                frame,
-                capture_timestamp_ms=capture_timestamp_ms,
-            )
-        except TypeError:
-            return self._tracker.process_frame(frame)
+        return self._frame_processor(frame, capture_timestamp_ms)
 
     def _supports_pose_filter(self) -> bool:
         return callable(getattr(type(self._smoother), "update_pose", None))
