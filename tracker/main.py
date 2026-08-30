@@ -10,6 +10,7 @@ import cv2
 import yaml
 
 from tracker.camera_control_retry import CameraControlLockRetry
+from tracker.camera_frame import CameraFrameFormatError, normalize_camera_frame
 from tracker.camera_geometry import CameraGeometry
 from tracker.camera_quality import CameraQualityMonitor, try_lock_camera_controls
 from tracker.camera_reconnect_retry import (
@@ -621,6 +622,15 @@ class TrackingLoop:
                     )
                     ok, frame = False, None
                 capture_timestamp_ms = monotonic_ms()
+                if ok:
+                    try:
+                        frame = normalize_camera_frame(frame)
+                    except CameraFrameFormatError as error:
+                        print(
+                            "[G3D] Camera frame format rejected: "
+                            f"{error}; treating it as a stalled frame"
+                        )
+                        ok, frame = False, None
                 if not ok:
                     consecutive_read_failures += 1
                     if (
