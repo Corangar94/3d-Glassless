@@ -92,6 +92,7 @@ def test_no_callback_progress_escalates_after_timeout():
 
 def test_successful_no_face_callback_counts_as_progress():
     tracker = _bare_tracker(stall_timeout_ms=5000)
+    tracker._pose_from_result.side_effect = None
     tracker._pose_from_result.return_value = None
     image = SimpleNamespace(width=640, height=480)
 
@@ -99,6 +100,7 @@ def test_successful_no_face_callback_counts_as_progress():
     tracker._on_result(object(), image, 1000)
     assert tracker.process_frame(_frame(), 5999) is None
 
+    assert tracker._latest_pose is None
     assert tracker._async_watchdog.snapshot().callback_lag_ms == 4999
 
 
