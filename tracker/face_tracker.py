@@ -12,6 +12,7 @@ import mediapipe as mp
 import numpy as np
 from mediapipe import tasks
 
+from tracker.async_inference_watchdog import AsyncInferenceWatchdog
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
 from tracker.pose import HeadPosition, monotonic_ms, normalize_wire_timestamp
 from tracker.timestamp_expansion import expand_u32_timestamp
@@ -121,6 +122,8 @@ class FaceTracker:
         async_mode: bool = True,
         min_tracking_confidence: float = 0.5,
         camera_geometry: CameraGeometry | None = None,
+        async_stall_timeout_ms: int = 5000,
+        async_max_consecutive_errors: int = 3,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
@@ -136,6 +139,14 @@ class FaceTracker:
         self._last_submitted_wire_timestamp_ms: int | None = None
         self._last_submitted_media_timestamp_ms: int | None = None
         self._minimum_result_media_timestamp_ms: int | None = None
+        self._async_watchdog = (
+            AsyncInferenceWatchdog(
+                max_consecutive_errors=async_max_consecutive_errors,
+                stall_timeout_ms=async_stall_timeout_ms,
+            )
+            if self._async_mode
+            else None
+        )
         self._closed = False
 
         options = tasks.vision.FaceLandmarkerOptions(
@@ -190,6 +201,14 @@ class FaceTracker:
                 self._minimum_result_media_timestamp_ms = (
                     submitted if current is None else max(current, submitted)
                 )
+        if self._async_watchdog is not None:
+            self._async_watchdog.reset_session()
+
+    def _result_is_current_locked(self, timestamp_ms: int) -> bool:
+        if self._closed:
+            return False
+        floor = self._minimum_result_media_timestamp_ms
+        return floor is None or int(timestamp_ms) > floor
 
     def _pose_from_result(
         self,
@@ -272,20 +291,35 @@ class FaceTracker:
         )
 
     def _on_result(self, result: object, image: object, timestamp_ms: int) -> None:
-        if self._closed:
-            return
-        width = int(getattr(image, "width", 0))
-        height = int(getattr(image, "height", 0))
-        pose = (
-            self._pose_from_result(result, width, height, timestamp_ms)
-            if width > 0 and height > 0
-            else None
-        )
+        timestamp = int(timestamp_ms)
         with self._lock:
-            floor = self._minimum_result_media_timestamp_ms
-            if floor is not None and int(timestamp_ms) <= floor:
+            if not self._result_is_current_locked(timestamp):
+                return
+
+        try:
+            width = int(getattr(image, "width", 0))
+            height = int(getattr(image, "height", 0))
+            pose = (
+                self._pose_from_result(result, width, height, timestamp)
+                if width > 0 and height > 0
+                else None
+            )
+        except Exception as error:
+            with self._lock:
+                current = self._result_is_current_locked(timestamp)
+            if current and self._async_watchdog is not None:
+                self._async_watchdog.record_callback(
+                    timestamp,
+                    error=error,
+                )
+            return
+
+        with self._lock:
+            if not self._result_is_current_locked(timestamp):
                 return
             self._latest_pose = pose
+        if self._async_watchdog is not None:
+            self._async_watchdog.record_callback(timestamp)
 
     def _poll_latest(self) -> HeadPosition | None:
         with self._lock:
@@ -313,25 +347,39 @@ class FaceTracker:
         rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         if self._async_mode:
-            media_timestamp_ms = expand_u32_timestamp(
-                wire_timestamp_ms,
-                self._last_submitted_wire_timestamp_ms,
-                self._last_submitted_media_timestamp_ms,
-            )
+            watchdog = self._async_watchdog
+            if watchdog is not None:
+                watchdog.raise_if_unhealthy()
+            with self._lock:
+                media_timestamp_ms = expand_u32_timestamp(
+                    wire_timestamp_ms,
+                    self._last_submitted_wire_timestamp_ms,
+                    self._last_submitted_media_timestamp_ms,
+                )
+                if media_timestamp_ms is not None:
+                    self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
+                    self._last_submitted_media_timestamp_ms = media_timestamp_ms
             if media_timestamp_ms is None:
                 return self._poll_latest()
-            self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
-            self._last_submitted_media_timestamp_ms = media_timestamp_ms
             try:
                 self._landmarker.detect_async(image, media_timestamp_ms)
-            except (RuntimeError, ValueError):
-                pass
+            except (RuntimeError, ValueError) as error:
+                if watchdog is not None:
+                    watchdog.record_submission_error(error)
+                    watchdog.raise_if_unhealthy()
+            else:
+                if watchdog is not None:
+                    watchdog.record_submission(media_timestamp_ms)
+                    watchdog.raise_if_unhealthy()
             return self._poll_latest()
         result = self._landmarker.detect(image)
         return self._pose_from_result(result, w, h, wire_timestamp_ms)
 
     def close(self) -> None:
-        self._closed = True
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
         self._landmarker.close()
 
     def __enter__(self) -> "FaceTracker":
