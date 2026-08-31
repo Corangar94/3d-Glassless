@@ -4,9 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-from tracker.backend_transition_state import (
-    current_backend_transition_generation,
-)
+from tracker.backend_transition_state import current_backend_transition_state
 from tracker.pose import (
     FilteredPose,
     HeadPosition,
@@ -247,7 +245,7 @@ class AdaptivePoseFilter:
         self._last_capture_timestamp_ms = 0
         self._synthetic_timestamp_ms = monotonic_ms()
         self._backend_transition_generation = (
-            current_backend_transition_generation()
+            current_backend_transition_state().generation
         )
 
     def set_measurement_noise(self, value: float) -> None:
@@ -285,17 +283,21 @@ class AdaptivePoseFilter:
     def reset(self) -> None:
         self._reset_state()
         self._backend_transition_generation = (
-            current_backend_transition_generation()
+            current_backend_transition_state().generation
         )
 
     def _synchronize_backend_transition(self) -> None:
-        generation = current_backend_transition_generation()
-        if generation == self._backend_transition_generation:
+        transition = current_backend_transition_state()
+        if transition.generation == self._backend_transition_generation:
             return
-        # Position remains meaningful across calibrated tracker backends, but
-        # velocity/covariance are source-specific and can create an overshoot.
-        self._reset_dynamics()
-        self._backend_transition_generation = generation
+        if transition.preserve_position:
+            # Position remains meaningful across fresh calibrated backends, but
+            # velocity/covariance are source-specific and can create overshoot.
+            self._reset_dynamics()
+        else:
+            # A stale/absent source must not be preserved into a new backend.
+            self._reset_state()
+        self._backend_transition_generation = transition.generation
 
     def _prediction_timestamp(self, capture_ms: int, publish_ms: int) -> int:
         measurement_age_ms = (
