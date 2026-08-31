@@ -8,11 +8,12 @@
 # places runtime content under dist/Glassless3D/_internal/ while keeping the
 # user-facing launcher at dist/Glassless3D/Glassless3D.exe.
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 mediapipe_data, mediapipe_libs, mediapipe_hiddenimports = collect_all(
     "mediapipe"
 )
+opencv_data = collect_data_files("cv2", includes=["data/*.xml"])
 
 runtime_datas = [
     # Standalone non-injecting native runtime and required models.
@@ -25,6 +26,7 @@ runtime_datas = [
     ("profiles/wow.json", "profiles"),
     ("profiles/default.json", "profiles"),
     *mediapipe_data,
+    *opencv_data,
 ]
 
 runtime_binaries = [
