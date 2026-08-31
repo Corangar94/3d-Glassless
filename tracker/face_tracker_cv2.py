@@ -27,9 +27,9 @@ class FaceTracker:
     """Fallback face tracker that avoids full-frame cascades on every frame.
 
     Cascades periodically correct the face/eye ROI. Shi-Tomasi features and
-    pyramidal Lucas-Kanade optical flow carry that ROI between corrections. This
-    keeps the fallback usable on systems where MediaPipe is unavailable without
-    adding a contrib-only OpenCV tracker dependency.
+    pyramidal Lucas-Kanade optical flow carry that ROI between corrections. The
+    cascade remains authoritative: flow failures immediately fall back to a
+    detector pass, and repeated cascade misses retire the tracked ROI.
     """
 
     def __init__(
@@ -45,9 +45,12 @@ class FaceTracker:
         detection_interval_frames: int = 5,
         full_scan_interval_frames: int = 30,
         eye_track_hold_frames: int = 18,
+        maximum_cascade_misses: int = 2,
+        minimum_flow_quality: float = 0.25,
         cascade_correction_alpha: float = 0.70,
         face_classifier: object | None = None,
         eye_classifier: object | None = None,
+        detector: CascadeFaceDetector | None = None,
         motion_tracker: SparseFaceMotionTracker | None = None,
         **_options: object,
     ) -> None:
@@ -66,6 +69,10 @@ class FaceTracker:
             )
         if eye_track_hold_frames < 0:
             raise ValueError("eye_track_hold_frames cannot be negative")
+        if maximum_cascade_misses < 0:
+            raise ValueError("maximum_cascade_misses cannot be negative")
+        if not (0.0 <= minimum_flow_quality <= 1.0):
+            raise ValueError("minimum_flow_quality must be in [0, 1]")
         if not (0.0 <= cascade_correction_alpha <= 1.0):
             raise ValueError("cascade_correction_alpha must be in [0, 1]")
 
@@ -76,42 +83,57 @@ class FaceTracker:
         self._detection_interval_frames = int(detection_interval_frames)
         self._full_scan_interval_frames = int(full_scan_interval_frames)
         self._eye_track_hold_frames = int(eye_track_hold_frames)
+        self._maximum_cascade_misses = int(maximum_cascade_misses)
+        self._minimum_flow_quality = float(minimum_flow_quality)
         self._cascade_correction_alpha = float(cascade_correction_alpha)
         self._frame_index = 0
+        self._cascade_misses = 0
+        self._last_motion_error = ""
         self._eye_ratio: float | None = None
+        self._eye_center_ratio: tuple[float, float] | None = None
+        self._eye_roll_deg = 0.0
         self._eye_age_frames = 0
 
-        if face_classifier is None or eye_classifier is None:
-            cv2_data = getattr(cv2, "data", None)
-            cascade_root = str(getattr(cv2_data, "haarcascades", ""))
-            if not cascade_root:
-                raise Cv2FallbackTrackingError(
-                    "OpenCV Haar cascade directory is unavailable"
-                )
-            if face_classifier is None:
-                face_classifier = cv2.CascadeClassifier(
-                    os.path.join(
-                        cascade_root,
-                        "haarcascade_frontalface_default.xml",
+        if detector is None:
+            if face_classifier is None or eye_classifier is None:
+                cv2_data = getattr(cv2, "data", None)
+                cascade_root = str(getattr(cv2_data, "haarcascades", ""))
+                if not cascade_root:
+                    raise Cv2FallbackTrackingError(
+                        "OpenCV Haar cascade directory is unavailable"
                     )
-                )
-            if eye_classifier is None:
-                eyeglasses_path = os.path.join(
-                    cascade_root,
-                    "haarcascade_eye_tree_eyeglasses.xml",
-                )
-                eye_path = (
-                    eyeglasses_path
-                    if os.path.exists(eyeglasses_path)
-                    else os.path.join(cascade_root, "haarcascade_eye.xml")
-                )
-                eye_classifier = cv2.CascadeClassifier(eye_path)
-
-        self._detector = CascadeFaceDetector(
-            face_classifier,
-            eye_classifier,
-        )
+                if face_classifier is None:
+                    face_classifier = cv2.CascadeClassifier(
+                        os.path.join(
+                            cascade_root,
+                            "haarcascade_frontalface_default.xml",
+                        )
+                    )
+                if eye_classifier is None:
+                    eyeglasses_path = os.path.join(
+                        cascade_root,
+                        "haarcascade_eye_tree_eyeglasses.xml",
+                    )
+                    eye_path = (
+                        eyeglasses_path
+                        if os.path.exists(eyeglasses_path)
+                        else os.path.join(cascade_root, "haarcascade_eye.xml")
+                    )
+                    eye_classifier = cv2.CascadeClassifier(eye_path)
+            detector = CascadeFaceDetector(
+                face_classifier,
+                eye_classifier,
+            )
+        self._detector = detector
         self._motion = motion_tracker or SparseFaceMotionTracker()
+
+    @property
+    def cascade_misses(self) -> int:
+        return self._cascade_misses
+
+    @property
+    def last_motion_error(self) -> str:
+        return self._last_motion_error
 
     def set_calibration(
         self,
@@ -131,7 +153,11 @@ class FaceTracker:
     def reset_session(self) -> None:
         self._motion.reset()
         self._frame_index = 0
+        self._cascade_misses = 0
+        self._last_motion_error = ""
         self._eye_ratio = None
+        self._eye_center_ratio = None
+        self._eye_roll_deg = 0.0
         self._eye_age_frames = 0
 
     def _tracking_gray(
@@ -163,18 +189,37 @@ class FaceTracker:
         distance = math.dist(predicted.center, detected.center)
         return distance <= max(predicted.width, predicted.height) * 0.75
 
+    @staticmethod
+    def _propagated_eyes(
+        predicted: FaceObservation,
+        corrected_box: FaceBox,
+    ) -> EyePair | None:
+        eyes = predicted.eyes
+        if eyes is None:
+            return None
+        scale_x = corrected_box.width / max(predicted.box.width, 1e-6)
+        scale_y = corrected_box.height / max(predicted.box.height, 1e-6)
+        scale = min(1.25, max(0.75, math.sqrt(scale_x * scale_y)))
+        return eyes.transformed(
+            predicted.box.center,
+            corrected_box.center,
+            scale,
+        )
+
     def _corrected_detection(
         self,
         predicted: FaceObservation | None,
         detected: FaceObservation,
         gray: np.ndarray,
     ) -> FaceObservation:
-        if predicted is None or not self._boxes_are_compatible(
+        compatible = predicted is not None and self._boxes_are_compatible(
             predicted.box,
             detected.box,
-        ):
+        )
+        if not compatible:
             corrected_box = detected.box
         else:
+            assert predicted is not None
             corrected_box = blend_boxes(
                 predicted.box,
                 detected.box,
@@ -182,17 +227,34 @@ class FaceTracker:
             )
             clipped = corrected_box.clipped(gray.shape[1], gray.shape[0])
             corrected_box = detected.box if clipped is None else clipped
+
+        if detected.eyes is not None:
+            eyes = detected.eyes
+            source = "cascade"
+        elif compatible and predicted is not None:
+            eyes = self._propagated_eyes(predicted, corrected_box)
+            source = "cascade_flow_eyes" if eyes is not None else "cascade"
+        else:
+            eyes = None
+            source = "cascade"
         return FaceObservation(
             corrected_box,
-            detected.eyes,
-            "cascade",
+            eyes,
+            source,
             detected.quality,
         )
 
     def _observe(self, gray: np.ndarray) -> FaceObservation | None:
-        predicted = self._motion.track(gray)
+        try:
+            predicted = self._motion.track(gray)
+        except Cv2FallbackTrackingError as error:
+            self._last_motion_error = f"{type(error).__name__}: {error}"
+            self._motion.reset()
+            predicted = None
+
         detect_due = (
             predicted is None
+            or predicted.quality < self._minimum_flow_quality
             or self._frame_index % self._detection_interval_frames == 0
         )
         if not detect_due:
@@ -201,6 +263,7 @@ class FaceTracker:
         prior = predicted.box if predicted is not None else self._motion.current_box
         full_scan_due = (
             predicted is None
+            or predicted.quality < self._minimum_flow_quality * 0.5
             or self._frame_index % self._full_scan_interval_frames == 0
         )
         detected = self._detector.detect(
@@ -209,33 +272,79 @@ class FaceTracker:
             allow_full_scan=full_scan_due,
         )
         if detected is None:
-            if predicted is not None:
+            self._cascade_misses += 1
+            if (
+                predicted is not None
+                and self._cascade_misses <= self._maximum_cascade_misses
+            ):
                 return predicted
             self._motion.reset()
             return None
 
+        self._cascade_misses = 0
         corrected = self._corrected_detection(predicted, detected, gray)
-        self._motion.initialize(
-            gray,
-            corrected.box,
-            corrected.eyes,
-        )
+        try:
+            self._motion.initialize(
+                gray,
+                corrected.box,
+                corrected.eyes,
+            )
+        except Cv2FallbackTrackingError as error:
+            self._last_motion_error = f"{type(error).__name__}: {error}"
+            self._motion.reset()
+        else:
+            self._last_motion_error = ""
         return corrected
+
+    def _clear_eye_memory(self) -> None:
+        self._eye_ratio = None
+        self._eye_center_ratio = None
+        self._eye_roll_deg = 0.0
+
+    def _remember_fresh_eyes(
+        self,
+        observation: FaceObservation,
+        eyes: EyePair,
+    ) -> None:
+        box = observation.box
+        midpoint = eyes.midpoint
+        self._eye_ratio = eyes.separation_px / max(box.width, 1.0)
+        self._eye_center_ratio = (
+            (midpoint[0] - box.x) / max(box.width, 1.0),
+            (midpoint[1] - box.y) / max(box.height, 1.0),
+        )
+        self._eye_roll_deg = eyes.roll_deg
+        self._eye_age_frames = 0
+
+    def _synthetic_eyes(self, box: FaceBox) -> EyePair | None:
+        if self._eye_ratio is None or self._eye_center_ratio is None:
+            return None
+        center_x = box.x + self._eye_center_ratio[0] * box.width
+        center_y = box.y + self._eye_center_ratio[1] * box.height
+        separation = self._eye_ratio * box.width
+        angle = math.radians(self._eye_roll_deg)
+        half_x = math.cos(angle) * separation * 0.5
+        half_y = math.sin(angle) * separation * 0.5
+        return EyePair(
+            (center_x - half_x, center_y - half_y),
+            (center_x + half_x, center_y + half_y),
+        )
 
     def _usable_eyes(self, observation: FaceObservation) -> EyePair | None:
         eyes = observation.eyes
         if eyes is not None and observation.source == "cascade":
             ratio = eyes.separation_px / max(observation.box.width, 1.0)
             if 0.18 <= ratio <= 0.78:
-                self._eye_ratio = ratio
-                self._eye_age_frames = 0
+                self._remember_fresh_eyes(observation, eyes)
                 return eyes
 
         self._eye_age_frames += 1
         if self._eye_age_frames > self._eye_track_hold_frames:
-            self._eye_ratio = None
+            self._clear_eye_memory()
             return None
-        return eyes
+        if eyes is not None:
+            return eyes
+        return self._synthetic_eyes(observation.box)
 
     @staticmethod
     def _original_box(box: FaceBox, scale: float) -> FaceBox:
@@ -289,10 +398,6 @@ class FaceTracker:
                 if observation.source == "cascade"
                 else 0.55 + 0.12 * observation.quality
             )
-        elif self._eye_ratio is not None:
-            ipd_px = self._eye_ratio * box.width
-            center_x_px, center_y_px = box.center
-            confidence = 0.52 if observation.source == "cascade" else 0.46
         else:
             center_x_px, center_y_px = box.center
             confidence = 0.43 if observation.source == "cascade" else 0.38
@@ -359,7 +464,7 @@ class FaceTracker:
         if observation is None:
             self._eye_age_frames += 1
             if self._eye_age_frames > self._eye_track_hold_frames:
-                self._eye_ratio = None
+                self._clear_eye_memory()
             return None
         return self._pose_from_observation(
             observation,
