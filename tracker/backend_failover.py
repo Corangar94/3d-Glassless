@@ -46,6 +46,7 @@ class BackendFailoverSnapshot:
     retry_in_ms: int | None
     backend_transition_id: int
     pose_transition_active: bool
+    pose_transition_preserves_position: bool
 
 
 class AutoFailoverFaceTracker:
@@ -151,8 +152,12 @@ class AutoFailoverFaceTracker:
         return result
 
     def _begin_backend_transition(self, capture_timestamp_ms: int) -> None:
-        self._backend_transition_id = mark_backend_transition()
-        self._pose_bridge.begin_transition(capture_timestamp_ms)
+        preserve_position = self._pose_bridge.begin_transition(
+            capture_timestamp_ms
+        )
+        self._backend_transition_id = mark_backend_transition(
+            preserve_position=preserve_position
+        )
 
     def _apply_calibration(self, tracker: object) -> None:
         if not self._calibration:
@@ -413,6 +418,9 @@ class AutoFailoverFaceTracker:
             retry_in_ms=retry_in_ms,
             backend_transition_id=self._backend_transition_id,
             pose_transition_active=self._pose_bridge.transition_active,
+            pose_transition_preserves_position=(
+                self._pose_bridge.transition_preserves_position
+            ),
         )
 
     def close(self) -> None:
