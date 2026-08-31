@@ -11,7 +11,6 @@ import numpy as np
 
 from tracker.camera_geometry import CameraGeometry
 from tracker.cv2_temporal_tracker import (
-    CascadeFaceDetector,
     Cv2FallbackTrackingError,
     EyePair,
     FaceBox,
@@ -21,6 +20,10 @@ from tracker.cv2_temporal_tracker import (
     box_iou,
 )
 from tracker.pose import HeadPosition, monotonic_ms, normalize_wire_timestamp
+from tracker.scheduled_cascade_detector import (
+    CascadeDetectorCallAdapter,
+    ScheduledCascadeFaceDetector,
+)
 
 
 class FaceTracker:
@@ -50,7 +53,7 @@ class FaceTracker:
         cascade_correction_alpha: float = 0.70,
         face_classifier: object | None = None,
         eye_classifier: object | None = None,
-        detector: CascadeFaceDetector | None = None,
+        detector: object | None = None,
         motion_tracker: SparseFaceMotionTracker | None = None,
         **_options: object,
     ) -> None:
@@ -120,11 +123,11 @@ class FaceTracker:
                         else os.path.join(cascade_root, "haarcascade_eye.xml")
                     )
                     eye_classifier = cv2.CascadeClassifier(eye_path)
-            detector = CascadeFaceDetector(
+            detector = ScheduledCascadeFaceDetector(
                 face_classifier,
                 eye_classifier,
             )
-        self._detector = detector
+        self._detector = CascadeDetectorCallAdapter(detector)
         self._motion = motion_tracker or SparseFaceMotionTracker()
 
     @property
@@ -176,7 +179,10 @@ class FaceTracker:
                 ),
                 interpolation=cv2.INTER_AREA,
             )
-        gray = cv2.equalizeHist(gray)
+        # Optical flow receives a stable raw luminance image. Histogram
+        # equalization is deferred until a cascade pass is actually due, saving
+        # that full-frame operation on the common flow-only frames and avoiding
+        # frame-to-frame photometric changes in Lucas-Kanade tracking.
         return np.ascontiguousarray(gray), scale
 
     @staticmethod
@@ -261,15 +267,19 @@ class FaceTracker:
             return predicted
 
         prior = predicted.box if predicted is not None else self._motion.current_box
-        full_scan_due = (
+        force_full_scan = (
             predicted is None
             or predicted.quality < self._minimum_flow_quality * 0.5
             or self._frame_index % self._full_scan_interval_frames == 0
         )
+        cascade_gray = np.ascontiguousarray(cv2.equalizeHist(gray))
         detected = self._detector.detect(
-            gray,
+            cascade_gray,
             prior=prior,
-            allow_full_scan=full_scan_due,
+            # A scheduled ROI miss should reacquire on the same frame rather
+            # than waiting for the next full-scan interval.
+            allow_full_scan=True,
+            force_full_scan=force_full_scan,
         )
         if detected is None:
             self._cascade_misses += 1
@@ -284,6 +294,8 @@ class FaceTracker:
         self._cascade_misses = 0
         corrected = self._corrected_detection(predicted, detected, gray)
         try:
+            # Seed optical flow from the raw grayscale image, not the
+            # cascade-only equalized copy.
             self._motion.initialize(
                 gray,
                 corrected.box,
