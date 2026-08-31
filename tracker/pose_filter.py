@@ -78,6 +78,15 @@ class ConstantVelocityFilter1D:
             False,
         )
 
+    def reset_dynamics(self) -> None:
+        """Preserve the latest position while discarding source-specific motion."""
+        state = self._state
+        state.velocity = 0.0
+        state.p00 = 4.0
+        state.p01 = 0.0
+        state.p10 = 0.0
+        state.p11 = 25.0
+
     def set_measurement_noise(self, value: float) -> None:
         if value <= 0.0 or not math.isfinite(value):
             raise ValueError(
@@ -262,6 +271,17 @@ class AdaptivePoseFilter:
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
 
+    def _reset_dynamics(self) -> None:
+        for axis in (
+            self._x,
+            self._y,
+            self._z,
+            self._yaw,
+            self._pitch,
+            self._roll,
+        ):
+            axis.reset_dynamics()
+
     def reset(self) -> None:
         self._reset_state()
         self._backend_transition_generation = (
@@ -272,9 +292,9 @@ class AdaptivePoseFilter:
         generation = current_backend_transition_generation()
         if generation == self._backend_transition_generation:
             return
-        # Backend-specific velocity and covariance are not transferable. Reset
-        # before accepting or predicting the next pose from the new source.
-        self._reset_state()
+        # Position remains meaningful across calibrated tracker backends, but
+        # velocity/covariance are source-specific and can create an overshoot.
+        self._reset_dynamics()
         self._backend_transition_generation = generation
 
     def _prediction_timestamp(self, capture_ms: int, publish_ms: int) -> int:
