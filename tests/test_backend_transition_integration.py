@@ -76,15 +76,17 @@ def test_runtime_failover_starts_at_recent_primary_pose_then_converges():
     first = tracker.process_frame(object(), 1000)
     switched = tracker.process_frame(object(), 1033)
     halfway = tracker.process_frame(object(), 1258)
+    snapshot = tracker.snapshot(1258)
 
     assert first.x_cm == pytest.approx(10.0)
     assert switched.x_cm == pytest.approx(10.0)
     assert halfway.x_cm == pytest.approx(5.0)
     assert tracker.backend_transition_id == 1
-    assert tracker.snapshot(1258).pose_transition_active
+    assert snapshot.pose_transition_active
+    assert snapshot.pose_transition_preserves_position
 
 
-def test_stale_primary_pose_is_not_blended_after_long_watchdog_stall():
+def test_stale_primary_pose_is_not_blended_or_preserved_after_long_stall():
     primary = FakeTracker(
         _pose(10.0, 1000),
         AsyncInferenceFailure("callback stalled"),
@@ -96,12 +98,19 @@ def test_stale_primary_pose_is_not_blended_after_long_watchdog_stall():
         policy=BackendFailoverPolicy(max_primary_retries=0),
         logger=lambda _message: None,
     )
+    filter_ = AdaptivePoseFilter()
 
-    tracker.process_frame(object(), 1000)
+    first = tracker.process_frame(object(), 1000)
+    filter_.update_pose(first, publish_timestamp_ms=1000)
     result = tracker.process_frame(object(), 6000)
+    filtered = filter_.update_pose(result, publish_timestamp_ms=6000)
+    snapshot = tracker.snapshot(6000)
 
     assert result.x_cm == pytest.approx(0.0)
-    assert not tracker.snapshot(6000).pose_transition_active
+    assert filtered.x_cm == pytest.approx(0.0)
+    assert filtered.vx_cm_s == pytest.approx(0.0)
+    assert not snapshot.pose_transition_active
+    assert not snapshot.pose_transition_preserves_position
 
 
 def test_backend_switch_resets_filter_velocity_before_bridged_pose_update():
@@ -165,6 +174,7 @@ def test_promotion_marks_second_transition_and_aligns_candidate_pose():
     snapshot = tracker.snapshot(1001)
     assert snapshot.backend_transition_id == 2
     assert snapshot.pose_transition_active
+    assert snapshot.pose_transition_preserves_position
 
 
 def test_camera_session_reset_drops_old_bridge_source():
