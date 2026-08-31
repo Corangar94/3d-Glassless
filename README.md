@@ -119,6 +119,13 @@ The default `auto` tracker mode now recovers inside the tracker process before t
 - after the bounded probe is exhausted, OpenCV remains active until the tracker process is intentionally restarted;
 - explicit `mediapipe` and `cv2` selections remain strict and never switch automatically.
 
+Backend transitions are also stabilized perceptually:
+
+- a recent source pose is aligned to the replacement backend and the bounded offset decays over 450 ms;
+- a source older than 750 ms is not carried forward, because the view was already stale or paused;
+- the current filtered position is preserved while backend-specific velocity and covariance are cleared;
+- the same transition treatment applies when OpenCV is promoted back to a healthy MediaPipe instance.
+
 The backend policy and MediaPipe health thresholds are configurable:
 
 ```yaml

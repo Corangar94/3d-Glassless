@@ -39,6 +39,8 @@ hidden_imports = [
     "tracker.main",
     "tracker.backend_factory",
     "tracker.backend_failover",
+    "tracker.backend_pose_bridge",
+    "tracker.backend_transition_state",
     "tracker.async_inference_watchdog",
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",

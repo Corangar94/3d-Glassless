@@ -5,7 +5,17 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from tracker.async_inference_watchdog import AsyncInferenceFailure
-from tracker.pose import elapsed_u32_ms, monotonic_ms, normalize_wire_timestamp
+from tracker.backend_pose_bridge import (
+    BackendPoseContinuityBridge,
+    PoseContinuityPolicy,
+)
+from tracker.backend_transition_state import mark_backend_transition
+from tracker.pose import (
+    HeadPosition,
+    elapsed_u32_ms,
+    monotonic_ms,
+    normalize_wire_timestamp,
+)
 
 
 TrackerFactory = Callable[[], object]
@@ -34,6 +44,9 @@ class BackendFailoverSnapshot:
     primary_candidate_active: bool
     last_failure: str
     retry_in_ms: int | None
+    backend_transition_id: int
+    pose_transition_active: bool
+    pose_transition_preserves_position: bool
 
 
 class AutoFailoverFaceTracker:
@@ -51,6 +64,7 @@ class AutoFailoverFaceTracker:
         primary_factory: TrackerFactory,
         fallback_factory: TrackerFactory,
         policy: BackendFailoverPolicy = BackendFailoverPolicy(),
+        pose_continuity_policy: PoseContinuityPolicy = PoseContinuityPolicy(),
         logger: LogFunction = print,
         primary_failure_types: tuple[type[BaseException], ...] = (
             AsyncInferenceFailure,
@@ -71,6 +85,10 @@ class AutoFailoverFaceTracker:
         self._failover_count = 0
         self._last_failure = ""
         self._calibration: dict[str, float] = {}
+        self._pose_bridge = BackendPoseContinuityBridge(
+            pose_continuity_policy
+        )
+        self._backend_transition_id = 0
         self._closed = False
 
         try:
@@ -89,6 +107,10 @@ class AutoFailoverFaceTracker:
     @property
     def active_backend(self) -> str:
         return self._active_backend
+
+    @property
+    def backend_transition_id(self) -> int:
+        return self._backend_transition_id
 
     @property
     def policy(self) -> BackendFailoverPolicy:
@@ -118,6 +140,23 @@ class AutoFailoverFaceTracker:
         return process_frame(
             frame,
             capture_timestamp_ms=capture_timestamp_ms,
+        )
+
+    def _bridge_result(
+        self,
+        result: Any,
+        capture_timestamp_ms: int,
+    ) -> Any:
+        if result is None or isinstance(result, HeadPosition):
+            return self._pose_bridge.apply(result, capture_timestamp_ms)
+        return result
+
+    def _begin_backend_transition(self, capture_timestamp_ms: int) -> None:
+        preserve_position = self._pose_bridge.begin_transition(
+            capture_timestamp_ms
+        )
+        self._backend_transition_id = mark_backend_transition(
+            preserve_position=preserve_position
         )
 
     def _apply_calibration(self, tracker: object) -> None:
@@ -174,6 +213,7 @@ class AutoFailoverFaceTracker:
         )
         self._failover_count += 1
         self._last_failure = self._error_text(error)
+        self._begin_backend_transition(capture_timestamp_ms)
         self._safe_close(failed_candidate)
         self._safe_close(failed_primary)
         self._log(
@@ -272,6 +312,7 @@ class AutoFailoverFaceTracker:
         self._active_backend = "mediapipe"
         self._primary_candidate = None
         self._primary_failed_at_ms = None
+        self._begin_backend_transition(capture_timestamp_ms)
         self._safe_close(fallback)
         self._log("MediaPipe recovery proved healthy; promoted from OpenCV")
         return True, result
@@ -291,17 +332,28 @@ class AutoFailoverFaceTracker:
 
         if self._active_backend == "mediapipe":
             try:
-                return self._process(self._active, frame_bgr, timestamp)
+                primary_result = self._process(
+                    self._active,
+                    frame_bgr,
+                    timestamp,
+                )
+                return self._bridge_result(primary_result, timestamp)
             except Exception as error:
                 if not isinstance(error, self._primary_failure_types):
                     raise
                 self._switch_to_fallback(error, timestamp)
-                return self._process(self._active, frame_bgr, timestamp)
+                fallback_result = self._process(
+                    self._active,
+                    frame_bgr,
+                    timestamp,
+                )
+                return self._bridge_result(fallback_result, timestamp)
 
-        fallback_result = self._process(self._active, frame_bgr, timestamp)
+        fallback_raw = self._process(self._active, frame_bgr, timestamp)
+        fallback_result = self._bridge_result(fallback_raw, timestamp)
         promoted, primary_result = self._probe_primary(frame_bgr, timestamp)
         if promoted and primary_result is not None:
-            return primary_result
+            return self._bridge_result(primary_result, timestamp)
         return fallback_result
 
     def set_calibration(
@@ -335,6 +387,7 @@ class AutoFailoverFaceTracker:
             reset_session = getattr(tracker, "reset_session", None)
             if callable(reset_session):
                 reset_session()
+        self._pose_bridge.reset()
 
     def snapshot(
         self,
@@ -363,6 +416,11 @@ class AutoFailoverFaceTracker:
             primary_candidate_active=self._primary_candidate is not None,
             last_failure=self._last_failure,
             retry_in_ms=retry_in_ms,
+            backend_transition_id=self._backend_transition_id,
+            pose_transition_active=self._pose_bridge.transition_active,
+            pose_transition_preserves_position=(
+                self._pose_bridge.transition_preserves_position
+            ),
         )
 
     def close(self) -> None:
@@ -376,6 +434,7 @@ class AutoFailoverFaceTracker:
             seen.add(id(tracker))
             self._safe_close(tracker)
         self._primary_candidate = None
+        self._pose_bridge.reset()
 
     def __enter__(self) -> "AutoFailoverFaceTracker":
         return self

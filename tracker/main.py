@@ -13,6 +13,7 @@ from tracker.backend_factory import (
     create_face_tracker,
     parse_backend_failover_policy,
 )
+from tracker.backend_transition_state import current_backend_transition_state
 from tracker.camera_control_retry import CameraControlLockRetry
 from tracker.camera_frame import CameraFrameFormatError, normalize_camera_frame
 from tracker.camera_geometry import CameraGeometry
@@ -407,6 +408,9 @@ class TrackingLoop:
         self._camera_reconnect = CameraReconnectBudget(
             camera_reconnect_policy or _DIRECT_LOOP_RECONNECT_POLICY
         )
+        self._backend_transition_generation = (
+            current_backend_transition_state().generation
+        )
 
     def _process_frame(
         self,
@@ -417,6 +421,23 @@ class TrackingLoop:
 
     def _supports_pose_filter(self) -> bool:
         return callable(getattr(type(self._smoother), "update_pose", None))
+
+    def _synchronize_tracker_backend_transition(self) -> None:
+        transition = current_backend_transition_state()
+        if transition.generation == self._backend_transition_generation:
+            return
+        self._last_raw_pos = None
+        self._last_measurement_s = None
+        if not self._supports_pose_filter():
+            reset_smoother = getattr(self._smoother, "reset", None)
+            if callable(reset_smoother):
+                reset_smoother()
+        if not transition.preserve_position:
+            self._last_face_ms = None
+            neutral = self._neutral_pose()
+            self._last_output_pose = neutral
+            self._last_smoothed = neutral.xyz
+        self._backend_transition_generation = transition.generation
 
     def _update_filter(self, pose: HeadPosition) -> FilteredPose:
         if self._supports_pose_filter():
@@ -579,6 +600,9 @@ class TrackingLoop:
         self._last_smoothed = (0.0, 0.0, 60.0)
         self._last_raw_pos = None
         self._last_measurement_s = None
+        self._backend_transition_generation = (
+            current_backend_transition_state().generation
+        )
         timestamp_ms = monotonic_ms()
         neutral = self._neutral_pose(timestamp_ms)
         self._last_output_pose = neutral
@@ -747,6 +771,7 @@ class TrackingLoop:
                 measured = _validated_pose(
                     self._process_frame(frame, capture_timestamp_ms)
                 )
+                self._synchronize_tracker_backend_transition()
 
                 if measured is not None:
                     self._last_face_ms = time.monotonic() * 1000.0

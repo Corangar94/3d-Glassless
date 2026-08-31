@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from tracker.backend_transition_state import current_backend_transition_state
 from tracker.pose import (
     FilteredPose,
     HeadPosition,
@@ -74,6 +75,15 @@ class ConstantVelocityFilter1D:
             int(timestamp_ms) & _UINT32,
             False,
         )
+
+    def reset_dynamics(self) -> None:
+        """Preserve the latest position while discarding source-specific motion."""
+        state = self._state
+        state.velocity = 0.0
+        state.p00 = 4.0
+        state.p01 = 0.0
+        state.p10 = 0.0
+        state.p11 = 25.0
 
     def set_measurement_noise(self, value: float) -> None:
         if value <= 0.0 or not math.isfinite(value):
@@ -234,6 +244,9 @@ class AdaptivePoseFilter:
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
         self._synthetic_timestamp_ms = monotonic_ms()
+        self._backend_transition_generation = (
+            current_backend_transition_state().generation
+        )
 
     def set_measurement_noise(self, value: float) -> None:
         value = max(1e-6, float(value))
@@ -243,7 +256,7 @@ class AdaptivePoseFilter:
         for axis in (self._yaw, self._pitch, self._roll):
             axis.set_measurement_noise(max(0.2, value * 4.0))
 
-    def reset(self) -> None:
+    def _reset_state(self) -> None:
         for axis in (
             self._x,
             self._y,
@@ -255,6 +268,36 @@ class AdaptivePoseFilter:
         self._z.reset(60.0)
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
+
+    def _reset_dynamics(self) -> None:
+        for axis in (
+            self._x,
+            self._y,
+            self._z,
+            self._yaw,
+            self._pitch,
+            self._roll,
+        ):
+            axis.reset_dynamics()
+
+    def reset(self) -> None:
+        self._reset_state()
+        self._backend_transition_generation = (
+            current_backend_transition_state().generation
+        )
+
+    def _synchronize_backend_transition(self) -> None:
+        transition = current_backend_transition_state()
+        if transition.generation == self._backend_transition_generation:
+            return
+        if transition.preserve_position:
+            # Position remains meaningful across fresh calibrated backends, but
+            # velocity/covariance are source-specific and can create overshoot.
+            self._reset_dynamics()
+        else:
+            # A stale/absent source must not be preserved into a new backend.
+            self._reset_state()
+        self._backend_transition_generation = transition.generation
 
     def _prediction_timestamp(self, capture_ms: int, publish_ms: int) -> int:
         measurement_age_ms = (
@@ -274,6 +317,7 @@ class AdaptivePoseFilter:
         *,
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
+        self._synchronize_backend_transition()
         capture_ms = (
             normalize_wire_timestamp(pose.capture_timestamp_ms)
             if pose.capture_timestamp_ms
@@ -300,6 +344,7 @@ class AdaptivePoseFilter:
         *,
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
+        self._synchronize_backend_transition()
         publish_ms = (
             monotonic_ms()
             if publish_timestamp_ms is None
