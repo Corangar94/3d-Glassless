@@ -56,6 +56,17 @@ def evaluate_tracker_backend_status(
         return problems, warnings
 
     if (
+        configured != "unknown"
+        and status.configured_mode != "unknown"
+        and status.configured_mode != configured
+    ):
+        problems.append(
+            "running tracker mode "
+            f"{status.configured_mode} does not match configured mode "
+            f"{configured}; restart tracking to apply the configuration"
+        )
+
+    if (
         configured in {"mediapipe", "cv2"}
         and status.active_backend != configured
     ):
