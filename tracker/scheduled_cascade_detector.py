@@ -55,9 +55,9 @@ class CascadeDetectorCallAdapter:
     """Resolve optional ``force_full_scan`` support once, before any frames.
 
     Project detectors use the new explicit keyword. Legacy injected detectors
-    are kept compatible without an exception-driven retry: a forced scan is
-    requested by omitting the prior, which preserves their historical API while
-    ensuring they cannot remain trapped in an obsolete ROI.
+    are kept compatible without an exception-driven retry. They retain their
+    historical ROI cadence and receive a full-frame request only on frames that
+    are already classified as forced reacquisition frames.
     """
 
     def __init__(self, detector: object) -> None:
@@ -108,5 +108,5 @@ class CascadeDetectorCallAdapter:
         return self._detect(
             gray,
             prior=None if force_full_scan else prior,
-            allow_full_scan=True if force_full_scan else allow_full_scan,
+            allow_full_scan=force_full_scan,
         )
