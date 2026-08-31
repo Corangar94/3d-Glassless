@@ -75,11 +75,15 @@ def evaluate_tracker_backend_status(
             f"{status.active_backend} does not match strict configured backend "
             f"{configured}"
         )
-    elif configured == "auto" and status.active_backend == "cv2":
+
+    auto_runtime = (
+        configured == "auto" and status.configured_mode == "auto"
+    )
+    if auto_runtime and status.active_backend == "cv2":
         reason = f": {status.last_failure}" if status.last_failure else ""
         warnings.append(f"tracker is using the OpenCV fallback{reason}")
 
-    if status.candidate_active:
+    if auto_runtime and status.candidate_active:
         age = (
             f"{status.candidate_age_ms}ms"
             if status.candidate_age_ms is not None
@@ -90,7 +94,11 @@ def evaluate_tracker_backend_status(
             f"({age}, probes={status.candidate_probe_count}, "
             f"healthy_callbacks={status.candidate_healthy_callbacks})"
         )
-    elif status.active_backend == "cv2" and status.retry_in_ms is not None:
+    elif (
+        auto_runtime
+        and status.active_backend == "cv2"
+        and status.retry_in_ms is not None
+    ):
         warnings.append(
             "MediaPipe shadow recovery retry is due in "
             f"{status.retry_in_ms}ms"
