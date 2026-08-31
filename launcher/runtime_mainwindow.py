@@ -63,8 +63,20 @@ class MainWindow(_BaseMainWindow):
         ):
             self._clear_tracker_backend_tile()
             return
-        status, fresh = read_tracker_backend_status()
-        label, tooltip = tracker_backend_tile_text(status, fresh=fresh)
+        try:
+            status, fresh = read_tracker_backend_status()
+            label, tooltip = tracker_backend_tile_text(
+                status,
+                fresh=fresh,
+            )
+        except Exception:
+            # The Qt health timer must remain alive even if a dynamically patched
+            # reader or unexpected platform boundary violates its fail-safe API.
+            status, fresh = None, False
+            label, tooltip = (
+                "Unavailable",
+                "Tracker backend status could not be read",
+            )
         self._tracker_backend_status = status
         self._tracker_backend_status_fresh = fresh
         self._tracker_backend_label = label
@@ -75,6 +87,8 @@ class MainWindow(_BaseMainWindow):
         super()._on_status(status)
         if status in {"stopped", "error"}:
             self._clear_tracker_backend_tile()
+        elif self._tracker_is_running():
+            self._refresh_tracker_backend_health()
         else:
             self._render_tracker_tile()
 
