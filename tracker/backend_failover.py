@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from tracker.async_inference_watchdog import AsyncInferenceFailure
-from tracker.pose import elapsed_u32_ms, normalize_wire_timestamp
+from tracker.pose import elapsed_u32_ms, monotonic_ms, normalize_wire_timestamp
 
 
 TrackerFactory = Callable[[], object]
@@ -283,8 +283,10 @@ class AutoFailoverFaceTracker:
     ) -> Any:
         if self._closed:
             raise RuntimeError("tracker backend controller is closed")
-        timestamp = normalize_wire_timestamp(
-            1 if capture_timestamp_ms is None else capture_timestamp_ms
+        timestamp = (
+            monotonic_ms()
+            if capture_timestamp_ms is None
+            else normalize_wire_timestamp(capture_timestamp_ms)
         )
 
         if self._active_backend == "mediapipe":
