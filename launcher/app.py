@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(0)
 
     config = _load_config(config_path)
-    from launcher.mainwindow import MainWindow
+    from launcher.runtime_mainwindow import MainWindow
 
     window = MainWindow(config=config, config_path=config_path)
     window.show()
