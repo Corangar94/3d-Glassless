@@ -10,6 +10,8 @@ from typing import Protocol
 import cv2
 import numpy as np
 
+from tracker.pose import elapsed_u32_ms, normalize_wire_timestamp
+
 
 @dataclass(frozen=True)
 class CameraQualitySample:
@@ -19,6 +21,7 @@ class CameraQualitySample:
     clipped_fraction: float
     sharpness: float
     frame_interval_ms: float | None
+    analyzed: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,7 +46,13 @@ class CameraLike(Protocol):
 
 
 class CameraQualityMonitor:
-    """Compute inexpensive camera-health metrics on downscaled grayscale frames."""
+    """Measure frame cadence continuously and image quality at a lower rate.
+
+    Cadence must use every delivered frame to remain trustworthy. Brightness,
+    clipping, and Laplacian sharpness change far more slowly and are relatively
+    expensive, so those image metrics are sampled on a wrap-safe interval while
+    the most recent values are carried through the frame-rate window.
+    """
 
     def __init__(
         self,
@@ -52,15 +61,33 @@ class CameraQualityMonitor:
         minimum_sharpness: float = 35.0,
         minimum_fps: float = 20.0,
         brightness_range: tuple[float, float] = (0.18, 0.88),
+        analysis_interval_ms: int = 80,
     ) -> None:
-        self._samples: deque[CameraQualitySample] = deque(maxlen=max(8, window_size))
+        interval = int(analysis_interval_ms)
+        if interval < 0:
+            raise ValueError("analysis_interval_ms cannot be negative")
+        self._samples: deque[CameraQualitySample] = deque(
+            maxlen=max(8, window_size)
+        )
         self._minimum_sharpness = max(0.0, float(minimum_sharpness))
         self._minimum_fps = max(1.0, float(minimum_fps))
         self._brightness_range = (
             min(brightness_range),
             max(brightness_range),
         )
+        self._analysis_interval_ms = interval
         self._last_timestamp_ms: int | None = None
+        self._last_analysis_timestamp_ms: int | None = None
+        self._last_image_metrics: tuple[float, float, float, float] | None = None
+        self._analysis_count = 0
+
+    @property
+    def image_analysis_count(self) -> int:
+        return self._analysis_count
+
+    @property
+    def analysis_interval_ms(self) -> int:
+        return self._analysis_interval_ms
 
     def reset(self) -> None:
         """Forget samples from a retired capture session.
@@ -73,37 +100,80 @@ class CameraQualityMonitor:
         """
         self._samples.clear()
         self._last_timestamp_ms = None
+        self._last_analysis_timestamp_ms = None
+        self._last_image_metrics = None
+        self._analysis_count = 0
 
-    def update(self, frame_bgr: np.ndarray, timestamp_ms: int) -> CameraQualityStatus:
-        if frame_bgr.ndim != 3 or frame_bgr.shape[0] <= 0 or frame_bgr.shape[1] <= 0:
-            raise ValueError("camera quality requires a non-empty BGR frame")
+    @staticmethod
+    def _analyze_frame(
+        frame_bgr: np.ndarray,
+    ) -> tuple[float, float, float, float]:
         height, width = frame_bgr.shape[:2]
         target_width = min(320, width)
-        target_height = max(1, int(round(height * target_width / max(1, width))))
+        target_height = max(
+            1,
+            int(round(height * target_width / max(1, width))),
+        )
         reduced = cv2.resize(
             frame_bgr,
             (target_width, target_height),
             interpolation=cv2.INTER_AREA,
         )
         gray = cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY)
-        brightness = float(np.mean(gray) / 255.0)
-        dark_fraction = float(np.mean(gray <= 10))
-        clipped_fraction = float(np.mean(gray >= 245))
-        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        return (
+            float(np.mean(gray) / 255.0),
+            float(np.mean(gray <= 10)),
+            float(np.mean(gray >= 245)),
+            float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+        )
+
+    def _analysis_due(self, timestamp_ms: int) -> bool:
+        previous = self._last_analysis_timestamp_ms
+        return (
+            self._last_image_metrics is None
+            or previous is None
+            or self._analysis_interval_ms == 0
+            or elapsed_u32_ms(timestamp_ms, previous)
+            >= self._analysis_interval_ms
+        )
+
+    def update(
+        self,
+        frame_bgr: np.ndarray,
+        timestamp_ms: int,
+    ) -> CameraQualityStatus:
+        if (
+            frame_bgr.ndim != 3
+            or frame_bgr.shape[0] <= 0
+            or frame_bgr.shape[1] <= 0
+        ):
+            raise ValueError("camera quality requires a non-empty BGR frame")
+        timestamp = normalize_wire_timestamp(timestamp_ms)
         interval = None
         if self._last_timestamp_ms is not None:
-            delta = (int(timestamp_ms) - self._last_timestamp_ms) & 0xFFFF_FFFF
+            delta = elapsed_u32_ms(timestamp, self._last_timestamp_ms)
             if 0 < delta < 10_000:
                 interval = float(delta)
-        self._last_timestamp_ms = int(timestamp_ms) & 0xFFFF_FFFF
+        self._last_timestamp_ms = timestamp
+
+        analyzed = self._analysis_due(timestamp)
+        if analyzed:
+            self._last_image_metrics = self._analyze_frame(frame_bgr)
+            self._last_analysis_timestamp_ms = timestamp
+            self._analysis_count += 1
+        metrics = self._last_image_metrics
+        assert metrics is not None
+        brightness, dark_fraction, clipped_fraction, sharpness = metrics
+
         self._samples.append(
             CameraQualitySample(
-                timestamp_ms=int(timestamp_ms) & 0xFFFF_FFFF,
+                timestamp_ms=timestamp,
                 brightness=brightness,
                 dark_fraction=dark_fraction,
                 clipped_fraction=clipped_fraction,
                 sharpness=sharpness,
                 frame_interval_ms=interval,
+                analyzed=analyzed,
             )
         )
         return self.status()
@@ -126,8 +196,12 @@ class CameraQualityMonitor:
         intervals = [
             sample.frame_interval_ms
             for sample in self._samples
-            if sample.frame_interval_ms is not None and sample.frame_interval_ms > 0.0
+            if sample.frame_interval_ms is not None
+            and sample.frame_interval_ms > 0.0
         ]
+        analysis_samples_in_window = sum(
+            1 for sample in self._samples if sample.analyzed
+        )
         brightness = float(statistics.median(brightness_values))
         brightness_jitter = (
             float(statistics.pstdev(brightness_values))
@@ -152,7 +226,11 @@ class CameraQualityMonitor:
             problems.append("soft or motion-blurred")
         if fps is not None and fps < self._minimum_fps:
             problems.append(f"camera cadence low ({fps:.1f} fps)")
-        if len(self._samples) >= 12 and brightness_jitter > 0.045:
+        if (
+            len(self._samples) >= 12
+            and analysis_samples_in_window >= 3
+            and brightness_jitter > 0.045
+        ):
             problems.append("exposure is hunting")
         severe = any(
             problem.startswith(
@@ -163,6 +241,7 @@ class CameraQualityMonitor:
         quality = "DANGER" if severe else ("WARN" if problems else "GOOD")
         stable_for_lock = (
             len(self._samples) >= min(30, self._samples.maxlen or 30)
+            and self._analysis_count >= 10
             and not problems
             and brightness_jitter <= 0.018
             and sharpness >= self._minimum_sharpness * 1.25
