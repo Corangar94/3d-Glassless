@@ -38,10 +38,14 @@ def test_callback_progress_reopens_submission_gate():
 
 
 def test_fully_caught_up_task_is_admitted_after_long_camera_pause():
-    watchdog = AsyncInferenceWatchdog()
+    watchdog = AsyncInferenceWatchdog(stall_timeout_ms=5000)
     watchdog.record_submission(1000)
     watchdog.record_callback(1000)
 
+    snapshot = watchdog.snapshot(30_000)
+    assert snapshot.callback_lag_ms == 0
+    assert snapshot.callback_age_ms == 0
+    watchdog.raise_if_unhealthy(30_000)
     assert watchdog.should_submit(30_000, max_backlog_ms=150)
 
 
