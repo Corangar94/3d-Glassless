@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from tracker.backend_transition_state import (
+    current_backend_transition_generation,
+)
 from tracker.pose import (
     FilteredPose,
     HeadPosition,
@@ -234,6 +237,9 @@ class AdaptivePoseFilter:
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
         self._synthetic_timestamp_ms = monotonic_ms()
+        self._backend_transition_generation = (
+            current_backend_transition_generation()
+        )
 
     def set_measurement_noise(self, value: float) -> None:
         value = max(1e-6, float(value))
@@ -243,7 +249,7 @@ class AdaptivePoseFilter:
         for axis in (self._yaw, self._pitch, self._roll):
             axis.set_measurement_noise(max(0.2, value * 4.0))
 
-    def reset(self) -> None:
+    def _reset_state(self) -> None:
         for axis in (
             self._x,
             self._y,
@@ -255,6 +261,21 @@ class AdaptivePoseFilter:
         self._z.reset(60.0)
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
+
+    def reset(self) -> None:
+        self._reset_state()
+        self._backend_transition_generation = (
+            current_backend_transition_generation()
+        )
+
+    def _synchronize_backend_transition(self) -> None:
+        generation = current_backend_transition_generation()
+        if generation == self._backend_transition_generation:
+            return
+        # Backend-specific velocity and covariance are not transferable. Reset
+        # before accepting or predicting the next pose from the new source.
+        self._reset_state()
+        self._backend_transition_generation = generation
 
     def _prediction_timestamp(self, capture_ms: int, publish_ms: int) -> int:
         measurement_age_ms = (
@@ -274,6 +295,7 @@ class AdaptivePoseFilter:
         *,
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
+        self._synchronize_backend_transition()
         capture_ms = (
             normalize_wire_timestamp(pose.capture_timestamp_ms)
             if pose.capture_timestamp_ms
@@ -300,6 +322,7 @@ class AdaptivePoseFilter:
         *,
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
+        self._synchronize_backend_transition()
         publish_ms = (
             monotonic_ms()
             if publish_timestamp_ms is None
