@@ -193,10 +193,11 @@ def tracker_backend_tile_text(
         return "Unavailable", "Tracker backend status mapping is unavailable"
     if not fresh:
         return "Stale", f"Backend status is {status.age_ms()} ms old"
-    if status.candidate_active:
+    auto_runtime = status.configured_mode == "auto"
+    if auto_runtime and status.candidate_active:
         label = f"OpenCV + probe {status.candidate_healthy_callbacks}"
     elif status.active_backend == "cv2":
-        label = "OpenCV fallback"
+        label = "OpenCV fallback" if auto_runtime else "OpenCV"
     elif status.active_backend == "mediapipe":
         label = "MediaPipe"
     else:
