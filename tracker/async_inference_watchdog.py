@@ -16,6 +16,7 @@ class AsyncInferenceSnapshot:
     last_callback_ms: int | None
     consecutive_submission_errors: int
     consecutive_callback_errors: int
+    consecutive_successful_callbacks: int
     callback_lag_ms: int
     last_error: str
 
@@ -45,6 +46,7 @@ class AsyncInferenceWatchdog:
         self._last_callback_ms: int | None = None
         self._consecutive_submission_errors = 0
         self._consecutive_callback_errors = 0
+        self._consecutive_successful_callbacks = 0
         self._last_error = ""
 
     @property
@@ -74,6 +76,7 @@ class AsyncInferenceWatchdog:
             self._last_callback_ms = None
             self._consecutive_submission_errors = 0
             self._consecutive_callback_errors = 0
+            self._consecutive_successful_callbacks = 0
             self._last_error = ""
 
     def record_submission(self, timestamp_ms: int) -> None:
@@ -87,6 +90,9 @@ class AsyncInferenceWatchdog:
     def record_submission_error(self, error: BaseException) -> None:
         with self._lock:
             self._consecutive_submission_errors += 1
+            # A rejected submission breaks the candidate recovery streak even
+            # when earlier callbacks were healthy.
+            self._consecutive_successful_callbacks = 0
             self._last_error = self._error_text("submission", error)
 
     def record_callback(
@@ -97,15 +103,19 @@ class AsyncInferenceWatchdog:
     ) -> None:
         timestamp = self._timestamp(timestamp_ms)
         with self._lock:
-            if (
+            progressed = (
                 self._last_callback_ms is None
                 or timestamp > self._last_callback_ms
-            ):
+            )
+            if progressed:
                 self._last_callback_ms = timestamp
             if error is None:
                 self._consecutive_callback_errors = 0
+                if progressed:
+                    self._consecutive_successful_callbacks += 1
             else:
                 self._consecutive_callback_errors += 1
+                self._consecutive_successful_callbacks = 0
                 self._last_error = self._error_text("callback", error)
 
     def snapshot(self) -> AsyncInferenceSnapshot:
@@ -128,6 +138,9 @@ class AsyncInferenceWatchdog:
                     self._consecutive_submission_errors
                 ),
                 consecutive_callback_errors=self._consecutive_callback_errors,
+                consecutive_successful_callbacks=(
+                    self._consecutive_successful_callbacks
+                ),
                 callback_lag_ms=callback_lag,
                 last_error=self._last_error,
             )
