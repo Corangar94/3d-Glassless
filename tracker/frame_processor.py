@@ -10,6 +10,7 @@ from tracker.backend_status_shared_memory import (
     TrackerBackendStatusPublisher,
     make_tracker_backend_status_publisher,
 )
+from tracker.pose import monotonic_ms
 
 
 class FrameCallMode(str, Enum):
@@ -73,12 +74,13 @@ class FrameProcessorAdapter:
         process_frame = getattr(tracker, "process_frame", None)
         if not callable(process_frame):
             raise TypeError("tracker.process_frame must be callable")
+        publisher = make_tracker_backend_status_publisher(tracker)
+        if publisher is not None:
+            publisher.publish(monotonic_ms())
         return cls(
             process_frame=process_frame,
             mode=resolve_frame_call_mode(process_frame),
-            backend_status_publisher=(
-                make_tracker_backend_status_publisher(tracker)
-            ),
+            backend_status_publisher=publisher,
         )
 
     def __call__(self, frame: object, capture_timestamp_ms: int) -> Any:
