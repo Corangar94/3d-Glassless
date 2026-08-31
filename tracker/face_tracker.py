@@ -124,15 +124,20 @@ class FaceTracker:
         camera_geometry: CameraGeometry | None = None,
         async_stall_timeout_ms: int = 5000,
         async_max_consecutive_errors: int = 3,
+        async_max_backlog_ms: int = 150,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
+        backlog_ms = int(async_max_backlog_ms)
+        if backlog_ms < 0:
+            raise ValueError("async_max_backlog_ms cannot be negative")
         self._real_ipd_cm = float(real_ipd_cm)
         self._screen_width_cm = float(screen_width_cm)
         self._screen_height_cm = float(screen_height_cm)
         self._camera_fov_deg = float(camera_fov_deg)
         self._camera_geometry = camera_geometry
         self._async_mode = bool(async_mode)
+        self._async_max_backlog_ms = backlog_ms
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms: int | None = None
@@ -349,6 +354,13 @@ class FaceTracker:
             self._last_delivered_timestamp_ms = pose.capture_timestamp_ms
             return pose
 
+    @staticmethod
+    def _mediapipe_image(frame_bgr: np.ndarray) -> mp.Image:
+        rgb = np.ascontiguousarray(
+            cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        )
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
     def process_frame(
         self,
         frame_bgr: np.ndarray,
@@ -361,34 +373,46 @@ class FaceTracker:
             else normalize_wire_timestamp(capture_timestamp_ms)
         )
 
-        rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         if self._async_mode:
             watchdog = self._async_watchdog
-            if watchdog is not None:
-                watchdog.raise_if_unhealthy()
             with self._lock:
                 media_timestamp_ms = expand_u32_timestamp(
                     wire_timestamp_ms,
                     self._last_submitted_wire_timestamp_ms,
                     self._last_submitted_media_timestamp_ms,
                 )
-                if media_timestamp_ms is not None:
-                    self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
-                    self._last_submitted_media_timestamp_ms = media_timestamp_ms
             if media_timestamp_ms is None:
                 return self._poll_latest()
+            if watchdog is not None:
+                watchdog.raise_if_unhealthy(media_timestamp_ms)
+                if not watchdog.should_submit(
+                    media_timestamp_ms,
+                    max_backlog_ms=self._async_max_backlog_ms,
+                ):
+                    watchdog.record_throttled_submission()
+                    return self._poll_latest()
+
+            # Conversion/allocation is deliberately after timestamp and backlog
+            # admission so duplicate, out-of-order, and overloaded inputs stay
+            # cheap. MediaPipe LIVE_STREAM may drop busy inputs itself; avoiding
+            # the work before that boundary reduces camera-thread CPU and GC.
+            image = self._mediapipe_image(frame_bgr)
             try:
                 self._landmarker.detect_async(image, media_timestamp_ms)
             except (RuntimeError, ValueError) as error:
                 if watchdog is not None:
                     watchdog.record_submission_error(error)
-                    watchdog.raise_if_unhealthy()
+                    watchdog.raise_if_unhealthy(media_timestamp_ms)
             else:
+                with self._lock:
+                    self._last_submitted_wire_timestamp_ms = wire_timestamp_ms
+                    self._last_submitted_media_timestamp_ms = media_timestamp_ms
                 if watchdog is not None:
                     watchdog.record_submission(media_timestamp_ms)
-                    watchdog.raise_if_unhealthy()
+                    watchdog.raise_if_unhealthy(media_timestamp_ms)
             return self._poll_latest()
+
+        image = self._mediapipe_image(frame_bgr)
         result = self._landmarker.detect(image)
         return self._pose_from_result(result, w, h, wire_timestamp_ms)
 
