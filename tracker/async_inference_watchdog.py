@@ -1,4 +1,4 @@
-"""Thread-safe health tracking for asynchronous inference callbacks."""
+"""Thread-safe health and backlog tracking for asynchronous inference."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,14 +18,20 @@ class AsyncInferenceSnapshot:
     consecutive_callback_errors: int
     consecutive_successful_callbacks: int
     callback_lag_ms: int
+    callback_age_ms: int
+    throttled_submission_count: int
     last_error: str
 
 
 class AsyncInferenceWatchdog:
-    """Detect repeated submission faults, callback faults, and callback stalls.
+    """Detect async faults/stalls and prevent unbounded submission backlog.
 
-    Timestamps are MediaPipe's expanded monotonic 64-bit millisecond timeline,
+    Timestamps use MediaPipe's expanded monotonic 64-bit millisecond timeline,
     so ordinary subtraction is valid and no uint32 wrap handling is needed here.
+    ``callback_lag_ms`` describes accepted submissions versus callback progress.
+    ``callback_age_ms`` can additionally advance against the current camera time,
+    allowing a true callback stall to surface even while new inputs are being
+    deliberately throttled.
     """
 
     def __init__(
@@ -47,6 +53,7 @@ class AsyncInferenceWatchdog:
         self._consecutive_submission_errors = 0
         self._consecutive_callback_errors = 0
         self._consecutive_successful_callbacks = 0
+        self._throttled_submission_count = 0
         self._last_error = ""
 
     @property
@@ -77,6 +84,7 @@ class AsyncInferenceWatchdog:
             self._consecutive_submission_errors = 0
             self._consecutive_callback_errors = 0
             self._consecutive_successful_callbacks = 0
+            self._throttled_submission_count = 0
             self._last_error = ""
 
     def record_submission(self, timestamp_ms: int) -> None:
@@ -86,6 +94,11 @@ class AsyncInferenceWatchdog:
                 self._first_submission_ms = timestamp
             self._last_submission_ms = timestamp
             self._consecutive_submission_errors = 0
+
+    def record_throttled_submission(self) -> None:
+        """Record a skipped input without treating it as an inference error."""
+        with self._lock:
+            self._throttled_submission_count += 1
 
     def record_submission_error(self, error: BaseException) -> None:
         with self._lock:
@@ -118,7 +131,47 @@ class AsyncInferenceWatchdog:
                 self._consecutive_successful_callbacks = 0
                 self._last_error = self._error_text("callback", error)
 
-    def snapshot(self) -> AsyncInferenceSnapshot:
+    def should_submit(
+        self,
+        current_timestamp_ms: int,
+        *,
+        max_backlog_ms: int,
+    ) -> bool:
+        """Return whether another input should be prepared and submitted.
+
+        A caught-up callback timeline always permits the next input, even after a
+        long camera pause. While at least one submission remains unacknowledged,
+        the prospective current-frame lag is bounded. This avoids paying image
+        conversion/allocation costs for inputs that the live-stream task would
+        likely discard while busy.
+        """
+        current = self._timestamp(current_timestamp_ms)
+        limit = int(max_backlog_ms)
+        if limit < 0:
+            raise ValueError("max_backlog_ms cannot be negative")
+        if limit == 0:
+            return True
+        with self._lock:
+            first = self._first_submission_ms
+            submitted = self._last_submission_ms
+            callback = self._last_callback_ms
+            if first is None or submitted is None:
+                return True
+            if callback is not None and callback >= submitted:
+                return True
+            anchor = callback if callback is not None else first
+            prospective_lag = max(0, current - anchor)
+            return prospective_lag < limit
+
+    def snapshot(
+        self,
+        current_timestamp_ms: int | None = None,
+    ) -> AsyncInferenceSnapshot:
+        current = (
+            None
+            if current_timestamp_ms is None
+            else self._timestamp(current_timestamp_ms)
+        )
         with self._lock:
             anchor = (
                 self._last_callback_ms
@@ -129,6 +182,14 @@ class AsyncInferenceWatchdog:
                 0
                 if anchor is None or self._last_submission_ms is None
                 else max(0, self._last_submission_ms - anchor)
+            )
+            age_endpoint = (
+                self._last_submission_ms if current is None else current
+            )
+            callback_age = (
+                0
+                if anchor is None or age_endpoint is None
+                else max(0, age_endpoint - anchor)
             )
             return AsyncInferenceSnapshot(
                 first_submission_ms=self._first_submission_ms,
@@ -142,11 +203,18 @@ class AsyncInferenceWatchdog:
                     self._consecutive_successful_callbacks
                 ),
                 callback_lag_ms=callback_lag,
+                callback_age_ms=callback_age,
+                throttled_submission_count=(
+                    self._throttled_submission_count
+                ),
                 last_error=self._last_error,
             )
 
-    def raise_if_unhealthy(self) -> None:
-        snapshot = self.snapshot()
+    def raise_if_unhealthy(
+        self,
+        current_timestamp_ms: int | None = None,
+    ) -> None:
+        snapshot = self.snapshot(current_timestamp_ms)
         if (
             snapshot.consecutive_submission_errors
             >= self._max_consecutive_errors
@@ -165,8 +233,8 @@ class AsyncInferenceWatchdog:
                 f"{snapshot.consecutive_callback_errors} consecutive times "
                 f"({snapshot.last_error})"
             )
-        if snapshot.callback_lag_ms >= self._stall_timeout_ms:
+        if snapshot.callback_age_ms >= self._stall_timeout_ms:
             raise AsyncInferenceFailure(
                 "MediaPipe async callbacks stalled for at least "
-                f"{snapshot.callback_lag_ms} ms"
+                f"{snapshot.callback_age_ms} ms"
             )
