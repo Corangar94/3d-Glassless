@@ -48,6 +48,7 @@ hidden_imports = [
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",
     "tracker.cv2_temporal_tracker",
+    "tracker.scheduled_cascade_detector",
     "tracker.camera_geometry",
     "tracker.camera_calibration",
     "tracker.calibration_runtime_sync",
