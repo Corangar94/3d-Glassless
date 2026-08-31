@@ -27,6 +27,7 @@ def _bare_tracker(
     tracker._camera_fov_deg = 90.0
     tracker._camera_geometry = None
     tracker._async_mode = True
+    tracker._async_max_backlog_ms = 150
     tracker._lock = threading.Lock()
     tracker._latest_pose = None
     tracker._last_delivered_timestamp_ms = None
@@ -176,12 +177,14 @@ def test_capture_session_reset_clears_watchdog_but_preserves_timestamp_timeline(
     tracker._last_submitted_media_timestamp_ms = 9000
     tracker._async_watchdog.record_submission(9000)
     tracker._async_watchdog.record_submission_error(RuntimeError("failed"))
+    tracker._async_watchdog.record_throttled_submission()
 
     tracker.reset_session()
 
     snapshot = tracker._async_watchdog.snapshot()
     assert snapshot.first_submission_ms is None
     assert snapshot.consecutive_submission_errors == 0
+    assert snapshot.throttled_submission_count == 0
     assert tracker._last_submitted_wire_timestamp_ms == 1234
     assert tracker._last_submitted_media_timestamp_ms == 9000
     assert tracker._minimum_result_media_timestamp_ms == 9000
