@@ -8,7 +8,7 @@ from tracker.backend_transition_state import (
     mark_backend_transition,
     reset_backend_transition_generation,
 )
-from tracker.pose import HeadPosition
+from tracker.pose import FilteredPose, HeadPosition
 from tracker.pose_filter import AdaptivePoseFilter
 
 
@@ -29,7 +29,7 @@ def _pose(x: float, timestamp: int) -> HeadPosition:
     )
 
 
-def _moving_filter() -> tuple[AdaptivePoseFilter, object]:
+def _moving_filter() -> tuple[AdaptivePoseFilter, FilteredPose]:
     filter_ = AdaptivePoseFilter(
         process_noise=2.0,
         measurement_noise=0.1,
@@ -84,12 +84,12 @@ def test_stale_transition_fully_resets_old_pose_and_motion():
 
 
 def test_no_transition_preserves_estimated_velocity():
-    filter_, _before = _moving_filter()
+    filter_, before = _moving_filter()
 
     output = filter_.predict(publish_timestamp_ms=1066)
 
     assert output.vx_cm_s > 0.0
-    assert output.x_cm > 3.0
+    assert output.x_cm > before.x_cm
 
 
 def test_manual_reset_acknowledges_current_transition_generation():
