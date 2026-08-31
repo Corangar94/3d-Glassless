@@ -22,6 +22,14 @@ from launcher.overlay_process import (
 )
 from launcher.game_profile_store import ProfileStoreError, load_profiles
 from launcher.game_profiles import evaluate_profile
+from launcher.tracker_backend_diagnostics import (
+    configured_tracker_backend,
+    evaluate_tracker_backend_status,
+    format_tracker_backend_status,
+    read_tracker_backend_status,
+    tracker_backend_status_to_dict,
+)
+from tracker.backend_status_shared_memory import TrackerBackendStatus
 from tracker.display_backends import (
     DisplayBackendRegistry,
     backend_code,
@@ -130,6 +138,9 @@ class DiagnosticsReport:
     profile_reason: str | None = None
     tracking_state: str | None = None
     tracking_state_fresh: bool = False
+    configured_tracker_backend: str = "auto"
+    tracker_backend_status: TrackerBackendStatus | None = None
+    tracker_backend_status_fresh: bool = False
 
 
 _SUMMARY_RE = re.compile(
@@ -222,6 +233,23 @@ def collect_diagnostics(
     display_inventory = _collect_display_inventory()
     vendor_managed_tracking = _calibration_tracking_mode(display_calibration) == "vendor_managed"
     tracking_state, tracking_state_fresh = _read_tracking_state()
+    configured_tracker_backend_id = configured_tracker_backend(config)
+    tracker_backend_status, tracker_backend_status_fresh = (
+        read_tracker_backend_status()
+    )
+    if (
+        tracker_backend_status is not None
+        or tracking_state is not None
+        or _tracker_shm_is_live(overlay_summary)
+        or require_face_tracking
+    ):
+        backend_problems, backend_warnings = evaluate_tracker_backend_status(
+            configured_tracker_backend_id,
+            tracker_backend_status,
+            tracker_backend_status_fresh,
+        )
+        problems.extend(backend_problems)
+        warnings.extend(backend_warnings)
     camera_index = _configured_camera_index(config)
     camera = (
         CameraProbe(index=camera_index, opened=True, frame_ok=True, inferred_from_tracker=True)
@@ -323,6 +351,9 @@ def collect_diagnostics(
         profile_reason=profile_reason,
         tracking_state=tracking_state,
         tracking_state_fresh=tracking_state_fresh,
+        configured_tracker_backend=configured_tracker_backend_id,
+        tracker_backend_status=tracker_backend_status,
+        tracker_backend_status_fresh=tracker_backend_status_fresh,
     )
 
 
@@ -346,20 +377,31 @@ def format_diagnostics_report(report: DiagnosticsReport) -> str:
             f"Face tracking: {report.tracking_state or 'unavailable'}"
             f"{'' if report.tracking_state_fresh else ' (stale)'}"
         ),
-        f"Overlay log: {report.overlay_log or 'not found'}",
-        f"Default backend: {report.default_backend_id}",
-        f"Configured backend: {report.configured_backend_id}",
-        f"Runtime backend: {report.runtime_backend_id or 'unavailable'}",
-        (
-            "Configured layout: "
-            f"{report.configured_backend_layout['columns']}x{report.configured_backend_layout['rows']} "
-            f"({report.configured_backend_layout['view_count']} views)"
-        ),
-        f"Display calibration: {report.display_calibration or 'none'}",
-        f"Experimental backends: {', '.join(report.experimental_backend_ids) or 'none'}",
-        "",
-        "Connected displays:",
+        f"Configured tracker backend: {report.configured_tracker_backend}",
     ]
+    lines.extend(
+        format_tracker_backend_status(
+            report.tracker_backend_status,
+            fresh=report.tracker_backend_status_fresh,
+        )
+    )
+    lines.extend(
+        [
+            f"Overlay log: {report.overlay_log or 'not found'}",
+            f"Default backend: {report.default_backend_id}",
+            f"Configured backend: {report.configured_backend_id}",
+            f"Runtime backend: {report.runtime_backend_id or 'unavailable'}",
+            (
+                "Configured layout: "
+                f"{report.configured_backend_layout['columns']}x{report.configured_backend_layout['rows']} "
+                f"({report.configured_backend_layout['view_count']} views)"
+            ),
+            f"Display calibration: {report.display_calibration or 'none'}",
+            f"Experimental backends: {', '.join(report.experimental_backend_ids) or 'none'}",
+            "",
+            "Connected displays:",
+        ]
+    )
     if report.display_inventory:
         lines.extend(_format_display_inventory(item) for item in report.display_inventory)
     else:
@@ -458,6 +500,11 @@ def format_diagnostics_json(report: DiagnosticsReport) -> str:
         "camera": _camera_to_dict(report.camera),
         "tracking_state": report.tracking_state,
         "tracking_state_fresh": report.tracking_state_fresh,
+        "configured_tracker_backend": report.configured_tracker_backend,
+        "tracker_backend_status": tracker_backend_status_to_dict(
+            report.tracker_backend_status,
+            fresh=report.tracker_backend_status_fresh,
+        ),
         "display_inventory": [_display_inventory_to_dict(item) for item in report.display_inventory],
         "overlay_summary": _summary_to_dict(report.overlay_summary),
     }
