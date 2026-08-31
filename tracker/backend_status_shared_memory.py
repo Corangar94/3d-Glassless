@@ -4,7 +4,6 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import struct
-from typing import Callable
 
 from tracker.pose import elapsed_u32_ms, monotonic_ms, normalize_wire_timestamp
 
@@ -60,10 +59,18 @@ class TrackerBackendStatus:
     timestamp_ms: int = 0
 
     def age_ms(self, now_ms: int | None = None) -> int:
-        now = monotonic_ms() if now_ms is None else normalize_wire_timestamp(now_ms)
+        now = (
+            monotonic_ms()
+            if now_ms is None
+            else normalize_wire_timestamp(now_ms)
+        )
         return elapsed_u32_ms(now, self.timestamp_ms)
 
-    def is_fresh(self, max_age_ms: int = 2_000, now_ms: int | None = None) -> bool:
+    def is_fresh(
+        self,
+        max_age_ms: int = 2_000,
+        now_ms: int | None = None,
+    ) -> bool:
         return self.age_ms(now_ms) <= max(0, int(max_age_ms))
 
 
@@ -106,6 +113,21 @@ def _decoded_optional_u32(value: int) -> int | None:
     return None if int(value) == _NONE_U32 else int(value)
 
 
+def _encoded_failure_field(value: object) -> bytes:
+    text = str(value or "").replace("\r", " ").replace("\n", " ")
+    payload = text.encode("utf-8", errors="replace")
+    limit = _FAILURE_BYTES - 1
+    if len(payload) > limit:
+        payload = payload[:limit]
+        while payload:
+            try:
+                payload.decode("utf-8", errors="strict")
+                break
+            except UnicodeDecodeError as error:
+                payload = payload[: error.start]
+    return payload + b"\0" * (_FAILURE_BYTES - len(payload))
+
+
 def encode_tracker_backend_status(status: TrackerBackendStatus) -> bytes:
     flags = 0
     if status.candidate_active:
@@ -114,9 +136,6 @@ def encode_tracker_backend_status(status: TrackerBackendStatus) -> bytes:
         flags |= _FLAG_POSE_TRANSITION_ACTIVE
     if status.pose_transition_preserves_position:
         flags |= _FLAG_POSE_TRANSITION_PRESERVES_POSITION
-    failure = str(status.last_failure or "").replace("\r", " ").replace("\n", " ")
-    failure_bytes = failure.encode("utf-8", errors="replace")[: _FAILURE_BYTES - 1]
-    failure_field = failure_bytes + b"\0" * (_FAILURE_BYTES - len(failure_bytes))
     return struct.pack(
         _STATUS_FORMAT,
         STATUS_MAGIC,
@@ -132,7 +151,7 @@ def encode_tracker_backend_status(status: TrackerBackendStatus) -> bytes:
         _u32(status.candidate_healthy_callbacks),
         _u32(status.backend_transition_id),
         normalize_wire_timestamp(status.timestamp_ms),
-        failure_field,
+        _encoded_failure_field(status.last_failure),
     )
 
 
@@ -164,7 +183,10 @@ def decode_tracker_backend_status(data: bytes) -> TrackerBackendStatus | None:
     active_backend = _ACTIVE_NAMES.get(active_code)
     if configured_mode is None or active_backend is None:
         return None
-    failure = failure_field.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+    failure = failure_field.split(b"\0", 1)[0].decode(
+        "utf-8",
+        errors="replace",
+    )
     return TrackerBackendStatus(
         configured_mode=configured_mode,
         active_backend=active_backend,
@@ -211,17 +233,22 @@ def status_from_tracker(
     active = (
         _normalized_active_backend(active_value)
         if isinstance(active_value, str)
-        else (configured if configured in {"mediapipe", "cv2"} else "unknown")
+        else (
+            configured
+            if configured in {"mediapipe", "cv2"}
+            else "unknown"
+        )
     )
     values: dict[str, object] = {}
     snapshot = getattr(tracker, "snapshot", None)
+    values_obj: object | None = None
     if callable(snapshot):
         try:
-            values_obj = snapshot(timestamp_ms)
-        except TypeError:
-            values_obj = snapshot()
+            try:
+                values_obj = snapshot(timestamp_ms)
+            except TypeError:
+                values_obj = snapshot()
         except Exception as error:
-            values_obj = None
             values["last_failure"] = (
                 f"backend status snapshot failed: {type(error).__name__}"
             )
@@ -244,7 +271,11 @@ def status_from_tracker(
     snapshot_active = values.get("active_backend")
     if isinstance(snapshot_active, str):
         active = _normalized_active_backend(snapshot_active)
-    timestamp = monotonic_ms() if timestamp_ms is None else normalize_wire_timestamp(timestamp_ms)
+    timestamp = (
+        monotonic_ms()
+        if timestamp_ms is None
+        else normalize_wire_timestamp(timestamp_ms)
+    )
     return TrackerBackendStatus(
         configured_mode=configured,
         active_backend=active,
@@ -257,7 +288,9 @@ def status_from_tracker(
             if values.get("retry_in_ms") is None
             else _u32(values.get("retry_in_ms"))
         ),
-        candidate_active=bool(values.get("primary_candidate_active", False)),
+        candidate_active=bool(
+            values.get("primary_candidate_active", False)
+        ),
         candidate_age_ms=(
             None
             if values.get("primary_candidate_age_ms") is None
@@ -436,8 +469,12 @@ class TrackerBackendStatusReader:
                     if first == second:
                         payload = second
                         break
-            return None if payload is None else decode_tracker_backend_status(payload)
-        except OSError:
+            return (
+                None
+                if payload is None
+                else decode_tracker_backend_status(payload)
+            )
+        except Exception:
             self.close()
             return None
 
@@ -473,8 +510,12 @@ class TrackerBackendStatusPublisher:
             return
         try:
             self._writer = TrackerBackendStatusWriter()
-        except OSError:
+        except Exception:
             self._writer = None
+
+    @property
+    def available(self) -> bool:
+        return self._writer is not None
 
     def publish(self, timestamp_ms: int) -> None:
         writer = self._writer
@@ -488,18 +529,31 @@ class TrackerBackendStatusPublisher:
                     timestamp_ms=timestamp_ms,
                 )
             )
-        except (OSError, RuntimeError, ValueError):
-            writer.close()
+        except Exception:
+            try:
+                writer.close()
+            except Exception:
+                pass
             self._writer = None
 
     def close(self) -> None:
-        if self._writer is not None:
-            self._writer.close()
-            self._writer = None
+        writer = self._writer
+        self._writer = None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def make_tracker_backend_status_publisher(
     tracker: object,
 ) -> TrackerBackendStatusPublisher | None:
     publisher = TrackerBackendStatusPublisher(tracker)
-    return publisher if publisher._writer is not None else None
+    return publisher if publisher.available else None
