@@ -29,6 +29,17 @@ A callback that contains no face still proves that the asynchronous task is aliv
 
 The probe interval uses the existing wrap-safe uint32 camera clock. Third-party controller candidates that do not expose asynchronous health telemetry retain historical every-frame probing for compatibility.
 
+## Live launcher tile
+
+The Runtime tab’s **Tracker** tile combines process/face state with the currently active pose backend:
+
+- `TRACKING · MediaPipe` — the preferred tracker is active;
+- `TRACKING · OpenCV fallback` — automatic recovery is keeping tracking alive;
+- `TRACKING · OpenCV + probe 2` — a shadow MediaPipe candidate has two healthy callbacks;
+- `TRACKING · Stale` or `TRACKING · Unavailable` — the diagnostic mapping is not current.
+
+Hover over the tile for configured and active backends, failover count, retry countdown, candidate age and sample count, callback progress, and the last failure. The tile is cleared as soon as the launcher no longer owns a running tracker, so a named mapping left briefly by a retired child is never presented as current.
+
 ## Runtime diagnostics
 
 The tracker publishes backend recovery state through the separate versioned `G3D_TrackerBackendV1` named shared-memory block. Existing pose (`G3D_PoseV2`) and face-state (`G3D_State`) layouts are unchanged.
