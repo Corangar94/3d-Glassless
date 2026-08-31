@@ -44,6 +44,7 @@ hidden_imports = [
     "tracker.async_inference_watchdog",
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",
+    "tracker.cv2_temporal_tracker",
     "tracker.camera_geometry",
     "tracker.camera_calibration",
     "tracker.calibration_runtime_sync",
