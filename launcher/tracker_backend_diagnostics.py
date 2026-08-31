@@ -1,8 +1,6 @@
 """Read and format tracker backend recovery state for launcher diagnostics."""
 from __future__ import annotations
 
-from typing import Mapping
-
 from tracker.backend_status_shared_memory import (
     TrackerBackendStatus,
     TrackerBackendStatusReader,
@@ -16,7 +14,9 @@ def configured_tracker_backend(config: object) -> str:
     root = config if isinstance(config, dict) else {}
     tracking = root.get("tracking", {})
     values = tracking if isinstance(tracking, dict) else {}
-    backend = str(values.get("tracker_backend", "auto") or "auto").strip().lower()
+    backend = str(
+        values.get("tracker_backend", "auto") or "auto"
+    ).strip().lower()
     return backend if backend in {"auto", "mediapipe", "cv2"} else "unknown"
 
 
@@ -27,11 +27,14 @@ def read_tracker_backend_status(
     try:
         with TrackerBackendStatusReader() as reader:
             status = reader.read()
-    except OSError:
+    except Exception:
         return None, False
     if status is None:
         return None, False
-    return status, status.is_fresh(max_age_ms)
+    try:
+        return status, status.is_fresh(max_age_ms)
+    except Exception:
+        return status, False
 
 
 def evaluate_tracker_backend_status(
@@ -52,7 +55,10 @@ def evaluate_tracker_backend_status(
         )
         return problems, warnings
 
-    if configured in {"mediapipe", "cv2"} and status.active_backend != configured:
+    if (
+        configured in {"mediapipe", "cv2"}
+        and status.active_backend != configured
+    ):
         problems.append(
             "active tracker backend "
             f"{status.active_backend} does not match strict configured backend "
@@ -128,13 +134,19 @@ def format_tracker_backend_status(
             "Tracker backend recovery: "
             f"failovers={status.failover_count} "
             f"primary_retries={status.primary_retry_attempts} "
-            f"retry_in_ms={status.retry_in_ms if status.retry_in_ms is not None else 'none'}"
+            f"retry_in_ms="
+            f"{status.retry_in_ms if status.retry_in_ms is not None else 'none'}"
         ),
     ]
     if status.candidate_active:
+        age = (
+            status.candidate_age_ms
+            if status.candidate_age_ms is not None
+            else "unknown"
+        )
         lines.append(
             "Tracker shadow candidate: "
-            f"age_ms={status.candidate_age_ms if status.candidate_age_ms is not None else 'unknown'} "
+            f"age_ms={age} "
             f"probes={status.candidate_probe_count} "
             f"healthy_callbacks={status.candidate_healthy_callbacks}"
         )
@@ -157,7 +169,7 @@ def tracker_backend_tile_text(
     *,
     fresh: bool,
 ) -> tuple[str, str]:
-    """Return compact label and tooltip for a future/runtime launcher tile."""
+    """Return a compact launcher label and tooltip."""
     if status is None:
         return "Unavailable", "Tracker backend status mapping is unavailable"
     if not fresh:
@@ -178,9 +190,14 @@ def tracker_backend_tile_text(
     if status.retry_in_ms is not None:
         tooltip_parts.append(f"Retry in: {status.retry_in_ms} ms")
     if status.candidate_active:
+        candidate_age = (
+            f"{status.candidate_age_ms} ms"
+            if status.candidate_age_ms is not None
+            else "unknown"
+        )
         tooltip_parts.extend(
             [
-                f"Candidate age: {status.candidate_age_ms} ms",
+                f"Candidate age: {candidate_age}",
                 f"Candidate probes: {status.candidate_probe_count}",
                 (
                     "Healthy callbacks: "
