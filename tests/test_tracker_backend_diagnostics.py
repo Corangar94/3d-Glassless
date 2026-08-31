@@ -40,7 +40,11 @@ def _status(**overrides) -> TrackerBackendStatus:
     return TrackerBackendStatus(**values)
 
 
-def _report(status: TrackerBackendStatus | None, *, fresh: bool) -> DiagnosticsReport:
+def _report(
+    status: TrackerBackendStatus | None,
+    *,
+    fresh: bool,
+) -> DiagnosticsReport:
     return DiagnosticsReport(
         project_root=Path("C:/Glassless3D"),
         python_executable=Path("python.exe"),
@@ -58,8 +62,12 @@ def _report(status: TrackerBackendStatus | None, *, fresh: bool) -> DiagnosticsR
 
 def test_configured_tracker_backend_is_validated():
     assert configured_tracker_backend(None) == "auto"
-    assert configured_tracker_backend({"tracking": {"tracker_backend": "CV2"}}) == "cv2"
-    assert configured_tracker_backend({"tracking": {"tracker_backend": "bad"}}) == "unknown"
+    assert configured_tracker_backend(
+        {"tracking": {"tracker_backend": "CV2"}}
+    ) == "cv2"
+    assert configured_tracker_backend(
+        {"tracking": {"tracker_backend": "bad"}}
+    ) == "unknown"
 
 
 def test_auto_fallback_is_warning_not_readiness_problem():
@@ -81,8 +89,26 @@ def test_strict_backend_mismatch_is_a_problem():
         True,
     )
 
-    assert any("does not match strict configured backend" in item for item in problems)
+    assert any(
+        "does not match strict configured backend" in item
+        for item in problems
+    )
     assert warnings == []
+
+
+def test_running_tracker_mode_must_match_current_configuration():
+    problems, _warnings = evaluate_tracker_backend_status(
+        "auto",
+        _status(configured_mode="mediapipe", active_backend="mediapipe"),
+        True,
+    )
+
+    assert any(
+        "running tracker mode mediapipe does not match configured mode auto"
+        in item
+        for item in problems
+    )
+    assert any("restart tracking" in item for item in problems)
 
 
 def test_active_shadow_candidate_reports_age_probes_and_callbacks():
