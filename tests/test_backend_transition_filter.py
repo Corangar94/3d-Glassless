@@ -4,6 +4,7 @@ import pytest
 
 from tracker.backend_transition_state import (
     current_backend_transition_generation,
+    current_backend_transition_state,
     mark_backend_transition,
     reset_backend_transition_generation,
 )
@@ -42,9 +43,9 @@ def _moving_filter() -> tuple[AdaptivePoseFilter, object]:
     return filter_, output
 
 
-def test_transition_quenches_velocity_before_next_measurement():
+def test_recent_transition_quenches_velocity_before_next_measurement():
     filter_, before = _moving_filter()
-    generation = mark_backend_transition()
+    generation = mark_backend_transition(preserve_position=True)
 
     output = filter_.update_pose(
         _pose(3.0, 1066),
@@ -57,9 +58,9 @@ def test_transition_quenches_velocity_before_next_measurement():
     assert filter_._backend_transition_generation == generation
 
 
-def test_transition_hold_prediction_preserves_position_with_zero_velocity():
+def test_recent_transition_hold_preserves_position_with_zero_velocity():
     filter_, before = _moving_filter()
-    mark_backend_transition()
+    mark_backend_transition(preserve_position=True)
 
     output = filter_.predict(publish_timestamp_ms=1066)
 
@@ -68,6 +69,18 @@ def test_transition_hold_prediction_preserves_position_with_zero_velocity():
     assert output.z_cm == pytest.approx(before.z_cm)
     assert output.vx_cm_s == pytest.approx(0.0)
     assert output.confidence > 0.0
+
+
+def test_stale_transition_fully_resets_old_pose_and_motion():
+    filter_, before = _moving_filter()
+    assert before.x_cm > 0.0
+    mark_backend_transition(preserve_position=False)
+
+    output = filter_.predict(publish_timestamp_ms=1066)
+
+    assert output.xyz == pytest.approx((0.0, 0.0, 60.0))
+    assert output.vx_cm_s == pytest.approx(0.0)
+    assert output.confidence == pytest.approx(0.0)
 
 
 def test_no_transition_preserves_estimated_velocity():
@@ -118,8 +131,10 @@ def test_constant_velocity_axis_can_preserve_position_and_clear_covariance():
     assert axis._state.p11 == pytest.approx(25.0)
 
 
-def test_generation_is_thread_local_state_with_monotonic_ids():
+def test_generation_records_position_preservation_policy():
     assert current_backend_transition_generation() == 0
-    assert mark_backend_transition() == 1
-    assert mark_backend_transition() == 2
+    assert mark_backend_transition(preserve_position=True) == 1
+    assert current_backend_transition_state().preserve_position
+    assert mark_backend_transition(preserve_position=False) == 2
+    assert not current_backend_transition_state().preserve_position
     assert current_backend_transition_generation() == 2
