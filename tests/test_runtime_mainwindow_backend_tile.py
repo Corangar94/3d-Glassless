@@ -46,7 +46,11 @@ def _running(window: MainWindow) -> None:
     thread = MagicMock()
     thread.isRunning.return_value = True
     window._thread = thread
-    window._on_status("tracking")
+    with patch(
+        "launcher.runtime_mainwindow.read_tracker_backend_status",
+        return_value=(None, False),
+    ):
+        window._on_status("tracking")
 
 
 def _status(**overrides) -> TrackerBackendStatus:
@@ -68,6 +72,21 @@ def _status(**overrides) -> TrackerBackendStatus:
     }
     values.update(overrides)
     return TrackerBackendStatus(**values)
+
+
+def test_status_signal_immediately_reads_running_backend(window):
+    thread = MagicMock()
+    thread.isRunning.return_value = True
+    window._thread = thread
+
+    with patch(
+        "launcher.runtime_mainwindow.read_tracker_backend_status",
+        return_value=(_status(), True),
+    ) as reader:
+        window._on_status("tracking")
+
+    reader.assert_called_once_with()
+    assert window._tracker_tile.text() == "Tracker\nTRACKING · MediaPipe"
 
 
 def test_live_mediapipe_backend_is_visible_in_tracker_tile(window):
@@ -172,7 +191,9 @@ def test_runtime_health_refresh_reads_backend_before_overlay_health(window):
     with (
         patch(
             "launcher.runtime_mainwindow.read_tracker_backend_status",
-            side_effect=lambda: (calls.append("backend") or (_status(), True)),
+            side_effect=lambda: (
+                calls.append("backend") or (_status(), True)
+            ),
         ),
         patch(
             "launcher.mainwindow.MainWindow._refresh_runtime_health",
@@ -191,8 +212,8 @@ def test_backend_status_reader_failure_cannot_break_health_timer(window):
         "launcher.runtime_mainwindow.read_tracker_backend_status",
         side_effect=RuntimeError("mapping failure"),
     ):
-        # The diagnostics reader is normally fail-safe. This test verifies the
-        # GUI wrapper also keeps an unexpected test/dynamic implementation error
-        # from escaping the Qt timer path after the next hardening guard.
-        with pytest.raises(RuntimeError, match="mapping failure"):
-            window._refresh_tracker_backend_health()
+        window._refresh_tracker_backend_health()
+
+    assert window._tracker_tile.text() == "Tracker\nTRACKING · Unavailable"
+    assert "could not be read" in window._tracker_tile.toolTip()
+    assert window._tracker_backend_status is None
