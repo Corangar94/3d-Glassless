@@ -6,6 +6,11 @@ from enum import Enum
 import inspect
 from typing import Any, Callable
 
+from tracker.backend_status_shared_memory import (
+    TrackerBackendStatusPublisher,
+    make_tracker_backend_status_publisher,
+)
+
 
 class FrameCallMode(str, Enum):
     """How a tracker accepts the optional camera capture timestamp."""
@@ -61,6 +66,7 @@ class FrameProcessorAdapter:
 
     process_frame: Callable[..., Any]
     mode: FrameCallMode
+    backend_status_publisher: TrackerBackendStatusPublisher | None = None
 
     @classmethod
     def from_tracker(cls, tracker: object) -> "FrameProcessorAdapter":
@@ -70,14 +76,27 @@ class FrameProcessorAdapter:
         return cls(
             process_frame=process_frame,
             mode=resolve_frame_call_mode(process_frame),
+            backend_status_publisher=(
+                make_tracker_backend_status_publisher(tracker)
+            ),
         )
 
     def __call__(self, frame: object, capture_timestamp_ms: int) -> Any:
-        if self.mode is FrameCallMode.TIMESTAMP_KEYWORD:
-            return self.process_frame(
-                frame,
-                capture_timestamp_ms=capture_timestamp_ms,
-            )
-        if self.mode is FrameCallMode.TIMESTAMP_POSITIONAL_ONLY:
-            return self.process_frame(frame, capture_timestamp_ms)
-        return self.process_frame(frame)
+        try:
+            if self.mode is FrameCallMode.TIMESTAMP_KEYWORD:
+                return self.process_frame(
+                    frame,
+                    capture_timestamp_ms=capture_timestamp_ms,
+                )
+            if self.mode is FrameCallMode.TIMESTAMP_POSITIONAL_ONLY:
+                return self.process_frame(frame, capture_timestamp_ms)
+            return self.process_frame(frame)
+        finally:
+            publisher = self.backend_status_publisher
+            if publisher is not None:
+                publisher.publish(capture_timestamp_ms)
+
+    def close(self) -> None:
+        publisher = self.backend_status_publisher
+        if publisher is not None:
+            publisher.close()
