@@ -173,28 +173,27 @@ class AsyncInferenceWatchdog:
             else self._timestamp(current_timestamp_ms)
         )
         with self._lock:
-            anchor = (
-                self._last_callback_ms
-                if self._last_callback_ms is not None
-                else self._first_submission_ms
-            )
+            submitted = self._last_submission_ms
+            callback = self._last_callback_ms
+            anchor = callback if callback is not None else self._first_submission_ms
             callback_lag = (
                 0
-                if anchor is None or self._last_submission_ms is None
-                else max(0, self._last_submission_ms - anchor)
+                if anchor is None or submitted is None
+                else max(0, submitted - anchor)
             )
-            age_endpoint = (
-                self._last_submission_ms if current is None else current
+            outstanding = submitted is not None and (
+                callback is None or callback < submitted
             )
+            age_endpoint = submitted if current is None else current
             callback_age = (
                 0
-                if anchor is None or age_endpoint is None
+                if not outstanding or anchor is None or age_endpoint is None
                 else max(0, age_endpoint - anchor)
             )
             return AsyncInferenceSnapshot(
                 first_submission_ms=self._first_submission_ms,
-                last_submission_ms=self._last_submission_ms,
-                last_callback_ms=self._last_callback_ms,
+                last_submission_ms=submitted,
+                last_callback_ms=callback,
                 consecutive_submission_errors=(
                     self._consecutive_submission_errors
                 ),
