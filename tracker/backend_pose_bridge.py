@@ -72,6 +72,7 @@ class BackendPoseContinuityBridge:
         self._transition_started_ms: int | None = None
         self._transition_source: HeadPosition | None = None
         self._offset: _PoseOffset | None = None
+        self._transition_preserves_position = False
 
     @property
     def policy(self) -> PoseContinuityPolicy:
@@ -82,6 +83,10 @@ class BackendPoseContinuityBridge:
         return self._transition_started_ms is not None
 
     @property
+    def transition_preserves_position(self) -> bool:
+        return self._transition_preserves_position
+
+    @property
     def last_output(self) -> HeadPosition | None:
         return self._last_output
 
@@ -90,11 +95,17 @@ class BackendPoseContinuityBridge:
         self._transition_started_ms = None
         self._transition_source = None
         self._offset = None
+        self._transition_preserves_position = False
 
-    def begin_transition(self, timestamp_ms: int) -> None:
-        self._transition_started_ms = normalize_wire_timestamp(timestamp_ms)
+    def begin_transition(self, timestamp_ms: int) -> bool:
+        started = normalize_wire_timestamp(timestamp_ms)
+        self._transition_started_ms = started
         self._transition_source = self._last_output
         self._offset = None
+        self._transition_preserves_position = self._source_is_recent(started)
+        if not self._transition_preserves_position:
+            self._transition_source = None
+        return self._transition_preserves_position
 
     def _source_is_recent(self, transition_timestamp_ms: int) -> bool:
         source = self._transition_source
@@ -160,6 +171,7 @@ class BackendPoseContinuityBridge:
         self._transition_started_ms = None
         self._transition_source = None
         self._offset = None
+        self._transition_preserves_position = False
 
     def apply(
         self,
@@ -182,7 +194,7 @@ class BackendPoseContinuityBridge:
 
         if self._offset is None:
             source = self._transition_source
-            if source is None or not self._source_is_recent(started):
+            if source is None or not self._transition_preserves_position:
                 self._finish_transition()
                 self._last_output = pose
                 return pose
