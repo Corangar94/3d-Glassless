@@ -37,6 +37,9 @@ hidden_imports = [
     *mediapipe_hiddenimports,
     # The frozen executable dispatches these private/optional modes at runtime.
     "tracker.main",
+    "tracker.backend_factory",
+    "tracker.backend_failover",
+    "tracker.async_inference_watchdog",
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",
     "tracker.camera_geometry",

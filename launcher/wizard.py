@@ -180,6 +180,13 @@ _DEFAULT_TRACKING = {
     "max_prediction_ms": 80.0,
     "hold_ms": 500,
     "camera_fov_deg": 90.0,
+    "tracker_backend": "auto",
+    "backend_failover": {
+        "retry_primary_after_ms": 30_000,
+        "max_primary_retries": 1,
+    },
+    "async_stall_timeout_ms": 5_000,
+    "async_max_consecutive_errors": 3,
 }
 
 _DEFAULT_OVERLAY = {

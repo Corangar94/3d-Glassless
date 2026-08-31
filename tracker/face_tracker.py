@@ -204,6 +204,23 @@ class FaceTracker:
         if self._async_watchdog is not None:
             self._async_watchdog.reset_session()
 
+    def async_health_snapshot(self):
+        """Return callback progress used by the automatic backend controller."""
+        watchdog = self._async_watchdog
+        return None if watchdog is None else watchdog.snapshot()
+
+    def ready_for_promotion(self) -> bool:
+        """Return True once a shadow instance proves healthy result progress."""
+        if not self._async_mode:
+            return True
+        snapshot = self.async_health_snapshot()
+        return bool(
+            snapshot is not None
+            and snapshot.last_callback_ms is not None
+            and snapshot.consecutive_submission_errors == 0
+            and snapshot.consecutive_callback_errors == 0
+        )
+
     def _result_is_current_locked(self, timestamp_ms: int) -> bool:
         if self._closed:
             return False

@@ -9,6 +9,10 @@ from typing import Any, Optional, Protocol
 import cv2
 import yaml
 
+from tracker.backend_factory import (
+    create_face_tracker,
+    parse_backend_failover_policy,
+)
 from tracker.camera_control_retry import CameraControlLockRetry
 from tracker.camera_frame import CameraFrameFormatError, normalize_camera_frame
 from tracker.camera_geometry import CameraGeometry
@@ -212,6 +216,7 @@ def _open_camera(
 
 
 def _load_face_tracker_class(backend: str):
+    """Retained strict class loader for compatibility and direct callers."""
     backend_id = str(backend or "auto").strip().lower()
     if backend_id not in {"auto", "mediapipe", "cv2"}:
         raise SystemExit(
@@ -844,8 +849,8 @@ def main() -> None:
         choices=("auto", "mediapipe", "cv2"),
         default=None,
         help=(
-            "face tracking backend; auto prefers MediaPipe and falls back "
-            "to OpenCV"
+            "face tracking backend; auto uses in-process MediaPipe-to-OpenCV "
+            "failover"
         ),
     )
     args = parser.parse_args()
@@ -856,9 +861,6 @@ def main() -> None:
     tracker_backend = args.tracking_backend or trk.get(
         "tracker_backend",
         "auto",
-    )
-    face_tracker_cls, selected_backend = _load_face_tracker_class(
-        tracker_backend
     )
     camera_geometry = CameraGeometry.from_config(
         cfg,
@@ -877,6 +879,28 @@ def main() -> None:
             trk.get("prediction_horizon_ms", 0.0)
         ),
         max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)),
+    )
+    tracker_kwargs = {
+        "real_ipd_cm": _resolve_ipd_cm(cfg),
+        "screen_width_cm": scr["width_cm"],
+        "screen_height_cm": scr["height_cm"],
+        "camera_fov_deg": _resolve_camera_fov_deg(cfg),
+        "async_mode": bool(trk.get("live_stream", True)),
+        "min_tracking_confidence": float(
+            trk.get("min_tracking_confidence", 0.5)
+        ),
+        "camera_geometry": camera_geometry,
+        "async_stall_timeout_ms": int(
+            trk.get("async_stall_timeout_ms", 5000)
+        ),
+        "async_max_consecutive_errors": int(
+            trk.get("async_max_consecutive_errors", 3)
+        ),
+    }
+    tracker, selected_backend = create_face_tracker(
+        tracker_backend,
+        tracker_kwargs=tracker_kwargs,
+        failover_policy=parse_backend_failover_policy(trk),
     )
 
     stop_event = threading.Event()
@@ -902,22 +926,18 @@ def main() -> None:
         print("[G3D] Tray icon unavailable — press Ctrl+C to stop.")
 
     print(f"[G3D] Starting tracker — camera {cam['index']}")
-    print(f"[G3D] Tracking backend: {selected_backend}")
+    if str(tracker_backend).strip().lower() == "auto":
+        print(
+            "[G3D] Tracking backend: auto "
+            f"(active={selected_backend}, runtime failover enabled)"
+        )
+    else:
+        print(f"[G3D] Tracking backend: {selected_backend} (strict)")
     print("[G3D] Latest-frame tracking + display-time prediction enabled")
     print("[G3D] Writing G3D legacy pose, G3D_PoseV2, and FT_SharedMem")
 
     with (
-        face_tracker_cls(
-            real_ipd_cm=_resolve_ipd_cm(cfg),
-            screen_width_cm=scr["width_cm"],
-            screen_height_cm=scr["height_cm"],
-            camera_fov_deg=_resolve_camera_fov_deg(cfg),
-            async_mode=bool(trk.get("live_stream", True)),
-            min_tracking_confidence=float(
-                trk.get("min_tracking_confidence", 0.5)
-            ),
-            camera_geometry=camera_geometry,
-        ) as tracker,
+        tracker,
         FreetracWriter() as ft_writer,
         SharedMemoryWriter() as g3d_writer,
         PoseStateWriter() as pose_writer,

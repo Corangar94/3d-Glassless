@@ -93,7 +93,7 @@ The launcher supervises both the tracker and native overlay instead of restartin
 - missing executables, incomplete runtime assets, invalid policy, and other nonrecoverable startup failures stop immediately rather than consuming the crash-loop budget;
 - a stable 30-second run resets the failure episode.
 
-The policy is configurable in `config.yaml`:
+The launcher-level policy is configurable in `config.yaml`:
 
 ```yaml
 recovery:
@@ -104,6 +104,31 @@ recovery:
   failure_window_s: 90.0
   cooldown_s: 60.0
   stable_reset_s: 30.0
+```
+
+### Tracker backend failover
+
+The default `auto` tracker mode now recovers inside the tracker process before the launcher needs to restart it:
+
+- MediaPipe remains the preferred high-quality backend;
+- an explicit MediaPipe async-health failure switches the current frame to the OpenCV fallback;
+- ordinary implementation errors still surface instead of being hidden as failover events;
+- after 30 seconds on OpenCV, one MediaPipe instance is probed in shadow mode;
+- promotion occurs only after the shadow instance demonstrates callback progress, including a valid no-face callback;
+- a failed shadow probe cannot interrupt the working OpenCV fallback;
+- after the bounded probe is exhausted, OpenCV remains active until the tracker process is intentionally restarted;
+- explicit `mediapipe` and `cv2` selections remain strict and never switch automatically.
+
+The backend policy and MediaPipe health thresholds are configurable:
+
+```yaml
+tracking:
+  tracker_backend: auto
+  backend_failover:
+    retry_primary_after_ms: 30000
+    max_primary_retries: 1
+  async_stall_timeout_ms: 5000
+  async_max_consecutive_errors: 3
 ```
 
 ## Controls
