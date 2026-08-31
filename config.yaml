@@ -35,6 +35,12 @@ shared_memory:
   name: G3D
 tracking:
   auto_tune: true
+  tracker_backend: auto
+  backend_failover:
+    retry_primary_after_ms: 30000
+    max_primary_retries: 1
+  async_stall_timeout_ms: 5000
+  async_max_consecutive_errors: 3
   camera_fov_deg: 90.0
   camera_tilt_deg: -17.92
   hold_ms: 500
