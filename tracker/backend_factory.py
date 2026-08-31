@@ -31,6 +31,15 @@ def parse_backend_failover_policy(
             max_primary_retries=int(
                 values.get("max_primary_retries", 1)
             ),
+            shadow_probe_interval_ms=int(
+                values.get("shadow_probe_interval_ms", 100)
+            ),
+            shadow_probe_timeout_ms=int(
+                values.get("shadow_probe_timeout_ms", 5_000)
+            ),
+            minimum_healthy_callbacks=int(
+                values.get("minimum_healthy_callbacks", 3)
+            ),
         )
     except (TypeError, ValueError, OverflowError):
         logger(
