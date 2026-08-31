@@ -184,6 +184,9 @@ _DEFAULT_TRACKING = {
     "backend_failover": {
         "retry_primary_after_ms": 30_000,
         "max_primary_retries": 1,
+        "shadow_probe_interval_ms": 100,
+        "shadow_probe_timeout_ms": 5_000,
+        "minimum_healthy_callbacks": 3,
     },
     "async_stall_timeout_ms": 5_000,
     "async_max_consecutive_errors": 3,
