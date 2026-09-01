@@ -79,25 +79,22 @@ def _expected_runtime_kwargs() -> dict[str, int]:
     }
 
 
-def test_parser_remains_a_backend_failover_policy_for_existing_callers():
+def _failover_values(policy: BackendFailoverPolicy) -> tuple[int, int, int, int, int]:
+    return (
+        policy.retry_primary_after_ms,
+        policy.max_primary_retries,
+        policy.shadow_probe_interval_ms,
+        policy.shadow_probe_timeout_ms,
+        policy.minimum_healthy_callbacks,
+    )
+
+
+def test_parser_remains_a_backend_failover_policy_subtype():
     policy = parse_backend_failover_policy(_custom_tracking_config())
 
     assert isinstance(policy, BackendFailoverPolicy)
     assert isinstance(policy, ConfiguredBackendFailoverPolicy)
-    assert policy == BackendFailoverPolicy(
-        retry_primary_after_ms=0,
-        max_primary_retries=1,
-        shadow_probe_interval_ms=100,
-        shadow_probe_timeout_ms=4_000,
-        minimum_healthy_callbacks=4,
-    )
-    assert BackendFailoverPolicy(
-        retry_primary_after_ms=0,
-        max_primary_retries=1,
-        shadow_probe_interval_ms=100,
-        shadow_probe_timeout_ms=4_000,
-        minimum_healthy_callbacks=4,
-    ) == policy
+    assert _failover_values(policy) == (0, 1, 100, 4_000, 4)
     assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy(
         stall_timeout_ms=4_500,
         max_consecutive_errors=5,
@@ -105,6 +102,28 @@ def test_parser_remains_a_backend_failover_policy_for_existing_callers():
         max_result_age_ms=180,
         max_consecutive_stale_results=4,
         stale_result_window_ms=700,
+    )
+
+
+def test_configured_policy_equality_includes_mediapipe_limits():
+    base = parse_backend_failover_policy(_custom_tracking_config())
+    changed_config = _custom_tracking_config()
+    changed_config["mediapipe_runtime"] = {
+        **changed_config["mediapipe_runtime"],
+        "max_backlog_ms": 91,
+    }
+    changed = parse_backend_failover_policy(changed_config)
+    same = parse_backend_failover_policy(_custom_tracking_config())
+
+    assert base == same
+    assert hash(base) == hash(same)
+    assert base != changed
+    assert base != BackendFailoverPolicy(
+        retry_primary_after_ms=0,
+        max_primary_retries=1,
+        shadow_probe_interval_ms=100,
+        shadow_probe_timeout_ms=4_000,
+        minimum_healthy_callbacks=4,
     )
 
 
@@ -207,7 +226,7 @@ def test_invalid_failover_settings_do_not_discard_valid_media_policy():
 
     policy = parse_backend_failover_policy(config, logger=logs.append)
 
-    assert policy == BackendFailoverPolicy()
+    assert _failover_values(policy) == (30_000, 1, 100, 5_000, 3)
     assert policy.mediapipe_runtime_policy.max_backlog_ms == 90
     assert any("backend failover" in message for message in logs)
 
@@ -219,8 +238,7 @@ def test_invalid_media_policy_does_not_discard_valid_failover_settings():
 
     policy = parse_backend_failover_policy(config, logger=logs.append)
 
-    assert policy.retry_primary_after_ms == 0
-    assert policy.shadow_probe_timeout_ms == 4_000
+    assert _failover_values(policy) == (0, 1, 100, 4_000, 4)
     assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy()
     assert any("MediaPipe async runtime" in message for message in logs)
 
