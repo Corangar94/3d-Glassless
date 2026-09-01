@@ -10,7 +10,7 @@ The previous compatibility helper used fixed limits of 10 cm in the screen plane
 - 10 cm per frame at 60 fps permits 600 cm/s;
 - 10 cm after a 100 ms inference interval permits only 100 cm/s.
 
-The production tracking loop now derives each permitted step from the actual capture-timestamp interval.
+The packaged production tracking loop now derives each permitted step from the actual capture-timestamp interval.
 
 ## Default policy
 
@@ -45,6 +45,8 @@ The limiter anchor is cleared when:
 - the webcam capture session is replaced;
 - the active face-tracker backend changes.
 
-Orientation, confidence, and capture timestamp are preserved when translation is limited. The historical `_limit_pose_step` helper remains available for direct compatibility tests and callers, but the production camera loop uses `PoseStepLimiter`.
+Orientation, confidence, and capture timestamp are preserved when translation is limited.
 
-Setting either speed to `0` disables that axis bound. Invalid negative or non-finite settings are rejected and the tracker falls back to the safe defaults.
+`tracker.main` explicitly injects `PoseStepLimiter` for the packaged runtime. A direct `TrackingLoop` caller that does not inject a limiter retains the historical fixed 10 cm X/Y and 12 cm Z per-measurement behavior through `FixedPoseStepLimiter`. This avoids introducing a timing dependency into timestamp-less test doubles or third-party direct loop integrations. The `_limit_pose_step` helper remains available with the same fixed-step contract.
+
+Setting either production speed to `0` disables that axis bound. Invalid negative or non-finite settings are rejected and the tracker falls back to the safe defaults.
