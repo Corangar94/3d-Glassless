@@ -6,6 +6,7 @@ from typing import Callable
 
 
 LogFunction = Callable[[str], None]
+_RUNTIME_CONFIG_KEY = "mediapipe_runtime"
 
 
 @dataclass(frozen=True)
@@ -49,17 +50,28 @@ class MediaPipeRuntimePolicy:
         }
 
     def config_values(self) -> dict[str, int]:
-        """Return stable YAML keys for repository and first-run defaults."""
+        """Return values for the nested ``tracking.mediapipe_runtime`` block."""
         return {
-            "async_stall_timeout_ms": self.stall_timeout_ms,
-            "async_max_consecutive_errors": self.max_consecutive_errors,
-            "async_max_backlog_ms": self.max_backlog_ms,
-            "async_max_result_age_ms": self.max_result_age_ms,
-            "async_max_consecutive_stale_results": (
+            "stall_timeout_ms": self.stall_timeout_ms,
+            "max_consecutive_errors": self.max_consecutive_errors,
+            "max_backlog_ms": self.max_backlog_ms,
+            "max_result_age_ms": self.max_result_age_ms,
+            "max_consecutive_stale_results": (
                 self.max_consecutive_stale_results
             ),
-            "async_stale_result_window_ms": self.stale_result_window_ms,
+            "stale_result_window_ms": self.stale_result_window_ms,
         }
+
+
+def _nested_values(tracking: dict[str, object]) -> dict[str, object] | None:
+    if _RUNTIME_CONFIG_KEY not in tracking:
+        return None
+    nested = tracking[_RUNTIME_CONFIG_KEY]
+    if not isinstance(nested, dict):
+        raise ValueError(
+            f"tracking.{_RUNTIME_CONFIG_KEY} must be a mapping"
+        )
+    return nested
 
 
 def parse_mediapipe_runtime_policy(
@@ -67,27 +79,56 @@ def parse_mediapipe_runtime_policy(
     *,
     logger: LogFunction = print,
 ) -> MediaPipeRuntimePolicy:
-    """Parse all asynchronous limits atomically or use known-safe defaults."""
-    values = tracking_config if isinstance(tracking_config, dict) else {}
+    """Parse all asynchronous limits atomically or use known-safe defaults.
+
+    New configurations use the nested ``tracking.mediapipe_runtime`` mapping so
+    the complete group reaches the backend factory before any individual value
+    is consumed. Valid legacy top-level ``async_*`` keys remain supported when
+    the nested mapping is absent.
+    """
+    tracking = tracking_config if isinstance(tracking_config, dict) else {}
     try:
+        nested = _nested_values(tracking)
+        if nested is not None:
+            return MediaPipeRuntimePolicy(
+                stall_timeout_ms=int(
+                    nested.get("stall_timeout_ms", 5_000)
+                ),
+                max_consecutive_errors=int(
+                    nested.get("max_consecutive_errors", 3)
+                ),
+                max_backlog_ms=int(
+                    nested.get("max_backlog_ms", 150)
+                ),
+                max_result_age_ms=int(
+                    nested.get("max_result_age_ms", 250)
+                ),
+                max_consecutive_stale_results=int(
+                    nested.get("max_consecutive_stale_results", 3)
+                ),
+                stale_result_window_ms=int(
+                    nested.get("stale_result_window_ms", 1_000)
+                ),
+            )
+
         return MediaPipeRuntimePolicy(
             stall_timeout_ms=int(
-                values.get("async_stall_timeout_ms", 5_000)
+                tracking.get("async_stall_timeout_ms", 5_000)
             ),
             max_consecutive_errors=int(
-                values.get("async_max_consecutive_errors", 3)
+                tracking.get("async_max_consecutive_errors", 3)
             ),
             max_backlog_ms=int(
-                values.get("async_max_backlog_ms", 150)
+                tracking.get("async_max_backlog_ms", 150)
             ),
             max_result_age_ms=int(
-                values.get("async_max_result_age_ms", 250)
+                tracking.get("async_max_result_age_ms", 250)
             ),
             max_consecutive_stale_results=int(
-                values.get("async_max_consecutive_stale_results", 3)
+                tracking.get("async_max_consecutive_stale_results", 3)
             ),
             stale_result_window_ms=int(
-                values.get("async_stale_result_window_ms", 1_000)
+                tracking.get("async_stale_result_window_ms", 1_000)
             ),
         )
     except (TypeError, ValueError, OverflowError):
