@@ -21,7 +21,7 @@ def _timestamp_delta_seconds(newer_ms: int, older_ms: int) -> float:
 
 
 def normalize_angle_degrees(value: float) -> float:
-    """Return a finite angle in the canonical ``[-180, 180)`` interval.
+    """Return an angle in ``[-180, 180)`` while preserving non-finite input.
 
     Non-finite values are deliberately returned unchanged so the underlying
     scalar filter can retain its existing fail-safe projection behavior.
@@ -341,8 +341,13 @@ class AdaptivePoseFilter:
         timestamp_ms: int,
         confidence: float,
     ) -> None:
+        reference = (
+            axis.project(timestamp_ms)[0]
+            if axis.initialized
+            else 0.0
+        )
         measurement = (
-            unwrap_angle_near(measurement_deg, axis.position)
+            unwrap_angle_near(measurement_deg, reference)
             if axis.initialized
             else normalize_angle_degrees(measurement_deg)
         )
