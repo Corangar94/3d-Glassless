@@ -13,6 +13,10 @@ import numpy as np
 from mediapipe import tasks
 
 from tracker.async_inference_watchdog import AsyncInferenceWatchdog
+from tracker.async_result_freshness import (
+    AsyncResultFreshnessGate,
+    AsyncResultFreshnessPolicy,
+)
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
 from tracker.pose import (
     HeadPosition,
@@ -132,15 +136,21 @@ class FaceTracker:
         async_max_consecutive_errors: int = 3,
         async_max_backlog_ms: int = 150,
         async_max_result_age_ms: int = 250,
+        async_max_consecutive_stale_results: int = 3,
+        async_stale_result_window_ms: int = 1000,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
         backlog_ms = int(async_max_backlog_ms)
         if backlog_ms < 0:
             raise ValueError("async_max_backlog_ms cannot be negative")
-        result_age_ms = int(async_max_result_age_ms)
-        if result_age_ms < 0:
-            raise ValueError("async_max_result_age_ms cannot be negative")
+        freshness_policy = AsyncResultFreshnessPolicy(
+            max_result_age_ms=int(async_max_result_age_ms),
+            max_consecutive_stale_results=int(
+                async_max_consecutive_stale_results
+            ),
+            stale_result_window_ms=int(async_stale_result_window_ms),
+        )
         self._real_ipd_cm = float(real_ipd_cm)
         self._screen_width_cm = float(screen_width_cm)
         self._screen_height_cm = float(screen_height_cm)
@@ -148,10 +158,12 @@ class FaceTracker:
         self._camera_geometry = camera_geometry
         self._async_mode = bool(async_mode)
         self._async_max_backlog_ms = backlog_ms
-        self._async_max_result_age_ms = result_age_ms
+        self._async_max_result_age_ms = freshness_policy.max_result_age_ms
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms: int | None = None
+        # Retained as a compatibility fallback for bare ``__new__`` test doubles
+        # and downstream subclasses that predate AsyncResultFreshnessGate.
         self._stale_result_count = 0
         self._last_stale_result_age_ms: int | None = None
         self._last_submitted_wire_timestamp_ms: int | None = None
@@ -162,6 +174,11 @@ class FaceTracker:
                 max_consecutive_errors=async_max_consecutive_errors,
                 stall_timeout_ms=async_stall_timeout_ms,
             )
+            if self._async_mode
+            else None
+        )
+        self._async_result_freshness = (
+            AsyncResultFreshnessGate(freshness_policy)
             if self._async_mode
             else None
         )
@@ -186,15 +203,30 @@ class FaceTracker:
         )
         self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
 
+    def async_result_freshness_snapshot(self):
+        gate = getattr(self, "_async_result_freshness", None)
+        return None if gate is None else gate.snapshot()
+
     @property
     def stale_result_count(self) -> int:
+        snapshot = self.async_result_freshness_snapshot()
+        if snapshot is not None:
+            return int(snapshot.total_stale_results)
         with self._lock:
-            return int(self._stale_result_count)
+            return int(getattr(self, "_stale_result_count", 0))
+
+    @property
+    def consecutive_stale_result_count(self) -> int:
+        snapshot = self.async_result_freshness_snapshot()
+        return 0 if snapshot is None else int(snapshot.consecutive_stale_results)
 
     @property
     def last_stale_result_age_ms(self) -> int | None:
+        snapshot = self.async_result_freshness_snapshot()
+        if snapshot is not None:
+            return snapshot.last_stale_age_ms
         with self._lock:
-            return self._last_stale_result_age_ms
+            return getattr(self, "_last_stale_result_age_ms", None)
 
     def set_calibration(
         self,
@@ -220,11 +252,14 @@ class FaceTracker:
         a result floor. Any callback still in flight from the old webcam session
         is discarded when it eventually arrives.
         """
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             self._latest_pose = None
             self._last_delivered_timestamp_ms = None
             self._stale_result_count = 0
             self._last_stale_result_age_ms = None
+            if freshness is not None:
+                freshness.reset()
             submitted = self._last_submitted_media_timestamp_ms
             if submitted is not None:
                 current = self._minimum_result_media_timestamp_ms
@@ -361,10 +396,13 @@ class FaceTracker:
                 )
             return
 
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             if not self._result_is_current_locked(timestamp):
                 return
             self._latest_pose = pose
+            if pose is None and freshness is not None:
+                freshness.record_result_without_pose()
         if self._async_watchdog is not None:
             self._async_watchdog.record_callback(timestamp)
 
@@ -372,6 +410,7 @@ class FaceTracker:
         self,
         current_timestamp_ms: int | None = None,
     ) -> HeadPosition | None:
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             pose = self._latest_pose
             if (
@@ -382,6 +421,22 @@ class FaceTracker:
             # Retire the callback before applying the age gate. A stale result
             # must not be reconsidered on every subsequent camera frame.
             self._last_delivered_timestamp_ms = pose.capture_timestamp_ms
+
+            if freshness is not None:
+                if current_timestamp_ms is None:
+                    freshness.record_fresh_result()
+                    return pose
+                return (
+                    pose
+                    if freshness.accept_result(
+                        pose.capture_timestamp_ms,
+                        current_timestamp_ms,
+                    )
+                    else None
+                )
+
+            # Compatibility fallback for bare downstream subclasses/test doubles
+            # constructed without the freshness gate.
             maximum_age_ms = int(
                 getattr(self, "_async_max_result_age_ms", 0)
             )
@@ -394,8 +449,6 @@ class FaceTracker:
                     normalize_wire_timestamp(current_timestamp_ms),
                     pose.capture_timestamp_ms,
                 )
-                # A value in the upper half of uint32 means the pose timestamp is
-                # ahead of the supplied clock, not billions of milliseconds old.
                 if age_ms < _UINT32_HALF_RANGE and age_ms > maximum_age_ms:
                     self._stale_result_count = int(
                         getattr(self, "_stale_result_count", 0)
