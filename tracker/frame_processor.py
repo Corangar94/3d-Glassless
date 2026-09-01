@@ -1,7 +1,7 @@
-"""Explicit tracker frame-call compatibility without exception-driven retries."""
+"""Explicit tracker frame-call and result-timeline compatibility."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import inspect
 from typing import Any, Callable
@@ -11,6 +11,10 @@ from tracker.backend_status_shared_memory import (
     make_tracker_backend_status_publisher,
 )
 from tracker.pose import monotonic_ms
+from tracker.pose_result_timeline import (
+    PoseResultTimelineGate,
+    PoseResultTimelineSnapshot,
+)
 
 
 class FrameCallMode(str, Enum):
@@ -63,11 +67,14 @@ def resolve_frame_call_mode(process_frame: Callable[..., object]) -> FrameCallMo
 
 @dataclass(frozen=True)
 class FrameProcessorAdapter:
-    """Call one tracker method in its pre-resolved compatibility mode."""
+    """Call one tracker and reject nonmonotonic timestamped pose results."""
 
     process_frame: Callable[..., Any]
     mode: FrameCallMode
     backend_status_publisher: TrackerBackendStatusPublisher | None = None
+    result_timeline: PoseResultTimelineGate = field(
+        default_factory=PoseResultTimelineGate
+    )
 
     @classmethod
     def from_tracker(cls, tracker: object) -> "FrameProcessorAdapter":
@@ -86,17 +93,28 @@ class FrameProcessorAdapter:
     def __call__(self, frame: object, capture_timestamp_ms: int) -> Any:
         try:
             if self.mode is FrameCallMode.TIMESTAMP_KEYWORD:
-                return self.process_frame(
+                result = self.process_frame(
                     frame,
                     capture_timestamp_ms=capture_timestamp_ms,
                 )
-            if self.mode is FrameCallMode.TIMESTAMP_POSITIONAL_ONLY:
-                return self.process_frame(frame, capture_timestamp_ms)
-            return self.process_frame(frame)
+            elif self.mode is FrameCallMode.TIMESTAMP_POSITIONAL_ONLY:
+                result = self.process_frame(frame, capture_timestamp_ms)
+            else:
+                result = self.process_frame(frame)
+            # This executes before TrackingLoop validation, hold-state refresh,
+            # spike limiting, or Kalman filtering. A rejected timestamp therefore
+            # behaves exactly like a frame with no newly completed pose.
+            return self.result_timeline.filter(result)
         finally:
             publisher = self.backend_status_publisher
             if publisher is not None:
                 publisher.publish(capture_timestamp_ms)
+
+    def reset_result_timeline(self) -> None:
+        self.result_timeline.reset()
+
+    def result_timeline_snapshot(self) -> PoseResultTimelineSnapshot:
+        return self.result_timeline.snapshot()
 
     def close(self) -> None:
         publisher = self.backend_status_publisher
