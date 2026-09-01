@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from tracker.async_result_freshness import AsyncResultFreshnessGate
 from tracker.backend_failover import (
     AutoFailoverFaceTracker,
     BackendFailoverPolicy,
+)
+from tracker.backend_transition_state import (
+    reset_backend_transition_generation,
 )
 from tracker.pose import HeadPosition
 
@@ -52,6 +57,13 @@ class Fallback:
 
     def close(self) -> None:
         self.close_count += 1
+
+
+@pytest.fixture(autouse=True)
+def _clean_transition_state():
+    reset_backend_transition_generation()
+    yield
+    reset_backend_transition_generation()
 
 
 def test_third_stale_primary_result_switches_to_fallback_same_frame():
