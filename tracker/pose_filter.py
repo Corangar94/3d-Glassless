@@ -13,11 +13,18 @@ from tracker.pose import (
 )
 
 _UINT32 = 0xFFFF_FFFF
+_UINT32_HALF_RANGE = 0x8000_0000
+
+
+def _timestamp_delta_ms(newer_ms: int, older_ms: int) -> int | None:
+    """Return a forward uint32 delta, or ``None`` for old/ambiguous input."""
+    delta = (int(newer_ms) - int(older_ms)) & _UINT32
+    return None if delta >= _UINT32_HALF_RANGE else delta
 
 
 def _timestamp_delta_seconds(newer_ms: int, older_ms: int) -> float:
-    delta = (int(newer_ms) - int(older_ms)) & _UINT32
-    return 0.0 if delta > 0x7FFF_FFFF else delta / 1000.0
+    delta_ms = _timestamp_delta_ms(newer_ms, older_ms)
+    return 0.0 if delta_ms is None else delta_ms / 1000.0
 
 
 def normalize_angle_degrees(value: float) -> float:
@@ -226,8 +233,20 @@ class ConstantVelocityFilter1D:
         return self._state.initialized
 
 
+@dataclass(frozen=True)
+class PoseFilterGapSnapshot:
+    measurement_gap_reset_ms: float
+    measurement_gap_reset_count: int
+    last_measurement_gap_ms: float | None
+
+
 class AdaptivePoseFilter:
-    """Filter translation/orientation once and predict to display time."""
+    """Filter translation/orientation once and predict to display time.
+
+    A new measurement after a long capture-time gap starts a fresh estimator
+    episode. This prevents a reacquired face from inheriting stale position,
+    velocity, covariance, confidence, or an unwrapped orientation turn.
+    """
 
     def __init__(
         self,
@@ -236,7 +255,13 @@ class AdaptivePoseFilter:
         *,
         prediction_horizon_ms: float = 0.0,
         max_prediction_ms: float = 80.0,
+        measurement_gap_reset_ms: float = 500.0,
     ) -> None:
+        gap_reset_ms = float(measurement_gap_reset_ms)
+        if not math.isfinite(gap_reset_ms) or gap_reset_ms < 0.0:
+            raise ValueError(
+                "measurement_gap_reset_ms must be finite and non-negative"
+            )
         acceleration_variance = max(1.0, float(process_noise) * 2400.0)
         self._x = ConstantVelocityFilter1D(
             acceleration_variance,
@@ -276,12 +301,43 @@ class AdaptivePoseFilter:
             self._prediction_horizon_ms,
             float(max_prediction_ms),
         )
+        self._measurement_gap_reset_ms = gap_reset_ms
+        self._measurement_gap_reset_count = 0
+        self._last_measurement_gap_ms: float | None = None
+        self._has_measurement = False
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
         self._synthetic_timestamp_ms = monotonic_ms()
         self._backend_transition_generation = (
             current_backend_transition_state().generation
         )
+
+    @property
+    def measurement_gap_reset_ms(self) -> float:
+        return self._measurement_gap_reset_ms
+
+    @property
+    def measurement_gap_reset_count(self) -> int:
+        return self._measurement_gap_reset_count
+
+    @property
+    def last_measurement_gap_ms(self) -> float | None:
+        return self._last_measurement_gap_ms
+
+    def gap_snapshot(self) -> PoseFilterGapSnapshot:
+        return PoseFilterGapSnapshot(
+            measurement_gap_reset_ms=self._measurement_gap_reset_ms,
+            measurement_gap_reset_count=self._measurement_gap_reset_count,
+            last_measurement_gap_ms=self._last_measurement_gap_ms,
+        )
+
+    def set_measurement_gap_reset_ms(self, value: float) -> None:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError(
+                "measurement_gap_reset_ms must be finite and non-negative"
+            )
+        self._measurement_gap_reset_ms = parsed
 
     def set_measurement_noise(self, value: float) -> None:
         value = max(1e-6, float(value))
@@ -301,6 +357,7 @@ class AdaptivePoseFilter:
         ):
             axis.reset(0.0)
         self._z.reset(60.0)
+        self._has_measurement = False
         self._last_confidence = 0.0
         self._last_capture_timestamp_ms = 0
 
@@ -317,14 +374,16 @@ class AdaptivePoseFilter:
 
     def reset(self) -> None:
         self._reset_state()
+        self._measurement_gap_reset_count = 0
+        self._last_measurement_gap_ms = None
         self._backend_transition_generation = (
             current_backend_transition_state().generation
         )
 
-    def _synchronize_backend_transition(self) -> None:
+    def _synchronize_backend_transition(self) -> bool:
         transition = current_backend_transition_state()
         if transition.generation == self._backend_transition_generation:
-            return
+            return False
         if transition.preserve_position:
             # Position remains meaningful across fresh calibrated backends, but
             # velocity/covariance are source-specific and can create overshoot.
@@ -333,6 +392,27 @@ class AdaptivePoseFilter:
             # A stale/absent source must not be preserved into a new backend.
             self._reset_state()
         self._backend_transition_generation = transition.generation
+        return True
+
+    def _measurement_gap_ms(self, capture_ms: int) -> float | None:
+        if not self._has_measurement or self._measurement_gap_reset_ms <= 0.0:
+            return None
+        delta_ms = _timestamp_delta_ms(
+            capture_ms,
+            self._last_capture_timestamp_ms,
+        )
+        if delta_ms is None or delta_ms < self._measurement_gap_reset_ms:
+            return None
+        return float(delta_ms)
+
+    def _reset_for_measurement_gap(self, capture_ms: int) -> bool:
+        gap_ms = self._measurement_gap_ms(capture_ms)
+        if gap_ms is None:
+            return False
+        self._reset_state()
+        self._measurement_gap_reset_count += 1
+        self._last_measurement_gap_ms = gap_ms
+        return True
 
     @staticmethod
     def _update_orientation_axis(
@@ -375,12 +455,17 @@ class AdaptivePoseFilter:
         *,
         publish_timestamp_ms: int | None = None,
     ) -> FilteredPose:
+        # Consume backend-transition reset semantics before evaluating the
+        # capture gap. A fresh transition may preserve position first, but a
+        # genuinely long gap still starts a fully fresh estimator episode. The
+        # backend pose bridge has already aligned any continuity-preserving pose.
         self._synchronize_backend_transition()
         capture_ms = (
             normalize_wire_timestamp(pose.capture_timestamp_ms)
             if pose.capture_timestamp_ms
             else monotonic_ms()
         )
+        self._reset_for_measurement_gap(capture_ms)
         publish_ms = (
             monotonic_ms()
             if publish_timestamp_ms is None
@@ -408,6 +493,7 @@ class AdaptivePoseFilter:
             capture_ms,
             confidence,
         )
+        self._has_measurement = True
         self._last_confidence = confidence
         self._last_capture_timestamp_ms = capture_ms
         return self.predict(publish_timestamp_ms=publish_ms)
