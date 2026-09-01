@@ -29,6 +29,7 @@ from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
 from tracker.pose_shared_memory import PoseStateWriter
 from tracker.pose_step_limiter import (
+    FixedPoseStepLimiter,
     PoseStepLimiter,
     PoseStepLimiterPolicy,
     limit_pose_step,
@@ -400,7 +401,7 @@ class TrackingLoop:
         camera_quality_monitor: CameraQualityMonitor | None = None,
         lock_camera_controls: bool = False,
         camera_reconnect_policy: CameraReconnectPolicy | None = None,
-        pose_step_limiter: PoseStepLimiter | None = None,
+        pose_step_limiter: PoseStepLimiter | FixedPoseStepLimiter | None = None,
     ) -> None:
         self._tracker = tracker
         self._frame_processor = FrameProcessorAdapter.from_tracker(tracker)
@@ -414,7 +415,9 @@ class TrackingLoop:
             y_cm=0.0,
             z_cm=60.0,
         )
-        self._pose_step_limiter = pose_step_limiter or PoseStepLimiter()
+        self._pose_step_limiter = (
+            pose_step_limiter or FixedPoseStepLimiter()
+        )
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_measurement_s: float | None = None
         self._stop_event = stop_event
