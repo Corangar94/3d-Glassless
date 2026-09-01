@@ -9,7 +9,12 @@ from tracker.pose import HeadPosition, elapsed_u32_ms, normalize_wire_timestamp
 
 @dataclass(frozen=True)
 class PoseContinuityPolicy:
-    """Bounds for transition alignment and convergence."""
+    """Bounds for transition alignment and convergence.
+
+    ``max_xy_offset_cm`` limits total screen-plane displacement, not each axis
+    independently. This keeps diagonal backend transitions inside the same
+    perceptual envelope as horizontal or vertical transitions.
+    """
 
     blend_ms: int = 450
     max_source_age_ms: int = 750
@@ -43,6 +48,19 @@ class _PoseOffset:
 
 def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
+
+
+def _clamp_xy_magnitude(
+    x_cm: float,
+    y_cm: float,
+    maximum_magnitude_cm: float,
+) -> tuple[float, float]:
+    """Clamp one XY vector while preserving its direction."""
+    magnitude = math.hypot(x_cm, y_cm)
+    if magnitude <= maximum_magnitude_cm or magnitude <= 0.0:
+        return x_cm, y_cm
+    scale = maximum_magnitude_cm / magnitude
+    return x_cm * scale, y_cm * scale
 
 
 def _angle_delta(source_deg: float, target_deg: float) -> float:
@@ -140,15 +158,14 @@ class BackendPoseContinuityBridge:
         )
         if not all(math.isfinite(float(value)) for value in values):
             return None
+        x_offset, y_offset = _clamp_xy_magnitude(
+            source.x_cm - target.x_cm,
+            source.y_cm - target.y_cm,
+            self._policy.max_xy_offset_cm,
+        )
         return _PoseOffset(
-            x_cm=_clamp(
-                source.x_cm - target.x_cm,
-                self._policy.max_xy_offset_cm,
-            ),
-            y_cm=_clamp(
-                source.y_cm - target.y_cm,
-                self._policy.max_xy_offset_cm,
-            ),
+            x_cm=x_offset,
+            y_cm=y_offset,
             z_cm=_clamp(
                 source.z_cm - target.z_cm,
                 self._policy.max_z_offset_cm,
