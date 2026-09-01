@@ -6,7 +6,7 @@ Submitting every camera frame in that state does not improve visible pose freshn
 
 ## Runtime behavior
 
-The MediaPipe tracker now maintains a bounded submission backlog:
+The MediaPipe tracker maintains a bounded submission backlog:
 
 - the first input is always admitted;
 - normal callback progress keeps admitting new inputs;
@@ -18,9 +18,25 @@ The MediaPipe tracker now maintains a bounded submission backlog:
 
 The default 150 ms budget permits a short burst so normal asynchronous scheduling is unaffected, while preventing a slow task from accumulating conversion/allocation work at full webcam cadence.
 
+## Stale result rejection
+
+A callback can prove that MediaPipe is alive yet still finish too late to be useful for head-coupled rendering. Returning that old pose as a new measurement would refresh the tracker's visible `tracking` state and can create delayed parallax.
+
+The asynchronous delivery boundary therefore rejects completed poses older than 250 ms relative to the current camera frame:
+
+- age uses the same wrap-safe uint32 Windows uptime clock as capture and rendering;
+- a result exactly at the limit remains eligible;
+- an older result is retired once rather than reconsidered on later frames;
+- a timestamp that is slightly ahead of the caller is not misclassified as billions of milliseconds old;
+- missing legacy timestamps remain deliverable;
+- `async_max_result_age_ms=0` disables the gate for direct API users;
+- synchronous `IMAGE` mode is unchanged.
+
+MediaPipe callback timestamps are normalized to the project's nonzero wire-time contract, including the exact 49.7-day rollover instant.
+
 ## Stall safety
 
-Throttling is not considered an inference error. However, it must not hide a genuinely dead MediaPipe task.
+Throttling or dropping a stale pose is not considered an inference error. However, neither behavior may hide a genuinely dead MediaPipe task.
 
 The watchdog therefore distinguishes:
 
