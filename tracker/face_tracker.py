@@ -252,20 +252,20 @@ class FaceTracker:
         a result floor. Any callback still in flight from the old webcam session
         is discarded when it eventually arrives.
         """
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             self._latest_pose = None
             self._last_delivered_timestamp_ms = None
             self._stale_result_count = 0
             self._last_stale_result_age_ms = None
+            if freshness is not None:
+                freshness.reset()
             submitted = self._last_submitted_media_timestamp_ms
             if submitted is not None:
                 current = self._minimum_result_media_timestamp_ms
                 self._minimum_result_media_timestamp_ms = (
                     submitted if current is None else max(current, submitted)
                 )
-        freshness = getattr(self, "_async_result_freshness", None)
-        if freshness is not None:
-            freshness.reset()
         if self._async_watchdog is not None:
             self._async_watchdog.reset_session()
 
@@ -396,13 +396,13 @@ class FaceTracker:
                 )
             return
 
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             if not self._result_is_current_locked(timestamp):
                 return
             self._latest_pose = pose
-        freshness = getattr(self, "_async_result_freshness", None)
-        if pose is None and freshness is not None:
-            freshness.record_result_without_pose()
+            if pose is None and freshness is not None:
+                freshness.record_result_without_pose()
         if self._async_watchdog is not None:
             self._async_watchdog.record_callback(timestamp)
 
@@ -410,6 +410,7 @@ class FaceTracker:
         self,
         current_timestamp_ms: int | None = None,
     ) -> HeadPosition | None:
+        freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             pose = self._latest_pose
             if (
@@ -421,40 +422,40 @@ class FaceTracker:
             # must not be reconsidered on every subsequent camera frame.
             self._last_delivered_timestamp_ms = pose.capture_timestamp_ms
 
-        freshness = getattr(self, "_async_result_freshness", None)
-        if freshness is not None:
-            if current_timestamp_ms is None:
-                freshness.record_fresh_result()
-                return pose
-            return (
-                pose
-                if freshness.accept_result(
-                    pose.capture_timestamp_ms,
-                    current_timestamp_ms,
+            if freshness is not None:
+                if current_timestamp_ms is None:
+                    freshness.record_fresh_result()
+                    return pose
+                return (
+                    pose
+                    if freshness.accept_result(
+                        pose.capture_timestamp_ms,
+                        current_timestamp_ms,
+                    )
+                    else None
                 )
-                else None
-            )
 
-        # Compatibility fallback for bare downstream subclasses/test doubles
-        # constructed without the freshness gate.
-        maximum_age_ms = int(getattr(self, "_async_max_result_age_ms", 0))
-        if (
-            current_timestamp_ms is not None
-            and maximum_age_ms > 0
-            and pose.capture_timestamp_ms != 0
-        ):
-            age_ms = elapsed_u32_ms(
-                normalize_wire_timestamp(current_timestamp_ms),
-                pose.capture_timestamp_ms,
+            # Compatibility fallback for bare downstream subclasses/test doubles
+            # constructed without the freshness gate.
+            maximum_age_ms = int(
+                getattr(self, "_async_max_result_age_ms", 0)
             )
-            if age_ms < _UINT32_HALF_RANGE and age_ms > maximum_age_ms:
-                with self._lock:
+            if (
+                current_timestamp_ms is not None
+                and maximum_age_ms > 0
+                and pose.capture_timestamp_ms != 0
+            ):
+                age_ms = elapsed_u32_ms(
+                    normalize_wire_timestamp(current_timestamp_ms),
+                    pose.capture_timestamp_ms,
+                )
+                if age_ms < _UINT32_HALF_RANGE and age_ms > maximum_age_ms:
                     self._stale_result_count = int(
                         getattr(self, "_stale_result_count", 0)
                     ) + 1
                     self._last_stale_result_age_ms = age_ms
-                return None
-        return pose
+                    return None
+            return pose
 
     @staticmethod
     def _mediapipe_image(frame_bgr: np.ndarray) -> mp.Image:
