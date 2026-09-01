@@ -190,6 +190,10 @@ _DEFAULT_TRACKING = {
     },
     "async_stall_timeout_ms": 5_000,
     "async_max_consecutive_errors": 3,
+    "async_max_backlog_ms": 150,
+    "async_max_result_age_ms": 250,
+    "async_max_consecutive_stale_results": 3,
+    "async_stale_result_window_ms": 1_000,
     "pose_step_limit": {
         "max_xy_speed_cm_s": 300.0,
         "max_z_speed_cm_s": 360.0,
