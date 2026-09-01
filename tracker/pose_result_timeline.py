@@ -117,6 +117,8 @@ class PoseResultTimelineGate:
             parsed = int(raw)
         except (TypeError, ValueError, OverflowError):
             return None, True
+        if parsed < 0:
+            return None, True
         if parsed == 0:
             return None, False
         return normalize_wire_timestamp(parsed), False
