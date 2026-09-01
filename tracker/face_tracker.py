@@ -14,11 +14,17 @@ from mediapipe import tasks
 
 from tracker.async_inference_watchdog import AsyncInferenceWatchdog
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
-from tracker.pose import HeadPosition, monotonic_ms, normalize_wire_timestamp
+from tracker.pose import (
+    HeadPosition,
+    elapsed_u32_ms,
+    monotonic_ms,
+    normalize_wire_timestamp,
+)
 from tracker.timestamp_expansion import expand_u32_timestamp
 
 _LEFT_IRIS_CENTER = 468
 _RIGHT_IRIS_CENTER = 473
+_UINT32_HALF_RANGE = 0x8000_0000
 _DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "models", "face_landmarker.task"
 )
@@ -125,12 +131,16 @@ class FaceTracker:
         async_stall_timeout_ms: int = 5000,
         async_max_consecutive_errors: int = 3,
         async_max_backlog_ms: int = 150,
+        async_max_result_age_ms: int = 250,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
         backlog_ms = int(async_max_backlog_ms)
         if backlog_ms < 0:
             raise ValueError("async_max_backlog_ms cannot be negative")
+        result_age_ms = int(async_max_result_age_ms)
+        if result_age_ms < 0:
+            raise ValueError("async_max_result_age_ms cannot be negative")
         self._real_ipd_cm = float(real_ipd_cm)
         self._screen_width_cm = float(screen_width_cm)
         self._screen_height_cm = float(screen_height_cm)
@@ -138,9 +148,12 @@ class FaceTracker:
         self._camera_geometry = camera_geometry
         self._async_mode = bool(async_mode)
         self._async_max_backlog_ms = backlog_ms
+        self._async_max_result_age_ms = result_age_ms
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms: int | None = None
+        self._stale_result_count = 0
+        self._last_stale_result_age_ms: int | None = None
         self._last_submitted_wire_timestamp_ms: int | None = None
         self._last_submitted_media_timestamp_ms: int | None = None
         self._minimum_result_media_timestamp_ms: int | None = None
@@ -173,6 +186,16 @@ class FaceTracker:
         )
         self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
 
+    @property
+    def stale_result_count(self) -> int:
+        with self._lock:
+            return int(self._stale_result_count)
+
+    @property
+    def last_stale_result_age_ms(self) -> int | None:
+        with self._lock:
+            return self._last_stale_result_age_ms
+
     def set_calibration(
         self,
         *,
@@ -200,6 +223,8 @@ class FaceTracker:
         with self._lock:
             self._latest_pose = None
             self._last_delivered_timestamp_ms = None
+            self._stale_result_count = 0
+            self._last_stale_result_age_ms = None
             submitted = self._last_submitted_media_timestamp_ms
             if submitted is not None:
                 current = self._minimum_result_media_timestamp_ms
@@ -309,7 +334,7 @@ class FaceTracker:
             pitch_deg=pitch_deg,
             roll_deg=roll_deg,
             confidence=_landmark_confidence(landmarks),
-            capture_timestamp_ms=int(timestamp_ms) & 0xFFFF_FFFF,
+            capture_timestamp_ms=normalize_wire_timestamp(timestamp_ms),
         )
 
     def _on_result(self, result: object, image: object, timestamp_ms: int) -> None:
@@ -343,7 +368,10 @@ class FaceTracker:
         if self._async_watchdog is not None:
             self._async_watchdog.record_callback(timestamp)
 
-    def _poll_latest(self) -> HeadPosition | None:
+    def _poll_latest(
+        self,
+        current_timestamp_ms: int | None = None,
+    ) -> HeadPosition | None:
         with self._lock:
             pose = self._latest_pose
             if (
@@ -351,7 +379,29 @@ class FaceTracker:
                 or pose.capture_timestamp_ms == self._last_delivered_timestamp_ms
             ):
                 return None
+            # Retire the callback before applying the age gate. A stale result
+            # must not be reconsidered on every subsequent camera frame.
             self._last_delivered_timestamp_ms = pose.capture_timestamp_ms
+            maximum_age_ms = int(
+                getattr(self, "_async_max_result_age_ms", 0)
+            )
+            if (
+                current_timestamp_ms is not None
+                and maximum_age_ms > 0
+                and pose.capture_timestamp_ms != 0
+            ):
+                age_ms = elapsed_u32_ms(
+                    normalize_wire_timestamp(current_timestamp_ms),
+                    pose.capture_timestamp_ms,
+                )
+                # A value in the upper half of uint32 means the pose timestamp is
+                # ahead of the supplied clock, not billions of milliseconds old.
+                if age_ms < _UINT32_HALF_RANGE and age_ms > maximum_age_ms:
+                    self._stale_result_count = int(
+                        getattr(self, "_stale_result_count", 0)
+                    ) + 1
+                    self._last_stale_result_age_ms = age_ms
+                    return None
             return pose
 
     @staticmethod
@@ -382,7 +432,7 @@ class FaceTracker:
                     self._last_submitted_media_timestamp_ms,
                 )
             if media_timestamp_ms is None:
-                return self._poll_latest()
+                return self._poll_latest(wire_timestamp_ms)
             if watchdog is not None:
                 watchdog.raise_if_unhealthy(media_timestamp_ms)
                 if not watchdog.should_submit(
@@ -390,7 +440,7 @@ class FaceTracker:
                     max_backlog_ms=self._async_max_backlog_ms,
                 ):
                     watchdog.record_throttled_submission()
-                    return self._poll_latest()
+                    return self._poll_latest(wire_timestamp_ms)
 
             # Conversion/allocation is deliberately after timestamp and backlog
             # admission so duplicate, out-of-order, and overloaded inputs stay
@@ -410,7 +460,7 @@ class FaceTracker:
                 if watchdog is not None:
                     watchdog.record_submission(media_timestamp_ms)
                     watchdog.raise_if_unhealthy(media_timestamp_ms)
-            return self._poll_latest()
+            return self._poll_latest(wire_timestamp_ms)
 
         image = self._mediapipe_image(frame_bgr)
         result = self._landmarker.detect(image)
