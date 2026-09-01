@@ -189,7 +189,7 @@ _DEFAULT_TRACKING = {
         "shadow_probe_timeout_ms": 5_000,
         "minimum_healthy_callbacks": 3,
     },
-    **MediaPipeRuntimePolicy().config_values(),
+    "mediapipe_runtime": MediaPipeRuntimePolicy().config_values(),
     "pose_step_limit": {
         "max_xy_speed_cm_s": 300.0,
         "max_z_speed_cm_s": 360.0,
