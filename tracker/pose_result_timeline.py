@@ -89,7 +89,7 @@ class PoseResultTimelineGate:
             return None, False
         except Exception:
             return None, True
-        if raw is None or raw == 0:
+        if raw is None:
             return None, False
         if isinstance(raw, bool):
             return None, True
@@ -100,13 +100,15 @@ class PoseResultTimelineGate:
             parsed = int(raw)
         except (TypeError, ValueError, OverflowError):
             return None, True
+        if parsed == 0:
+            return None, False
         return normalize_wire_timestamp(parsed), False
 
     def filter(self, result: Any) -> Any:
         """Return an accepted result, or ``None`` for a rejected pose result."""
+        self._synchronize_backend_transition()
         if result is None:
             return None
-        self._synchronize_backend_transition()
         timestamp, malformed = self._timestamp_from_result(result)
         if malformed:
             self._malformed_timestamp_count += 1
