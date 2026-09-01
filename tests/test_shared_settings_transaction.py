@@ -14,6 +14,8 @@ from tracker.shared_settings import (
     STRUCT_SIZE,
     VERSION_INDEX,
     VERSION_OFFSET,
+    _VERSION_END,
+    _VERSION_SIZE,
     _pack_settings,
     _settings_versions,
 )
@@ -29,13 +31,34 @@ def _bare_writer(*, version: int = 0) -> SharedSettingsWriter:
     return writer
 
 
-def _recording_memmove(calls):
+def _recording_memmove(calls, *, fail_on_call: int | None = None):
     def memmove(destination, source, count):
         payload = bytes(source[:count])
         calls.append((int(destination), payload, int(count)))
+        if fail_on_call is not None and len(calls) == fail_on_call:
+            raise OSError("simulated shared-memory write failure")
         return destination
 
     return memmove
+
+
+def _snapshot_from_commit_calls(calls) -> bytes:
+    odd_destination, odd_marker, odd_size = calls[-4]
+    prefix_destination, prefix, prefix_size = calls[-3]
+    suffix_destination, suffix, suffix_size = calls[-2]
+    even_destination, even_marker, even_size = calls[-1]
+
+    assert odd_destination == 4096 + VERSION_OFFSET
+    assert odd_size == _VERSION_SIZE
+    assert struct.unpack("<I", odd_marker)[0] & 1
+    assert prefix_destination == 4096
+    assert prefix_size == VERSION_OFFSET
+    assert suffix_destination == 4096 + _VERSION_END
+    assert suffix_size == STRUCT_SIZE - _VERSION_END
+    assert even_destination == 4096 + VERSION_OFFSET
+    assert even_size == _VERSION_SIZE
+    assert not (struct.unpack("<I", even_marker)[0] & 1)
+    return prefix + even_marker + suffix
 
 
 def test_invalid_float_is_rejected_before_mapping_becomes_odd(monkeypatch):
@@ -91,7 +114,9 @@ def test_float32_overflow_is_rejected_before_publication(monkeypatch):
     assert writer._version == 12
 
 
-def test_valid_write_marks_odd_then_installs_complete_even_snapshot(monkeypatch):
+def test_valid_write_keeps_version_odd_until_both_body_slices_are_installed(
+    monkeypatch,
+):
     writer = _bare_writer(version=4)
     calls = []
     monkeypatch.setattr(
@@ -103,28 +128,25 @@ def test_valid_write_marks_odd_then_installs_complete_even_snapshot(monkeypatch)
         strength_x=1.5,
         depth_curve=2,
         display_backend=1,
+        stereo_layout=1,
+        panel_width_px=3840,
     )
 
     writer.write(settings)
 
-    assert len(calls) == 2
-    marker_destination, marker_payload, marker_size = calls[0]
-    assert marker_destination == writer._view + VERSION_OFFSET
-    assert marker_size == 4
-    assert struct.unpack("<I", marker_payload)[0] == 5
-
-    snapshot_destination, snapshot, snapshot_size = calls[1]
-    assert snapshot_destination == writer._view
-    assert snapshot_size == STRUCT_SIZE
+    assert len(calls) == 4
+    snapshot = _snapshot_from_commit_calls(calls)
     fields = struct.unpack(STRUCT_FORMAT, snapshot)
     assert fields[0] == pytest.approx(1.5)
     assert fields[5] == 2
     assert fields[13] == 1
     assert fields[VERSION_INDEX] == 6
+    assert fields[16] == 1
+    assert fields[18] == 3840
     assert writer._version == 6
 
 
-def test_failed_update_preserves_previous_committed_version(monkeypatch):
+def test_failed_validation_preserves_previous_committed_version(monkeypatch):
     writer = _bare_writer(version=6)
     calls = []
     monkeypatch.setattr(
@@ -142,9 +164,70 @@ def test_failed_update_preserves_previous_committed_version(monkeypatch):
 
     assert calls == successful_calls
     assert writer._version == 8
-    committed = struct.unpack(STRUCT_FORMAT, calls[-1][1])
+    committed = struct.unpack(
+        STRUCT_FORMAT,
+        _snapshot_from_commit_calls(successful_calls),
+    )
     assert committed[VERSION_INDEX] == 8
     assert committed[0] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("fail_on_call", [2, 3, 4])
+def test_partial_copy_or_commit_failure_never_advances_writer_version(
+    monkeypatch,
+    fail_on_call,
+):
+    writer = _bare_writer(version=6)
+    calls = []
+    monkeypatch.setattr(
+        shared_settings.ctypes,
+        "memmove",
+        _recording_memmove(calls, fail_on_call=fail_on_call),
+    )
+
+    with pytest.raises(OSError, match="simulated"):
+        writer.write(OverlaySettings(strength_x=2.5))
+
+    assert len(calls) == fail_on_call
+    assert struct.unpack("<I", calls[0][1])[0] == 7
+    assert writer._version == 6
+    if fail_on_call < 4:
+        assert all(
+            not (
+                destination == writer._view + VERSION_OFFSET
+                and not (struct.unpack("<I", payload)[0] & 1)
+            )
+            for destination, payload, size in calls
+            if size == _VERSION_SIZE
+        )
+
+
+def test_failed_copy_retries_the_same_odd_and_even_versions(monkeypatch):
+    writer = _bare_writer(version=10)
+    failed_calls = []
+    monkeypatch.setattr(
+        shared_settings.ctypes,
+        "memmove",
+        _recording_memmove(failed_calls, fail_on_call=3),
+    )
+    with pytest.raises(OSError):
+        writer.write(OverlaySettings(strength_x=2.0))
+    assert writer._version == 10
+
+    retry_calls = []
+    monkeypatch.setattr(
+        shared_settings.ctypes,
+        "memmove",
+        _recording_memmove(retry_calls),
+    )
+    writer.write(OverlaySettings(strength_x=3.0))
+
+    assert struct.unpack("<I", retry_calls[0][1])[0] == 11
+    snapshot = _snapshot_from_commit_calls(retry_calls)
+    fields = struct.unpack(STRUCT_FORMAT, snapshot)
+    assert fields[VERSION_INDEX] == 12
+    assert fields[0] == pytest.approx(3.0)
+    assert writer._version == 12
 
 
 def test_version_rollover_publishes_maximum_odd_then_zero_even(monkeypatch):
@@ -159,7 +242,10 @@ def test_version_rollover_publishes_maximum_odd_then_zero_even(monkeypatch):
     writer.write(OverlaySettings())
 
     assert struct.unpack("<I", calls[0][1])[0] == 0xFFFF_FFFF
-    fields = struct.unpack(STRUCT_FORMAT, calls[1][1])
+    fields = struct.unpack(
+        STRUCT_FORMAT,
+        _snapshot_from_commit_calls(calls),
+    )
     assert fields[VERSION_INDEX] == 0
     assert writer._version == 0
 

@@ -37,6 +37,8 @@ STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
 VERSION_INDEX = 15
 VERSION_OFFSET = struct.calcsize("<fffffIfffffffII")
+_VERSION_SIZE = struct.calcsize("<I")
+_VERSION_END = VERSION_OFFSET + _VERSION_SIZE
 SHM_NAME = "G3D_Settings"
 _UINT32_MAX = 0xFFFF_FFFF
 
@@ -176,14 +178,32 @@ class SharedSettingsWriter:
             )
             # Build the complete snapshot before marking the mapping odd. A bad
             # UI/config value can therefore raise without making the last valid
-            # settings permanently unreadable.
+            # settings unreadable.
             data = _pack_settings(s, committed_version)
+            writing_marker = struct.pack("<I", writing_version)
+            committed_marker = data[VERSION_OFFSET:_VERSION_END]
+
+            # The version lives in the middle of the ABI. Copying the complete
+            # even-version struct in one memmove could expose that even marker
+            # before the trailing stereo/panel/tracking fields were installed.
+            # Keep the marker odd while both body slices are copied, then commit
+            # the even version in the final aligned four-byte store.
             ctypes.memmove(
                 view + VERSION_OFFSET,
-                struct.pack("<I", writing_version),
-                4,
+                writing_marker,
+                _VERSION_SIZE,
             )
-            ctypes.memmove(view, data, STRUCT_SIZE)
+            ctypes.memmove(view, data[:VERSION_OFFSET], VERSION_OFFSET)
+            ctypes.memmove(
+                view + _VERSION_END,
+                data[_VERSION_END:],
+                STRUCT_SIZE - _VERSION_END,
+            )
+            ctypes.memmove(
+                view + VERSION_OFFSET,
+                committed_marker,
+                _VERSION_SIZE,
+            )
             self._version = committed_version
 
     def close(self) -> None:
