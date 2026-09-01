@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from tracker.backend_pose_bridge import (
     BackendPoseContinuityBridge,
     PoseContinuityPolicy,
+    _clamp_xy_magnitude,
 )
 from tracker.pose import HeadPosition
 
@@ -81,7 +84,7 @@ def test_stale_source_pose_is_not_carried_into_new_backend():
     assert not bridge.transition_active
 
 
-def test_alignment_offsets_are_bounded():
+def test_alignment_offsets_are_bounded_by_total_xy_magnitude():
     bridge = BackendPoseContinuityBridge(
         PoseContinuityPolicy(
             max_xy_offset_cm=20.0,
@@ -101,10 +104,60 @@ def test_alignment_offsets_are_bounded():
     )
 
     assert result is not None
-    assert result.x_cm == pytest.approx(20.0)
-    assert result.y_cm == pytest.approx(-20.0)
+    expected_axis = 20.0 / math.sqrt(2.0)
+    assert result.x_cm == pytest.approx(expected_axis)
+    assert result.y_cm == pytest.approx(-expected_axis)
+    assert math.hypot(result.x_cm, result.y_cm) == pytest.approx(20.0)
     assert result.z_cm == pytest.approx(70.0)
     assert result.yaw_deg == pytest.approx(15.0)
+
+
+def test_axis_only_alignment_limit_is_unchanged():
+    bridge = BackendPoseContinuityBridge(
+        PoseContinuityPolicy(max_xy_offset_cm=20.0)
+    )
+    bridge.apply(_pose(100.0, 1000), 1000)
+    bridge.begin_transition(1000)
+
+    result = bridge.apply(_pose(0.0, 1000), 1000)
+
+    assert result is not None
+    assert result.x_cm == pytest.approx(20.0)
+    assert result.y_cm == pytest.approx(0.0)
+
+
+def test_xy_alignment_clamp_preserves_direction():
+    x_cm, y_cm = _clamp_xy_magnitude(30.0, 40.0, 10.0)
+
+    assert x_cm == pytest.approx(6.0)
+    assert y_cm == pytest.approx(8.0)
+    assert math.hypot(x_cm, y_cm) == pytest.approx(10.0)
+
+
+def test_zero_xy_limit_disables_translation_alignment_only():
+    bridge = BackendPoseContinuityBridge(
+        PoseContinuityPolicy(
+            max_xy_offset_cm=0.0,
+            max_z_offset_cm=10.0,
+            max_angle_offset_deg=15.0,
+        )
+    )
+    bridge.apply(
+        _pose(10.0, 1000, y=5.0, z=70.0, yaw=10.0),
+        1000,
+    )
+    bridge.begin_transition(1000)
+
+    result = bridge.apply(
+        _pose(0.0, 1000, y=0.0, z=60.0, yaw=0.0),
+        1000,
+    )
+
+    assert result is not None
+    assert result.x_cm == pytest.approx(0.0)
+    assert result.y_cm == pytest.approx(0.0)
+    assert result.z_cm == pytest.approx(70.0)
+    assert result.yaw_deg == pytest.approx(10.0)
 
 
 def test_angle_alignment_uses_shortest_wrap_direction():
