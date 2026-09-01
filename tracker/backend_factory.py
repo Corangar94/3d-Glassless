@@ -155,8 +155,12 @@ def create_face_tracker(
         None,
     )
     mediapipe_kwargs = dict(base_kwargs)
+    cv2_kwargs = dict(base_kwargs)
     if isinstance(runtime_policy, MediaPipeRuntimePolicy):
-        mediapipe_kwargs.update(runtime_policy.tracker_kwargs())
+        configured_kwargs = runtime_policy.tracker_kwargs()
+        mediapipe_kwargs.update(configured_kwargs)
+        for key in configured_kwargs:
+            cv2_kwargs.pop(key, None)
 
     def make_mediapipe() -> object:
         module_name = "tracker.face_tracker"
@@ -166,7 +170,7 @@ def create_face_tracker(
     def make_cv2() -> object:
         module_name = "tracker.face_tracker_cv2"
         module = import_module(module_name)
-        return _tracker_class(module, module_name)(**base_kwargs)
+        return _tracker_class(module, module_name)(**cv2_kwargs)
 
     if backend_id == "mediapipe":
         return make_mediapipe(), "mediapipe"
