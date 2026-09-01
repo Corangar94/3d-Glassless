@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import math
+import numbers
 from typing import Any
 
 from tracker.backend_transition_state import (
@@ -12,6 +14,7 @@ from tracker.pose import elapsed_u32_ms, normalize_wire_timestamp
 
 
 _UINT32_HALF_RANGE = 0x8000_0000
+_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -37,9 +40,10 @@ class PoseResultTimelineSnapshot:
 class PoseResultTimelineGate:
     """Keep a result stream monotonic without constraining legacy objects.
 
-    A result without ``capture_timestamp_ms`` (or with the historical value
-    zero) is passed through without becoming the timestamp anchor. Timestamped
-    results must advance on the project's wrap-safe uint32 wire clock.
+    A result without an explicitly declared ``capture_timestamp_ms`` (or with
+    the historical value zero) is passed through without becoming the timestamp
+    anchor. Timestamped results must advance on the project's wrap-safe uint32
+    wire clock.
 
     Automatic MediaPipe/OpenCV backend transitions start a new result timeline.
     The backend controller advances its transition generation during the same
@@ -79,22 +83,35 @@ class PoseResultTimelineGate:
     def _timestamp_from_result(result: object) -> tuple[int | None, bool]:
         """Return (timestamp, malformed).
 
-        Missing/None/zero timestamps are legacy untimestamped values. Booleans,
-        non-integral floats, non-finite values, and unconvertible objects are
-        malformed because silently coercing them could manufacture ordering.
+        Static attribute discovery avoids treating dynamic mocks or broad
+        ``__getattr__`` wrappers as timestamped pose objects merely because they
+        can manufacture an attribute on demand. Declared properties and slots
+        are then read normally, with getter failures contained as malformed.
         """
         try:
-            raw = getattr(result, "capture_timestamp_ms")
-        except AttributeError:
+            declared = inspect.getattr_static(
+                result,
+                "capture_timestamp_ms",
+                _MISSING,
+            )
+        except Exception:
+            return None, True
+        if declared is _MISSING:
             return None, False
+        try:
+            raw = getattr(result, "capture_timestamp_ms")
         except Exception:
             return None, True
         if raw is None:
             return None, False
         if isinstance(raw, bool):
             return None, True
-        if isinstance(raw, float):
-            if not math.isfinite(raw) or not raw.is_integer():
+        if isinstance(raw, numbers.Real) and not isinstance(
+            raw,
+            numbers.Integral,
+        ):
+            real = float(raw)
+            if not math.isfinite(real) or not real.is_integer():
                 return None, True
         try:
             parsed = int(raw)
