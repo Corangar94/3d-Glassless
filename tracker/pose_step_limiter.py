@@ -1,4 +1,4 @@
-"""Capture-time-aware translation limits before Kalman pose filtering."""
+"""Translation spike limits before Kalman pose filtering."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,6 +46,35 @@ class PoseStepLimiterSnapshot:
     last_z_limit_cm: float | None
 
 
+def _validated_position(
+    values: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    parsed = tuple(float(value) for value in values)
+    if len(parsed) != 3 or not all(math.isfinite(value) for value in parsed):
+        raise ValueError("raw pose translation must contain three finite values")
+    if parsed[2] <= 0.0:
+        raise ValueError("raw pose depth must be positive")
+    return parsed  # type: ignore[return-value]
+
+
+def _limited_head_position(
+    pose: HeadPosition,
+    limited: tuple[float, float, float],
+) -> HeadPosition:
+    if limited == pose.xyz:
+        return pose
+    return HeadPosition(
+        x_cm=limited[0],
+        y_cm=limited[1],
+        z_cm=limited[2],
+        yaw_deg=pose.yaw_deg,
+        pitch_deg=pose.pitch_deg,
+        roll_deg=pose.roll_deg,
+        confidence=pose.confidence,
+        capture_timestamp_ms=pose.capture_timestamp_ms,
+    )
+
+
 def limit_pose_step(
     raw: tuple[float, float, float],
     previous: tuple[float, float, float] | None,
@@ -69,6 +98,46 @@ def limit_pose_step(
     if maximum_z_step_cm > 0.0:
         dz = max(-maximum_z_step_cm, min(maximum_z_step_cm, dz))
     return x, y, previous[2] + dz
+
+
+class FixedPoseStepLimiter:
+    """Historical fixed-per-measurement limiter for direct loop callers.
+
+    The packaged runtime explicitly injects ``PoseStepLimiter``. Keeping this
+    compatibility implementation as the ``TrackingLoop`` default prevents
+    timestamp-less test doubles and third-party direct callers from acquiring a
+    new frame-rate dependency merely by upgrading the library.
+    """
+
+    def __init__(
+        self,
+        *,
+        maximum_xy_step_cm: float = 10.0,
+        maximum_z_step_cm: float = 12.0,
+    ) -> None:
+        for name, value in (
+            ("maximum_xy_step_cm", maximum_xy_step_cm),
+            ("maximum_z_step_cm", maximum_z_step_cm),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        self._maximum_xy_step_cm = float(maximum_xy_step_cm)
+        self._maximum_z_step_cm = float(maximum_z_step_cm)
+        self._last_position: tuple[float, float, float] | None = None
+
+    def reset(self) -> None:
+        self._last_position = None
+
+    def limit_head_position(self, pose: HeadPosition) -> HeadPosition:
+        position = _validated_position(pose.xyz)
+        limited = limit_pose_step(
+            position,
+            self._last_position,
+            maximum_xy_step_cm=self._maximum_xy_step_cm,
+            maximum_z_step_cm=self._maximum_z_step_cm,
+        )
+        self._last_position = limited
+        return _limited_head_position(pose, limited)
 
 
 class PoseStepLimiter:
@@ -99,15 +168,6 @@ class PoseStepLimiter:
         self._last_xy_limit_cm = None
         self._last_z_limit_cm = None
 
-    @staticmethod
-    def _position(values: tuple[float, float, float]) -> tuple[float, float, float]:
-        parsed = tuple(float(value) for value in values)
-        if len(parsed) != 3 or not all(math.isfinite(value) for value in parsed):
-            raise ValueError("raw pose translation must contain three finite values")
-        if parsed[2] <= 0.0:
-            raise ValueError("raw pose depth must be positive")
-        return parsed  # type: ignore[return-value]
-
     def _accept_new_episode(
         self,
         position: tuple[float, float, float],
@@ -129,7 +189,7 @@ class PoseStepLimiter:
         raw: tuple[float, float, float],
         capture_timestamp_ms: int,
     ) -> tuple[float, float, float]:
-        position = self._position(raw)
+        position = _validated_position(raw)
         timestamp = normalize_wire_timestamp(capture_timestamp_ms)
         previous = self._last_position
         previous_timestamp = self._last_timestamp_ms
@@ -187,18 +247,7 @@ class PoseStepLimiter:
 
     def limit_head_position(self, pose: HeadPosition) -> HeadPosition:
         limited = self.limit(pose.xyz, pose.capture_timestamp_ms)
-        if limited == pose.xyz:
-            return pose
-        return HeadPosition(
-            x_cm=limited[0],
-            y_cm=limited[1],
-            z_cm=limited[2],
-            yaw_deg=pose.yaw_deg,
-            pitch_deg=pose.pitch_deg,
-            roll_deg=pose.roll_deg,
-            confidence=pose.confidence,
-            capture_timestamp_ms=pose.capture_timestamp_ms,
-        )
+        return _limited_head_position(pose, limited)
 
     def snapshot(self) -> PoseStepLimiterSnapshot:
         return PoseStepLimiterSnapshot(
