@@ -108,14 +108,14 @@ recovery:
 
 ### Tracker backend failover
 
-The default `auto` tracker mode now recovers inside the tracker process before the launcher needs to restart it:
+The default `auto` tracker mode recovers inside the tracker process before the launcher needs to restart it:
 
 - MediaPipe remains the preferred high-quality backend;
 - an explicit MediaPipe async-health failure switches the current frame to the OpenCV fallback;
 - ordinary implementation errors still surface instead of being hidden as failover events;
-- after 30 seconds on OpenCV, one MediaPipe instance is probed in shadow mode;
-- promotion occurs only after the shadow instance demonstrates callback progress, including a valid no-face callback;
-- a failed shadow probe cannot interrupt the working OpenCV fallback;
+- after 30 seconds on OpenCV, one MediaPipe instance is sampled in shadow mode at 10 Hz;
+- promotion requires three advancing, error-free callbacks and a usable current pose;
+- a shadow candidate that cannot prove health within five seconds is closed without interrupting OpenCV output;
 - after the bounded probe is exhausted, OpenCV remains active until the tracker process is intentionally restarted;
 - explicit `mediapipe` and `cv2` selections remain strict and never switch automatically.
 
@@ -126,7 +126,7 @@ Backend transitions are also stabilized perceptually:
 - the current filtered position is preserved while backend-specific velocity and covariance are cleared;
 - the same transition treatment applies when OpenCV is promoted back to a healthy MediaPipe instance.
 
-The backend policy and MediaPipe health thresholds are configurable:
+The backend-recovery and MediaPipe latency policies are configurable independently:
 
 ```yaml
 tracking:
@@ -134,9 +134,19 @@ tracking:
   backend_failover:
     retry_primary_after_ms: 30000
     max_primary_retries: 1
-  async_stall_timeout_ms: 5000
-  async_max_consecutive_errors: 3
+    shadow_probe_interval_ms: 100
+    shadow_probe_timeout_ms: 5000
+    minimum_healthy_callbacks: 3
+  mediapipe_runtime:
+    stall_timeout_ms: 5000
+    max_consecutive_errors: 3
+    max_backlog_ms: 150
+    max_result_age_ms: 250
+    max_consecutive_stale_results: 3
+    stale_result_window_ms: 1000
 ```
+
+The MediaPipe block is validated atomically and is applied to strict MediaPipe, the automatic primary, and shadow recovery candidates. See [MediaPipe runtime policy](docs/MEDIAPIPE_RUNTIME_POLICY.md), [live-stream backpressure](docs/MEDIAPIPE_ASYNC_BACKPRESSURE.md), and [sampled recovery](docs/SHADOW_MEDIAPIPE_RECOVERY.md).
 
 ## Controls
 

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from launcher.edid import detect_screen_size_cm
 from launcher.overlay_process import find_depth_model, find_overlay_exe
+from tracker.mediapipe_runtime_policy import MediaPipeRuntimePolicy
 
 
 _CAMERA_PROBE_BACKENDS: tuple[tuple[int | None, str], ...] = (
@@ -188,8 +189,7 @@ _DEFAULT_TRACKING = {
         "shadow_probe_timeout_ms": 5_000,
         "minimum_healthy_callbacks": 3,
     },
-    "async_stall_timeout_ms": 5_000,
-    "async_max_consecutive_errors": 3,
+    "mediapipe_runtime": MediaPipeRuntimePolicy().config_values(),
     "pose_step_limit": {
         "max_xy_speed_cm_s": 300.0,
         "max_z_speed_cm_s": 360.0,

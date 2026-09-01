@@ -42,8 +42,13 @@ tracking:
     shadow_probe_interval_ms: 100
     shadow_probe_timeout_ms: 5000
     minimum_healthy_callbacks: 3
-  async_stall_timeout_ms: 5000
-  async_max_consecutive_errors: 3
+  mediapipe_runtime:
+    stall_timeout_ms: 5000
+    max_consecutive_errors: 3
+    max_backlog_ms: 150
+    max_result_age_ms: 250
+    max_consecutive_stale_results: 3
+    stale_result_window_ms: 1000
   camera_fov_deg: 90.0
   camera_tilt_deg: -17.92
   hold_ms: 500
