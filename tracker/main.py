@@ -31,6 +31,7 @@ from tracker.pose_shared_memory import PoseStateWriter
 from tracker.pose_step_limiter import (
     PoseStepLimiter,
     PoseStepLimiterPolicy,
+    limit_pose_step,
 )
 from tracker.shared_memory import SharedMemoryWriter, TrackingStateWriter
 from tracker.shared_settings import OverlaySettings, SharedSettingsReader
