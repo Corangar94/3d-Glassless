@@ -19,52 +19,20 @@ ImportModule = Callable[[str], object]
 LogFunction = Callable[[str], None]
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=True)
 class ConfiguredBackendFailoverPolicy(BackendFailoverPolicy):
-    """Backward-compatible failover policy carrying MediaPipe runtime limits.
+    """Failover fields plus validated MediaPipe runtime limits.
 
-    ``tracker.main`` already parses the tracking mapping once through
-    ``parse_backend_failover_policy`` for every configured backend. Attaching the
-    MediaPipe policy here lets strict MediaPipe, automatic primary, and shadow
-    recovery construction share that one validated configuration boundary
-    without changing direct callers that pass a plain ``BackendFailoverPolicy``.
+    The class remains a ``BackendFailoverPolicy`` subtype, so existing consumers
+    of the recovery fields require no changes. Equality remains class-exact and
+    includes the MediaPipe policy; comparing configured policies can therefore
+    never violate symmetry or transitivity.
     """
 
     mediapipe_runtime_policy: MediaPipeRuntimePolicy = field(
         default_factory=MediaPipeRuntimePolicy,
         repr=False,
     )
-
-    def _failover_values(self) -> tuple[int, int, int, int, int]:
-        return (
-            self.retry_primary_after_ms,
-            self.max_primary_retries,
-            self.shadow_probe_interval_ms,
-            self.shadow_probe_timeout_ms,
-            self.minimum_healthy_callbacks,
-        )
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, ConfiguredBackendFailoverPolicy):
-            return (
-                self._failover_values() == other._failover_values()
-                and self.mediapipe_runtime_policy
-                == other.mediapipe_runtime_policy
-            )
-        if isinstance(other, BackendFailoverPolicy):
-            return self._failover_values() == (
-                other.retry_primary_after_ms,
-                other.max_primary_retries,
-                other.shadow_probe_interval_ms,
-                other.shadow_probe_timeout_ms,
-                other.minimum_healthy_callbacks,
-            )
-        return NotImplemented
-
-    def __hash__(self) -> int:
-        # Equality with the historical base policy intentionally ignores the
-        # attached MediaPipe settings, so the hash must use the same base fields.
-        return hash(self._failover_values())
 
 
 def parse_backend_failover_policy(
