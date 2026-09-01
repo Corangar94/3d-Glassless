@@ -1,15 +1,26 @@
-from tracker.backend_factory import parse_backend_failover_policy
-from tracker.backend_failover import BackendFailoverPolicy
+from tracker.backend_factory import (
+    ConfiguredBackendFailoverPolicy,
+    parse_backend_failover_policy,
+)
+from tracker.mediapipe_runtime_policy import MediaPipeRuntimePolicy
+
+
+def _failover_values(policy):
+    return (
+        policy.retry_primary_after_ms,
+        policy.max_primary_retries,
+        policy.shadow_probe_interval_ms,
+        policy.shadow_probe_timeout_ms,
+        policy.minimum_healthy_callbacks,
+    )
 
 
 def test_packaged_defaults_sample_shadow_mediapipe_at_ten_hz():
     policy = parse_backend_failover_policy({})
 
-    assert policy.retry_primary_after_ms == 30_000
-    assert policy.max_primary_retries == 1
-    assert policy.shadow_probe_interval_ms == 100
-    assert policy.shadow_probe_timeout_ms == 5_000
-    assert policy.minimum_healthy_callbacks == 3
+    assert isinstance(policy, ConfiguredBackendFailoverPolicy)
+    assert _failover_values(policy) == (30_000, 1, 100, 5_000, 3)
+    assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy()
 
 
 def test_explicit_shadow_recovery_policy_is_parsed():
@@ -25,13 +36,7 @@ def test_explicit_shadow_recovery_policy_is_parsed():
         }
     )
 
-    assert policy == BackendFailoverPolicy(
-        retry_primary_after_ms=12_000,
-        max_primary_retries=2,
-        shadow_probe_interval_ms=250,
-        shadow_probe_timeout_ms=4_000,
-        minimum_healthy_callbacks=5,
-    )
+    assert _failover_values(policy) == (12_000, 2, 250, 4_000, 5)
 
 
 def test_invalid_shadow_recovery_policy_falls_back_atomically(capsys):
@@ -46,7 +51,8 @@ def test_invalid_shadow_recovery_policy_falls_back_atomically(capsys):
         }
     )
 
-    assert policy == BackendFailoverPolicy()
+    assert _failover_values(policy) == (30_000, 1, 100, 5_000, 3)
+    assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy()
     assert "using safe defaults" in capsys.readouterr().out
 
 
