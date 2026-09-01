@@ -25,6 +25,7 @@ from tracker.camera_reconnect_retry import (
 from tracker.face_tracker_cv2 import HeadPosition
 from tracker.frame_processor import FrameProcessorAdapter
 from tracker.freetrack import FreetracWriter
+from tracker.mediapipe_runtime_policy import parse_mediapipe_runtime_policy
 from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
 from tracker.pose_shared_memory import PoseStateWriter
@@ -921,6 +922,7 @@ def main() -> None:
         ),
         max_prediction_ms=float(trk.get("max_prediction_ms", 80.0)),
     )
+    mediapipe_runtime_policy = parse_mediapipe_runtime_policy(trk)
     tracker_kwargs = {
         "real_ipd_cm": _resolve_ipd_cm(cfg),
         "screen_width_cm": scr["width_cm"],
@@ -931,12 +933,7 @@ def main() -> None:
             trk.get("min_tracking_confidence", 0.5)
         ),
         "camera_geometry": camera_geometry,
-        "async_stall_timeout_ms": int(
-            trk.get("async_stall_timeout_ms", 5000)
-        ),
-        "async_max_consecutive_errors": int(
-            trk.get("async_max_consecutive_errors", 3)
-        ),
+        **mediapipe_runtime_policy.tracker_kwargs(),
     }
     tracker, selected_backend = create_face_tracker(
         tracker_backend,
