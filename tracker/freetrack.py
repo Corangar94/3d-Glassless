@@ -12,8 +12,12 @@ Total: 92 bytes
 Both this module and OpenTrack write to "FT_SharedMem".
 The ReShade addon reads DataID + X/Y/Z from offsets 0/24/28/32.
 """
+from __future__ import annotations
+
 import ctypes
+import math
 import struct
+import threading
 
 # <Iii  = uint32 DataID, int32 CamW, int32 CamH
 # 6f    = Yaw Pitch Roll X Y Z
@@ -21,6 +25,8 @@ import struct
 # 8f    = 8 tracking point floats (X1,Y1 ... X4,Y4)
 FREETRACK_FORMAT = "<Iii6f6f8f"
 FREETRACK_SIZE = struct.calcsize(FREETRACK_FORMAT)  # 92 bytes
+_DATA_ID_SIZE = struct.calcsize("<I")
+_UINT32_MAX = 0xFFFF_FFFF
 
 _SHM_NAME = "FT_SharedMem"
 
@@ -38,12 +44,44 @@ _k32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
 _k32.CloseHandle.argtypes = [ctypes.c_void_p]
 
 
-class FreetracWriter:
-    """
-    Writes head pose to Windows Named Shared Memory in FreeTrack format.
+def _finite_float(value: object, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{field_name} must be a finite float") from error
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be a finite float")
+    return parsed
 
-    Default name is "FT_SharedMem" (standard FreeTrack/OpenTrack protocol).
-    Pass a different name only for testing.
+
+def _pack_freetrack_packet(
+    seq: int,
+    x: float,
+    y: float,
+    z: float,
+) -> bytes:
+    sequence = int(seq)
+    if not 0 <= sequence <= _UINT32_MAX:
+        raise ValueError("FreeTrack DataID must be an unsigned 32-bit integer")
+    return struct.pack(
+        FREETRACK_FORMAT,
+        sequence,
+        0, 0,  # CamWidth, CamHeight
+        0.0, 0.0, 0.0,  # Yaw, Pitch, Roll
+        _finite_float(x, "x"),
+        _finite_float(y, "y"),
+        _finite_float(z, "z"),
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # Raw pose (unused)
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # Tracking pts (unused)
+    )
+
+
+class FreetracWriter:
+    """Writes head pose to named shared memory in FreeTrack format.
+
+    ``DataID`` is the FreeTrack packet publication marker. The pose body is
+    installed first and the new ID is written last, so readers cannot observe a
+    new ID paired with an incomplete new body.
     """
 
     def __init__(self, name: str = _SHM_NAME) -> None:
@@ -51,6 +89,7 @@ class FreetracWriter:
         self._seq: int = 0
         self._handle: int | None = None
         self._view: int | None = None
+        self._write_lock = threading.RLock()
 
         self._handle = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, FREETRACK_SIZE, name,
@@ -67,37 +106,44 @@ class FreetracWriter:
             self._handle = None
             raise ctypes.WinError(err)
 
-        # Initialise: head centred, 60 cm away, DataID = 0
+        # Initialise: head centred, 60 cm away, DataID = 0.
         self._write_raw(seq=0, x=0.0, y=0.0, z=60.0)
 
     def write(self, x: float, y: float, z: float) -> None:
-        """Write head position. Increments DataID so readers detect new data."""
-        self._seq = (self._seq + 1) & 0xFFFF_FFFF
-        self._write_raw(seq=self._seq, x=x, y=y, z=z)
+        """Install one complete pose and then publish its incremented DataID."""
+        with self._write_lock:
+            next_seq = (self._seq + 1) & _UINT32_MAX
+            self._write_raw(seq=next_seq, x=x, y=y, z=z)
+            # Failed validation/packing/body/ID writes leave the logical writer
+            # sequence unchanged, so the same DataID can be retried safely.
+            self._seq = next_seq
 
     def _write_raw(self, seq: int, x: float, y: float, z: float) -> None:
-        view = self._view
-        if view is None:
-            raise RuntimeError("write() called after close()")
-        data = struct.pack(
-            FREETRACK_FORMAT,
-            seq,   # DataID
-            0, 0,  # CamWidth, CamHeight
-            0.0, 0.0, 0.0,  # Yaw, Pitch, Roll
-            x, y, z,        # X, Y, Z (cm)
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # Raw pose (unused)
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # Tracking pts (unused)
-        )
-        ctypes.memmove(view, data, FREETRACK_SIZE)
+        with self._write_lock:
+            view = self._view
+            if view is None:
+                raise RuntimeError("write() called after close()")
+            data = _pack_freetrack_packet(seq, x, y, z)
+            # FreeTrack readers use DataID as the new-packet signal. Publish the
+            # body first, then make the ID visible in the final aligned 4-byte
+            # copy. Sequential ctypes calls preserve this store order on the
+            # supported Windows x64 runtime.
+            ctypes.memmove(
+                view + _DATA_ID_SIZE,
+                data[_DATA_ID_SIZE:],
+                FREETRACK_SIZE - _DATA_ID_SIZE,
+            )
+            ctypes.memmove(view, data[:_DATA_ID_SIZE], _DATA_ID_SIZE)
 
     def close(self) -> None:
-        """Release shared memory mapping and handle."""
-        if self._view is not None:
-            _k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
+        """Release the shared memory mapping and handle."""
+        with self._write_lock:
+            if self._view is not None:
+                _k32.UnmapViewOfFile(self._view)
+                self._view = None
+            if self._handle is not None:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
 
     def __enter__(self) -> "FreetracWriter":
         return self
