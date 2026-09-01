@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from tracker.mediapipe_runtime_policy import MediaPipeRuntimePolicy
+
 
 def _source(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
@@ -30,7 +32,11 @@ def test_frozen_package_explicitly_includes_failover_modules():
 
     assert '"tracker.backend_factory"' in source
     assert '"tracker.backend_failover"' in source
+    assert '"tracker.mediapipe_runtime_policy"' in source
     assert '"tracker.async_inference_watchdog"' in source
+    assert '"tracker.async_callback_order"' in source
+    assert '"tracker.async_result_freshness"' in source
+    assert '"tracker.pose_result_timeline"' in source
     assert '"tracker.face_tracker"' in source
     assert '"tracker.face_tracker_cv2"' in source
 
@@ -43,9 +49,13 @@ def test_repository_config_enables_bounded_auto_failover():
     assert tracking["backend_failover"] == {
         "retry_primary_after_ms": 30_000,
         "max_primary_retries": 1,
+        "shadow_probe_interval_ms": 100,
+        "shadow_probe_timeout_ms": 5_000,
+        "minimum_healthy_callbacks": 3,
     }
-    assert tracking["async_stall_timeout_ms"] == 5_000
-    assert tracking["async_max_consecutive_errors"] == 3
+    assert tracking["mediapipe_runtime"] == (
+        MediaPipeRuntimePolicy().config_values()
+    )
 
 
 def test_mediapipe_exposes_no_face_callback_readiness():
