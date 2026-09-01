@@ -12,6 +12,10 @@ import mediapipe as mp
 import numpy as np
 from mediapipe import tasks
 
+from tracker.async_callback_order import (
+    AsyncCallbackOrderSnapshot,
+    LatestCallbackPublicationGate,
+)
 from tracker.async_inference_watchdog import AsyncInferenceWatchdog
 from tracker.async_result_freshness import (
     AsyncResultFreshnessGate,
@@ -162,6 +166,7 @@ class FaceTracker:
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms: int | None = None
+        self._async_callback_order = LatestCallbackPublicationGate()
         # Retained as a compatibility fallback for bare ``__new__`` test doubles
         # and downstream subclasses that predate AsyncResultFreshnessGate.
         self._stale_result_count = 0
@@ -228,6 +233,18 @@ class FaceTracker:
         with self._lock:
             return getattr(self, "_last_stale_result_age_ms", None)
 
+    def _callback_order_gate_locked(self) -> LatestCallbackPublicationGate:
+        gate = getattr(self, "_async_callback_order", None)
+        if gate is None:
+            # Compatibility for bare ``__new__`` tests and downstream subclasses.
+            gate = LatestCallbackPublicationGate()
+            self._async_callback_order = gate
+        return gate
+
+    def async_callback_order_snapshot(self) -> AsyncCallbackOrderSnapshot:
+        with self._lock:
+            return self._callback_order_gate_locked().snapshot()
+
     def set_calibration(
         self,
         *,
@@ -247,10 +264,11 @@ class FaceTracker:
         """Forget poses that belong to a retired camera capture session.
 
         The MediaPipe landmarker must keep its monotonically increasing private
-        timestamp timeline for its full lifetime, so submission timestamps are
-        deliberately not reset. Instead, the latest submitted timestamp becomes
-        a result floor. Any callback still in flight from the old webcam session
-        is discarded when it eventually arrives.
+        timestamp timeline for its full lifetime, so submission timestamps and
+        callback publication ordering are deliberately not reset. Instead, the
+        latest submitted timestamp becomes a result floor. Any callback still in
+        flight from the old webcam session is discarded when it eventually
+        arrives.
         """
         freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
@@ -373,9 +391,18 @@ class FaceTracker:
         )
 
     def _on_result(self, result: object, image: object, timestamp_ms: int) -> None:
-        timestamp = int(timestamp_ms)
+        try:
+            timestamp = int(timestamp_ms)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if timestamp < 0:
+            return
+
         with self._lock:
             if not self._result_is_current_locked(timestamp):
+                return
+            callback_order = self._callback_order_gate_locked()
+            if not callback_order.begin_processing(timestamp):
                 return
 
         try:
@@ -389,6 +416,12 @@ class FaceTracker:
         except Exception as error:
             with self._lock:
                 current = self._result_is_current_locked(timestamp)
+                if current:
+                    current = self._callback_order_gate_locked().is_newer(
+                        timestamp
+                    )
+            # An older conversion error that finishes after a newer callback is
+            # obsolete. Do not let it reset healthy progress or poison recovery.
             if current and self._async_watchdog is not None:
                 self._async_watchdog.record_callback(
                     timestamp,
@@ -399,6 +432,9 @@ class FaceTracker:
         freshness = getattr(self, "_async_result_freshness", None)
         with self._lock:
             if not self._result_is_current_locked(timestamp):
+                return
+            callback_order = self._callback_order_gate_locked()
+            if not callback_order.accept_publication(timestamp):
                 return
             self._latest_pose = pose
             if pose is None and freshness is not None:
