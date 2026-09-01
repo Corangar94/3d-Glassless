@@ -122,6 +122,7 @@ class _Result:
     "value",
     [
         True,
+        -1,
         1.5,
         float("nan"),
         float("inf"),
