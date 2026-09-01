@@ -14,7 +14,7 @@ The MediaPipe tracker maintains a bounded submission backlog:
 - the latest completed pose can still be delivered on a skipped frame;
 - callback progress immediately reopens the gate;
 - caught-up inference is admitted after a long camera pause;
-- `async_max_backlog_ms=0` disables the gate for direct API users.
+- `async_max_backlog_ms: 0` disables the gate for direct or configured use.
 
 The default 150 ms budget permits a short burst so normal asynchronous scheduling is unaffected, while preventing a slow task from accumulating conversion/allocation work at full webcam cadence.
 
@@ -29,7 +29,7 @@ The asynchronous delivery boundary therefore rejects completed poses older than 
 - an older result is retired once rather than reconsidered on later frames;
 - a timestamp that is slightly ahead of the caller is not misclassified as billions of milliseconds old;
 - missing legacy timestamps remain deliverable;
-- `async_max_result_age_ms=0` disables the gate for direct API users;
+- `async_max_result_age_ms: 0` disables the age gate;
 - synchronous `IMAGE` mode is unchanged.
 
 One isolated late pose is dropped without declaring the task unhealthy. A stream that remains alive but unusably delayed is handled separately:
@@ -39,7 +39,7 @@ One isolated late pose is dropped without declaring the task unhealthy. A stream
 - a fresh pose ends the stale burst immediately;
 - a healthy callback with no face also ends the burst, so the absence of a viewer is not mistaken for persistent pipeline latency;
 - stale results separated by more than the window begin a new episode;
-- `async_max_consecutive_stale_results=0` keeps dropping stale poses without escalating.
+- `async_max_consecutive_stale_results: 0` keeps dropping stale poses without escalating.
 
 A shadow MediaPipe recovery candidate is subject to the same rule. Persistent late candidate poses discard the candidate while the working OpenCV fallback remains visible.
 
@@ -54,7 +54,32 @@ The callback watchdog distinguishes:
 - **callback lag** — accepted submissions ahead of callback progress;
 - **callback age** — current camera time since the last callback progress.
 
-Callback age continues increasing while inputs are throttled. The existing five-second stall threshold therefore still raises `AsyncInferenceFailure`, allowing automatic in-process fallback to OpenCV. The stale-result burst gate covers the complementary case where callbacks continue advancing but their completed poses remain too old to display.
+Callback age continues increasing while inputs are throttled. The default five-second stall threshold therefore still raises `AsyncInferenceFailure`, allowing automatic in-process fallback to OpenCV. The stale-result burst gate covers the complementary case where callbacks continue advancing but their completed poses remain too old to display.
+
+## Configuration
+
+All MediaPipe asynchronous health and latency limits are normal `tracking` settings:
+
+```yaml
+tracking:
+  async_stall_timeout_ms: 5000
+  async_max_consecutive_errors: 3
+  async_max_backlog_ms: 150
+  async_max_result_age_ms: 250
+  async_max_consecutive_stale_results: 3
+  async_stale_result_window_ms: 1000
+```
+
+The tracker parses these six values as one policy. If any value is malformed or outside its allowed range, the complete policy falls back to the known-safe defaults instead of mixing partially valid limits.
+
+- `async_stall_timeout_ms` must be at least `1`.
+- `async_max_consecutive_errors` must be at least `1`.
+- `async_max_backlog_ms` may be `0` to disable pre-conversion backpressure.
+- `async_max_result_age_ms` may be `0` to accept completed poses regardless of age.
+- `async_max_consecutive_stale_results` may be `0` to drop stale poses without escalating to fallback.
+- `async_stale_result_window_ms` must be at least `1`.
+
+Lower backlog and result-age values reduce latency tolerance but may discard more work on slower CPUs. Higher values tolerate temporary load but allow more delayed inference. The defaults are designed to protect head-coupled responsiveness while leaving ordinary 30–60 fps callback flow unaffected.
 
 ## Timestamp ownership
 
