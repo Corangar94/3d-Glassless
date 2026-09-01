@@ -57,6 +57,17 @@ def _custom_tracking_config() -> dict[str, object]:
     }
 
 
+def _production_like_tracker_kwargs() -> dict[str, object]:
+    # tracker.main still includes these two legacy-safe defaults in its base
+    # constructor mapping. The configured composite policy overrides them for
+    # MediaPipe and removes them from OpenCV construction.
+    return {
+        "real_ipd_cm": 6.3,
+        "async_stall_timeout_ms": 5_000,
+        "async_max_consecutive_errors": 3,
+    }
+
+
 def _expected_runtime_kwargs() -> dict[str, int]:
     return {
         "async_stall_timeout_ms": 4_500,
@@ -80,6 +91,13 @@ def test_parser_remains_a_backend_failover_policy_for_existing_callers():
         shadow_probe_timeout_ms=4_000,
         minimum_healthy_callbacks=4,
     )
+    assert BackendFailoverPolicy(
+        retry_primary_after_ms=0,
+        max_primary_retries=1,
+        shadow_probe_interval_ms=100,
+        shadow_probe_timeout_ms=4_000,
+        minimum_healthy_callbacks=4,
+    ) == policy
     assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy(
         stall_timeout_ms=4_500,
         max_consecutive_errors=5,
@@ -95,7 +113,7 @@ def test_policy_kwargs_reach_strict_mediapipe_constructor():
 
     tracker, selected = create_face_tracker(
         "mediapipe",
-        tracker_kwargs={"real_ipd_cm": 6.3},
+        tracker_kwargs=_production_like_tracker_kwargs(),
         failover_policy=policy,
         import_module=lambda _name: _module_with(_Tracker),
     )
@@ -130,7 +148,7 @@ def test_policy_kwargs_reach_auto_primary_and_shadow_constructors():
     policy = parse_backend_failover_policy(_custom_tracking_config())
     tracker, selected = create_face_tracker(
         "auto",
-        tracker_kwargs={"real_ipd_cm": 6.3},
+        tracker_kwargs=_production_like_tracker_kwargs(),
         failover_policy=policy,
         import_module=importer,
         logger=lambda _message: None,
@@ -151,12 +169,12 @@ def test_policy_kwargs_reach_auto_primary_and_shadow_constructors():
     assert tracker._primary_candidate is not None
 
 
-def test_strict_cv2_does_not_receive_mediapipe_only_limits():
+def test_strict_cv2_strips_configured_mediapipe_only_limits():
     policy = parse_backend_failover_policy(_custom_tracking_config())
 
     tracker, selected = create_face_tracker(
         "cv2",
-        tracker_kwargs={"real_ipd_cm": 6.3},
+        tracker_kwargs=_production_like_tracker_kwargs(),
         failover_policy=policy,
         import_module=lambda _name: _module_with(_Tracker),
     )
