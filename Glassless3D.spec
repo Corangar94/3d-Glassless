@@ -56,6 +56,7 @@ hidden_imports = [
     "tracker.pose",
     "tracker.pose_filter",
     "tracker.pose_shared_memory",
+    "tracker.pose_result_timeline",
     "tracker.pose_step_limiter",
     "launcher.runtime_mainwindow",
     "launcher.tracker_backend_diagnostics",
