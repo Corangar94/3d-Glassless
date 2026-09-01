@@ -28,6 +28,10 @@ from tracker.freetrack import FreetracWriter
 from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
 from tracker.pose_shared_memory import PoseStateWriter
+from tracker.pose_step_limiter import (
+    PoseStepLimiter,
+    PoseStepLimiterPolicy,
+)
 from tracker.shared_memory import SharedMemoryWriter, TrackingStateWriter
 from tracker.shared_settings import OverlaySettings, SharedSettingsReader
 from tracker.smoother import HeadSmoother
@@ -124,6 +128,27 @@ def _camera_reconnect_policy(camera_config: object) -> CameraReconnectPolicy:
     except (TypeError, ValueError, OverflowError):
         print("[G3D] Invalid camera reconnect settings; using safe defaults")
         return CameraReconnectPolicy()
+
+
+def _pose_step_limiter_policy(
+    tracking_config: object,
+) -> PoseStepLimiterPolicy:
+    tracking = tracking_config if isinstance(tracking_config, dict) else {}
+    raw = tracking.get("pose_step_limit", {})
+    values = raw if isinstance(raw, dict) else {}
+    try:
+        return PoseStepLimiterPolicy(
+            max_xy_speed_cm_s=float(
+                values.get("max_xy_speed_cm_s", 300.0)
+            ),
+            max_z_speed_cm_s=float(
+                values.get("max_z_speed_cm_s", 360.0)
+            ),
+            reset_after_ms=int(values.get("reset_after_ms", 500)),
+        )
+    except (TypeError, ValueError, OverflowError):
+        print("[G3D] Invalid pose step-limit settings; using safe defaults")
+        return PoseStepLimiterPolicy()
 
 
 def _configure_camera(
@@ -319,21 +344,13 @@ def _limit_pose_step(
     max_xy_step_cm: float = 10.0,
     max_z_step_cm: float = 12.0,
 ) -> tuple[float, float, float]:
-    if prev is None:
-        return raw
-    dx = raw[0] - prev[0]
-    dy = raw[1] - prev[1]
-    length = math.hypot(dx, dy)
-    if max_xy_step_cm > 0.0 and length > max_xy_step_cm:
-        scale = max_xy_step_cm / length
-        x = prev[0] + dx * scale
-        y = prev[1] + dy * scale
-    else:
-        x, y = raw[0], raw[1]
-    dz = raw[2] - prev[2]
-    if max_z_step_cm > 0.0:
-        dz = max(-max_z_step_cm, min(max_z_step_cm, dz))
-    return x, y, prev[2] + dz
+    """Compatibility helper retaining the historical fixed-step contract."""
+    return limit_pose_step(
+        raw,
+        prev,
+        maximum_xy_step_cm=max_xy_step_cm,
+        maximum_z_step_cm=max_z_step_cm,
+    )
 
 
 def _tilt_filtered_pose(pose: FilteredPose, tilt_deg: float) -> FilteredPose:
@@ -382,6 +399,7 @@ class TrackingLoop:
         camera_quality_monitor: CameraQualityMonitor | None = None,
         lock_camera_controls: bool = False,
         camera_reconnect_policy: CameraReconnectPolicy | None = None,
+        pose_step_limiter: PoseStepLimiter | None = None,
     ) -> None:
         self._tracker = tracker
         self._frame_processor = FrameProcessorAdapter.from_tracker(tracker)
@@ -395,6 +413,7 @@ class TrackingLoop:
             y_cm=0.0,
             z_cm=60.0,
         )
+        self._pose_step_limiter = pose_step_limiter or PoseStepLimiter()
         self._last_raw_pos: tuple[float, float, float] | None = None
         self._last_measurement_s: float | None = None
         self._stop_event = stop_event
@@ -426,6 +445,7 @@ class TrackingLoop:
         transition = current_backend_transition_state()
         if transition.generation == self._backend_transition_generation:
             return
+        self._pose_step_limiter.reset()
         self._last_raw_pos = None
         self._last_measurement_s = None
         if not self._supports_pose_filter():
@@ -591,6 +611,7 @@ class TrackingLoop:
         reset_smoother = getattr(self._smoother, "reset", None)
         if callable(reset_smoother):
             reset_smoother()
+        self._pose_step_limiter.reset()
         if self._camera_quality_monitor is not None:
             self._camera_quality_monitor.reset()
         if self._camera_control_lock_retry is not None:
@@ -624,6 +645,8 @@ class TrackingLoop:
         settings_reader = SharedSettingsReader()
         cap: cv2.VideoCapture | None = None
         self._camera_reconnect.reset()
+        self._pose_step_limiter.reset()
+        self._last_raw_pos = None
         if self._camera_control_lock_retry is not None:
             self._camera_control_lock_retry.reset()
         try:
@@ -775,21 +798,10 @@ class TrackingLoop:
 
                 if measured is not None:
                     self._last_face_ms = time.monotonic() * 1000.0
-                    limited = _limit_pose_step(
-                        measured.xyz,
-                        self._last_raw_pos,
+                    measured = self._pose_step_limiter.limit_head_position(
+                        measured
                     )
-                    self._last_raw_pos = limited
-                    measured = HeadPosition(
-                        x_cm=limited[0],
-                        y_cm=limited[1],
-                        z_cm=limited[2],
-                        yaw_deg=measured.yaw_deg,
-                        pitch_deg=measured.pitch_deg,
-                        roll_deg=measured.roll_deg,
-                        confidence=measured.confidence,
-                        capture_timestamp_ms=measured.capture_timestamp_ms,
-                    )
+                    self._last_raw_pos = measured.xyz
                     output = self._update_filter(measured)
                     status = "tracking"
                 else:
@@ -993,6 +1005,9 @@ def main() -> None:
                 cam.get("lock_controls_after_warmup", False)
             ),
             camera_reconnect_policy=_camera_reconnect_policy(cam),
+            pose_step_limiter=PoseStepLimiter(
+                _pose_step_limiter_policy(trk)
+            ),
         )
         try:
             loop.run(
