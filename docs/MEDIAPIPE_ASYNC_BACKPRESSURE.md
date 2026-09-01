@@ -32,18 +32,29 @@ The asynchronous delivery boundary therefore rejects completed poses older than 
 - `async_max_result_age_ms=0` disables the gate for direct API users;
 - synchronous `IMAGE` mode is unchanged.
 
+One isolated late pose is dropped without declaring the task unhealthy. A stream that remains alive but unusably delayed is handled separately:
+
+- three stale pose results observed within 1000 ms raise `AsyncInferenceFailure`;
+- automatic mode switches to the OpenCV fallback on the frame that reaches the threshold;
+- a fresh pose ends the stale burst immediately;
+- a healthy callback with no face also ends the burst, so the absence of a viewer is not mistaken for persistent pipeline latency;
+- stale results separated by more than the window begin a new episode;
+- `async_max_consecutive_stale_results=0` keeps dropping stale poses without escalating.
+
+A shadow MediaPipe recovery candidate is subject to the same rule. Persistent late candidate poses discard the candidate while the working OpenCV fallback remains visible.
+
 MediaPipe callback timestamps are normalized to the project's nonzero wire-time contract, including the exact 49.7-day rollover instant.
 
 ## Stall safety
 
-Throttling or dropping a stale pose is not considered an inference error. However, neither behavior may hide a genuinely dead MediaPipe task.
+Throttling or dropping an isolated stale pose is not considered an inference error. However, neither behavior may hide a genuinely dead or permanently delayed MediaPipe task.
 
-The watchdog therefore distinguishes:
+The callback watchdog distinguishes:
 
 - **callback lag** — accepted submissions ahead of callback progress;
 - **callback age** — current camera time since the last callback progress.
 
-Callback age continues increasing while inputs are throttled. The existing five-second stall threshold therefore still raises `AsyncInferenceFailure`, allowing automatic in-process fallback to OpenCV.
+Callback age continues increasing while inputs are throttled. The existing five-second stall threshold therefore still raises `AsyncInferenceFailure`, allowing automatic in-process fallback to OpenCV. The stale-result burst gate covers the complementary case where callbacks continue advancing but their completed poses remain too old to display.
 
 ## Timestamp ownership
 
