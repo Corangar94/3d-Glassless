@@ -190,6 +190,11 @@ _DEFAULT_TRACKING = {
     },
     "async_stall_timeout_ms": 5_000,
     "async_max_consecutive_errors": 3,
+    "pose_step_limit": {
+        "max_xy_speed_cm_s": 300.0,
+        "max_z_speed_cm_s": 360.0,
+        "reset_after_ms": 500,
+    },
 }
 
 _DEFAULT_OVERLAY = {
