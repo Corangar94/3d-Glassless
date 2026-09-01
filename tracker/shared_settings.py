@@ -28,26 +28,29 @@ Layout (88 bytes, little-endian):
 from __future__ import annotations
 
 import ctypes
-import struct
 from dataclasses import dataclass
+import math
+import struct
+import threading
 
 STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
 VERSION_INDEX = 15
 VERSION_OFFSET = struct.calcsize("<fffffIfffffffII")
 SHM_NAME = "G3D_Settings"
+_UINT32_MAX = 0xFFFF_FFFF
 
-_PAGE_READWRITE   = 0x04
+_PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
-_FILE_MAP_READ    = 0x0004
-_INVALID_HANDLE   = ctypes.c_void_p(-1)
+_FILE_MAP_READ = 0x0004
+_INVALID_HANDLE = ctypes.c_void_p(-1)
 
 _k32 = ctypes.windll.kernel32
 _k32.CreateFileMappingW.restype = ctypes.c_void_p
-_k32.OpenFileMappingW.restype   = ctypes.c_void_p
-_k32.MapViewOfFile.restype      = ctypes.c_void_p
-_k32.UnmapViewOfFile.argtypes   = [ctypes.c_void_p]
-_k32.CloseHandle.argtypes       = [ctypes.c_void_p]
+_k32.OpenFileMappingW.restype = ctypes.c_void_p
+_k32.MapViewOfFile.restype = ctypes.c_void_p
+_k32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
+_k32.CloseHandle.argtypes = [ctypes.c_void_p]
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,68 @@ class OverlaySettings:
     tracking_mode: int = 0
 
 
+def _finite_float(value: object, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"{field_name} must be a finite float"
+        ) from error
+    if not math.isfinite(parsed):
+        raise ValueError(f"{field_name} must be a finite float")
+    return parsed
+
+
+def _uint32(value: object, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"{field_name} must be an unsigned 32-bit integer"
+        ) from error
+    if not 0 <= parsed <= _UINT32_MAX:
+        raise ValueError(
+            f"{field_name} must be an unsigned 32-bit integer"
+        )
+    return parsed
+
+
+def _settings_versions(current_version: int) -> tuple[int, int]:
+    """Return the odd writing marker and following even committed version."""
+    writing_version = (int(current_version) + 1) | 1
+    committed_version = (writing_version + 1) & 0xFFFF_FFFE
+    return writing_version & _UINT32_MAX, committed_version
+
+
+def _pack_settings(s: OverlaySettings, committed_version: int) -> bytes:
+    """Validate and pack a complete even-version snapshot before publication."""
+    return struct.pack(
+        STRUCT_FORMAT,
+        _finite_float(s.strength_x, "strength_x"),
+        _finite_float(s.strength_y, "strength_y"),
+        _finite_float(s.virtual_depth_cm, "virtual_depth_cm"),
+        _finite_float(s.screen_w_cm, "screen_w_cm"),
+        _finite_float(s.screen_h_cm, "screen_h_cm"),
+        _uint32(s.depth_curve, "depth_curve"),
+        _finite_float(s.depth_gamma, "depth_gamma"),
+        _finite_float(s.focus_radius, "focus_radius"),
+        _finite_float(s.head_dist_cm, "head_dist_cm"),
+        _finite_float(s.camera_fov_deg, "camera_fov_deg"),
+        _finite_float(s.ipd_mm, "ipd_mm"),
+        _finite_float(s.smoothing_alpha, "smoothing_alpha"),
+        _finite_float(s.deadzone_mm, "deadzone_mm"),
+        _uint32(s.display_backend, "display_backend"),
+        _uint32(s.depth_mode, "depth_mode"),
+        _uint32(committed_version, "version"),
+        _uint32(s.stereo_layout, "stereo_layout"),
+        _uint32(s.eye_order, "eye_order"),
+        _uint32(s.panel_width_px, "panel_width_px"),
+        _uint32(s.panel_height_px, "panel_height_px"),
+        _finite_float(s.focus_plane_cm, "focus_plane_cm"),
+        _uint32(s.tracking_mode, "tracking_mode"),
+    )
+
+
 class SharedSettingsWriter:
     """Creates and owns the G3D_Settings shared memory segment."""
 
@@ -83,6 +148,7 @@ class SharedSettingsWriter:
         self._handle: int | None = None
         self._view: int | None = None
         self._version: int = 0
+        self._write_lock = threading.Lock()
 
         self._handle = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STRUCT_SIZE, name,
@@ -101,47 +167,33 @@ class SharedSettingsWriter:
         self.write(OverlaySettings())
 
     def write(self, s: OverlaySettings) -> None:
-        view = self._view
-        if view is None:
-            raise RuntimeError("write() called after close()")
-        # Seqlock: odd means a write is in progress; the final packed snapshot
-        # carries the following even version.
-        writing_version = (self._version + 1) | 1
-        ctypes.memmove(
-            view + VERSION_OFFSET,
-            struct.pack("<I", writing_version & 0xFFFF_FFFF),
-            4,
-        )
-        self._version = (writing_version + 1) & 0xFFFF_FFFE
-        data = struct.pack(
-            STRUCT_FORMAT,
-            float(s.strength_x), float(s.strength_y),
-            float(s.virtual_depth_cm),
-            float(s.screen_w_cm), float(s.screen_h_cm),
-            int(s.depth_curve),
-            float(s.depth_gamma), float(s.focus_radius),
-            float(s.head_dist_cm), float(s.camera_fov_deg),
-            float(s.ipd_mm), float(s.smoothing_alpha),
-            float(s.deadzone_mm),
-            int(s.display_backend),
-            int(s.depth_mode),
-            self._version,
-            int(s.stereo_layout),
-            int(s.eye_order),
-            int(s.panel_width_px),
-            int(s.panel_height_px),
-            float(s.focus_plane_cm),
-            int(s.tracking_mode),
-        )
-        ctypes.memmove(view, data, STRUCT_SIZE)
+        with self._write_lock:
+            view = self._view
+            if view is None:
+                raise RuntimeError("write() called after close()")
+            writing_version, committed_version = _settings_versions(
+                self._version
+            )
+            # Build the complete snapshot before marking the mapping odd. A bad
+            # UI/config value can therefore raise without making the last valid
+            # settings permanently unreadable.
+            data = _pack_settings(s, committed_version)
+            ctypes.memmove(
+                view + VERSION_OFFSET,
+                struct.pack("<I", writing_version),
+                4,
+            )
+            ctypes.memmove(view, data, STRUCT_SIZE)
+            self._version = committed_version
 
     def close(self) -> None:
-        if self._view is not None:
-            _k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
+        with self._write_lock:
+            if self._view is not None:
+                _k32.UnmapViewOfFile(self._view)
+                self._view = None
+            if self._handle is not None:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
 
     def __enter__(self) -> "SharedSettingsWriter":
         return self
@@ -184,12 +236,19 @@ class SharedSettingsReader:
             f = None
             for _ in range(4):
                 first = bytes(raw)
-                first_version = struct.unpack_from("<I", first, VERSION_OFFSET)[0]
+                first_version = struct.unpack_from(
+                    "<I", first, VERSION_OFFSET
+                )[0]
                 if first_version & 1:
                     continue
                 second = bytes(raw)
-                second_version = struct.unpack_from("<I", second, VERSION_OFFSET)[0]
-                if first_version == second_version and not (second_version & 1):
+                second_version = struct.unpack_from(
+                    "<I", second, VERSION_OFFSET
+                )[0]
+                if (
+                    first_version == second_version
+                    and not (second_version & 1)
+                ):
                     f = struct.unpack(STRUCT_FORMAT, second)
                     break
             if f is None:
