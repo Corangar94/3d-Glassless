@@ -16,6 +16,7 @@ struct HealthInputs {
 };
 
 inline float Saturate(float value) {
+    if (!std::isfinite(value)) return 0.0f;
     return std::max(0.0f, std::min(1.0f, value));
 }
 
@@ -28,12 +29,13 @@ inline float AgeScale(
     uint32_t age_ms,
     uint32_t full_strength_until_ms,
     uint32_t zero_strength_at_ms) {
+    if (zero_strength_at_ms <= full_strength_until_ms) return 0.0f;
     if (age_ms <= full_strength_until_ms) return 1.0f;
     if (age_ms >= zero_strength_at_ms) return 0.0f;
     const float span = static_cast<float>(
         zero_strength_at_ms - full_strength_until_ms);
     const float normalized = static_cast<float>(
-        age_ms - full_strength_until_ms) / std::max(1.0f, span);
+        age_ms - full_strength_until_ms) / span;
     return 1.0f - SmoothStep01(normalized);
 }
 
@@ -56,7 +58,7 @@ inline float TargetScale(const HealthInputs& inputs) {
 
     // The weakest upstream signal owns the comfort envelope. Multiplication
     // would punish several mildly imperfect signals too aggressively.
-    return std::min(pose_age, std::min(depth_age, confidence));
+    return Saturate(std::min(pose_age, std::min(depth_age, confidence)));
 }
 
 inline float SlewScale(
@@ -67,13 +69,27 @@ inline float SlewScale(
     float recover_half_life_s = 0.220f) {
     current = Saturate(current);
     target = Saturate(target);
+    if (!std::isfinite(dt_seconds)) {
+        // Invalid elapsed time must never increase parallax. A degradation is
+        // applied immediately; recovery waits for a valid clock sample.
+        return target < current ? target : current;
+    }
     dt_seconds = std::max(0.0f, std::min(0.25f, dt_seconds));
-    const float half_life = target < current
-        ? std::max(0.001f, degrade_half_life_s)
-        : std::max(0.001f, recover_half_life_s);
+    if (dt_seconds <= 0.0f) return current;
+
+    const bool degrading = target < current;
+    const float configured_half_life = degrading
+        ? degrade_half_life_s
+        : recover_half_life_s;
+    if (!std::isfinite(configured_half_life)
+        || configured_half_life <= 0.0f) {
+        // Invalid tuning must fail toward less parallax, never toward more.
+        return degrading ? target : current;
+    }
+    const float half_life = std::max(0.001f, configured_half_life);
     const float alpha = 1.0f - std::exp(
         -0.69314718056f * dt_seconds / half_life);
-    return current + (target - current) * alpha;
+    return Saturate(current + (target - current) * alpha);
 }
 
 }  // namespace g3d::parallax
