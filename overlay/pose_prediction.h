@@ -17,9 +17,37 @@ struct Result {
     bool applied = false;
 };
 
+struct Vector2 {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+inline float FiniteNonnegativeLimit(float value) {
+    return std::isfinite(value) ? std::max(0.0f, value) : 0.0f;
+}
+
 inline float ClampAbs(float value, float maximum_absolute) {
-    const float limit = std::max(0.0f, maximum_absolute);
+    if (!std::isfinite(value)) return 0.0f;
+    const float limit = FiniteNonnegativeLimit(maximum_absolute);
     return std::max(-limit, std::min(limit, value));
+}
+
+inline Vector2 ClampMagnitude(
+    float x,
+    float y,
+    float maximum_magnitude) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return {};
+    const double limit = static_cast<double>(
+        FiniteNonnegativeLimit(maximum_magnitude));
+    const double dx = static_cast<double>(x);
+    const double dy = static_cast<double>(y);
+    const double magnitude = std::hypot(dx, dy);
+    if (magnitude <= limit || magnitude <= 0.0) return {x, y};
+    const double scale = limit / magnitude;
+    return {
+        static_cast<float>(dx * scale),
+        static_cast<float>(dy * scale),
+    };
 }
 
 inline uint32_t ResidualDelayMs(
@@ -51,7 +79,9 @@ inline Result Extrapolate(
     result.y = y;
     result.z = z;
 
-    if (!valid || confidence < 0.15f) return result;
+    if (!valid || !std::isfinite(confidence) || confidence < 0.15f) {
+        return result;
+    }
     if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)
         || !std::isfinite(vx_cm_s) || !std::isfinite(vy_cm_s)
         || !std::isfinite(vz_cm_s)) {
@@ -65,8 +95,12 @@ inline Result Extrapolate(
     if (result.residual_ms == 0) return result;
 
     const float dt = static_cast<float>(result.residual_ms) / 1000.0f;
-    result.delta_x_cm = ClampAbs(vx_cm_s * dt, maximum_xy_delta_cm);
-    result.delta_y_cm = ClampAbs(vy_cm_s * dt, maximum_xy_delta_cm);
+    const Vector2 xy_delta = ClampMagnitude(
+        vx_cm_s * dt,
+        vy_cm_s * dt,
+        maximum_xy_delta_cm);
+    result.delta_x_cm = xy_delta.x;
+    result.delta_y_cm = xy_delta.y;
     result.delta_z_cm = ClampAbs(vz_cm_s * dt, maximum_z_delta_cm);
     result.x += result.delta_x_cm;
     result.y += result.delta_y_cm;
