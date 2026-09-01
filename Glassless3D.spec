@@ -56,6 +56,7 @@ hidden_imports = [
     "tracker.camera_quality",
     "tracker.pose",
     "tracker.pose_filter",
+    "tracker.pose_result_timeline",
     "tracker.pose_shared_memory",
     "tracker.pose_step_limiter",
     "launcher.runtime_mainwindow",

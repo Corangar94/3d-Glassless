@@ -28,7 +28,9 @@ The X/Y limit is radial, so diagonal motion receives the same total screen-plane
 
 ## Measurement ordering
 
-The limiter uses the project’s wrap-safe uint32 capture clock:
+Timestamped pose results are first checked by the monotonic delivery gate documented in [Monotonic pose-result delivery](POSE_RESULT_TIMELINE.md). In the packaged camera pipeline, duplicate, out-of-order, and malformed timestamped results become `None` before they can refresh face presence, enter this limiter, or update the Kalman filter.
+
+The limiter still preserves its lower-level wrap-safe tuple contract for direct callers:
 
 - duplicate measurements cannot claim additional travel time;
 - an out-of-order measurement is ignored without moving the accepted timestamp anchor;
@@ -45,7 +47,7 @@ The limiter anchor is cleared when:
 - the webcam capture session is replaced;
 - the active face-tracker backend changes.
 
-Orientation, confidence, and capture timestamp are preserved when translation is limited.
+Orientation, confidence, and capture timestamp are preserved when an accepted pose has only its translation limited.
 
 `tracker.main` explicitly injects `PoseStepLimiter` for the packaged runtime. A direct `TrackingLoop` caller that does not inject a limiter retains the historical fixed 10 cm X/Y and 12 cm Z per-measurement behavior through `FixedPoseStepLimiter`. This avoids introducing a timing dependency into timestamp-less test doubles or third-party direct loop integrations. The `_limit_pose_step` helper remains available with the same fixed-step contract.
 
