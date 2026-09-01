@@ -20,6 +20,33 @@ def _timestamp_delta_seconds(newer_ms: int, older_ms: int) -> float:
     return 0.0 if delta > 0x7FFF_FFFF else delta / 1000.0
 
 
+def normalize_angle_degrees(value: float) -> float:
+    """Return an angle in ``[-180, 180)`` while preserving non-finite input.
+
+    Non-finite values are deliberately returned unchanged so the underlying
+    scalar filter can retain its existing fail-safe projection behavior.
+    """
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        return parsed
+    wrapped = (parsed + 180.0) % 360.0 - 180.0
+    # Avoid publishing a negative zero through shared memory and diagnostics.
+    return 0.0 if wrapped == 0.0 else wrapped
+
+
+def unwrap_angle_near(measurement_deg: float, reference_deg: float) -> float:
+    """Lift a wrapped measurement onto the nearest turn around ``reference``.
+
+    The Kalman state remains continuous and may therefore live outside the
+    canonical degree interval internally. Only published values are wrapped.
+    """
+    measurement = normalize_angle_degrees(measurement_deg)
+    reference = float(reference_deg)
+    if not math.isfinite(measurement) or not math.isfinite(reference):
+        return measurement
+    return reference + normalize_angle_degrees(measurement - reference)
+
+
 @dataclass
 class _AxisState:
     position: float
@@ -183,6 +210,14 @@ class ConstantVelocityFilter1D:
         return self._state.position, self._state.velocity
 
     @property
+    def position(self) -> float:
+        return self._state.position
+
+    @property
+    def velocity(self) -> float:
+        return self._state.velocity
+
+    @property
     def state_timestamp_ms(self) -> int:
         return self._state.timestamp_ms
 
@@ -299,6 +334,29 @@ class AdaptivePoseFilter:
             self._reset_state()
         self._backend_transition_generation = transition.generation
 
+    @staticmethod
+    def _update_orientation_axis(
+        axis: ConstantVelocityFilter1D,
+        measurement_deg: float,
+        timestamp_ms: int,
+        confidence: float,
+    ) -> None:
+        reference = (
+            axis.project(timestamp_ms)[0]
+            if axis.initialized
+            else 0.0
+        )
+        measurement = (
+            unwrap_angle_near(measurement_deg, reference)
+            if axis.initialized
+            else normalize_angle_degrees(measurement_deg)
+        )
+        axis.update(
+            measurement,
+            timestamp_ms,
+            confidence=confidence,
+        )
+
     def _prediction_timestamp(self, capture_ms: int, publish_ms: int) -> int:
         measurement_age_ms = (
             _timestamp_delta_seconds(publish_ms, capture_ms) * 1000.0
@@ -332,9 +390,24 @@ class AdaptivePoseFilter:
         self._x.update(pose.x_cm, capture_ms, confidence=confidence)
         self._y.update(pose.y_cm, capture_ms, confidence=confidence)
         self._z.update(pose.z_cm, capture_ms, confidence=confidence)
-        self._yaw.update(pose.yaw_deg, capture_ms, confidence=confidence)
-        self._pitch.update(pose.pitch_deg, capture_ms, confidence=confidence)
-        self._roll.update(pose.roll_deg, capture_ms, confidence=confidence)
+        self._update_orientation_axis(
+            self._yaw,
+            pose.yaw_deg,
+            capture_ms,
+            confidence,
+        )
+        self._update_orientation_axis(
+            self._pitch,
+            pose.pitch_deg,
+            capture_ms,
+            confidence,
+        )
+        self._update_orientation_axis(
+            self._roll,
+            pose.roll_deg,
+            capture_ms,
+            confidence,
+        )
         self._last_confidence = confidence
         self._last_capture_timestamp_ms = capture_ms
         return self.predict(publish_timestamp_ms=publish_ms)
@@ -385,9 +458,9 @@ class AdaptivePoseFilter:
             vx_cm_s=vx,
             vy_cm_s=vy,
             vz_cm_s=vz,
-            yaw_deg=yaw,
-            pitch_deg=pitch,
-            roll_deg=roll,
+            yaw_deg=normalize_angle_degrees(yaw),
+            pitch_deg=normalize_angle_degrees(pitch),
+            roll_deg=normalize_angle_degrees(roll),
             confidence=min(1.0, max(0.0, confidence)),
             capture_timestamp_ms=self._last_capture_timestamp_ms,
             publish_timestamp_ms=publish_ms,
