@@ -203,7 +203,8 @@ def test_repeated_duplicate_results_cannot_keep_tracking_alive(monkeypatch):
         "tracker.main.SharedSettingsReader",
         _SettingsReader,
     )
-    capture_times = iter((2000, 2033, 2066, 2099))
+    # Paused frames also request a neutral-pose publish timestamp.
+    capture_times = iter((2000, 2033, 2066, 2067, 2099, 2100))
     monkeypatch.setattr(
         "tracker.main.monotonic_ms",
         lambda: next(capture_times),
@@ -219,3 +220,4 @@ def test_repeated_duplicate_results_cannot_keep_tracking_alive(monkeypatch):
     assert writer.states == ["tracking", "hold", "paused", "paused"]
     assert filter_.inputs == [first]
     assert loop._last_face_ms == 1000.0
+    assert capture.release_count == 1
