@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 namespace {
 
@@ -18,6 +19,7 @@ bool Check(bool condition, const char* message) {
 }  // namespace
 
 int main() {
+    using g3d::pose_prediction::ClampMagnitude;
     using g3d::pose_prediction::Extrapolate;
     using g3d::pose_prediction::ResidualDelayMs;
 
@@ -45,9 +47,27 @@ int main() {
         1000.0f, -1000.0f, 1000.0f,
         40, 0, 0.9f, true);
     require(capped.residual_ms == 20, "maximum residual time not enforced");
-    require(Near(capped.delta_x_cm, 2.0f), "x delta cap not enforced");
-    require(Near(capped.delta_y_cm, -2.0f), "y delta cap not enforced");
+    require(
+        Near(std::hypot(capped.delta_x_cm, capped.delta_y_cm), 2.0f),
+        "combined XY delta cap not enforced");
+    require(
+        Near(capped.delta_x_cm, std::sqrt(2.0f)),
+        "diagonal x component should preserve direction");
+    require(
+        Near(capped.delta_y_cm, -std::sqrt(2.0f)),
+        "diagonal y component should preserve direction");
     require(Near(capped.delta_z_cm, 2.5f), "z delta cap not enforced");
+
+    auto axis_capped = Extrapolate(
+        0.0f, 0.0f, 60.0f,
+        1000.0f, 0.0f, 0.0f,
+        20, 0, 0.9f, true);
+    require(Near(axis_capped.delta_x_cm, 2.0f), "axis x cap changed");
+    require(Near(axis_capped.delta_y_cm, 0.0f), "axis y cap changed");
+
+    auto directional = ClampMagnitude(6.0f, 8.0f, 5.0f);
+    require(Near(directional.x, 3.0f), "vector cap changed x direction");
+    require(Near(directional.y, 4.0f), "vector cap changed y direction");
 
     auto low_confidence = Extrapolate(
         1.0f, 2.0f, 60.0f,
@@ -55,6 +75,29 @@ int main() {
         12, 0, 0.14f, true);
     require(!low_confidence.applied, "low confidence must disable native prediction");
     require(Near(low_confidence.x, 1.0f), "disabled prediction changed pose");
+
+    auto nan_confidence = Extrapolate(
+        1.0f, 2.0f, 60.0f,
+        100.0f, 100.0f, 100.0f,
+        12, 0, std::numeric_limits<float>::quiet_NaN(), true);
+    require(!nan_confidence.applied, "NaN confidence must disable prediction");
+
+    auto infinite_confidence = Extrapolate(
+        1.0f, 2.0f, 60.0f,
+        100.0f, 100.0f, 100.0f,
+        12, 0, std::numeric_limits<float>::infinity(), true);
+    require(!infinite_confidence.applied, "infinite confidence must disable prediction");
+
+    auto invalid_limit = Extrapolate(
+        1.0f, 2.0f, 60.0f,
+        100.0f, 100.0f, 100.0f,
+        12, 0, 0.9f, true, 20,
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::quiet_NaN());
+    require(invalid_limit.applied, "valid pose should still process invalid caps safely");
+    require(Near(invalid_limit.delta_x_cm, 0.0f), "NaN XY cap must fail closed");
+    require(Near(invalid_limit.delta_y_cm, 0.0f), "NaN XY cap must fail closed");
+    require(Near(invalid_limit.delta_z_cm, 0.0f), "NaN Z cap must fail closed");
 
     auto invalid = Extrapolate(
         1.0f, 2.0f, 60.0f,
