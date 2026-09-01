@@ -420,13 +420,14 @@ class FaceTracker:
                     current = self._callback_order_gate_locked().is_newer(
                         timestamp
                     )
-            # An older conversion error that finishes after a newer callback is
-            # obsolete. Do not let it reset healthy progress or poison recovery.
-            if current and self._async_watchdog is not None:
-                self._async_watchdog.record_callback(
-                    timestamp,
-                    error=error,
-                )
+                # Keep callback health ordered with the latest-result slot. A
+                # newer publication cannot interleave between this relevance
+                # check and health recording.
+                if current and self._async_watchdog is not None:
+                    self._async_watchdog.record_callback(
+                        timestamp,
+                        error=error,
+                    )
             return
 
         freshness = getattr(self, "_async_result_freshness", None)
@@ -439,8 +440,11 @@ class FaceTracker:
             self._latest_pose = pose
             if pose is None and freshness is not None:
                 freshness.record_result_without_pose()
-        if self._async_watchdog is not None:
-            self._async_watchdog.record_callback(timestamp)
+            # Publication and health progress are one ordered event. Recording
+            # outside this lock would allow an older callback to update the
+            # watchdog after a newer pose had already won publication.
+            if self._async_watchdog is not None:
+                self._async_watchdog.record_callback(timestamp)
 
     def _poll_latest(
         self,
