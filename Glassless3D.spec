@@ -46,6 +46,7 @@ hidden_imports = [
     "tracker.backend_status_shared_memory",
     "tracker.async_inference_watchdog",
     "tracker.async_result_freshness",
+    "tracker.mediapipe_runtime_policy",
     "tracker.face_tracker",
     "tracker.face_tracker_cv2",
     "tracker.cv2_temporal_tracker",
