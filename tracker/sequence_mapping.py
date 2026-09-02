@@ -1,4 +1,4 @@
-"""Bounded attachment helper for optional shared-memory sequence mappings."""
+"""Shared helpers for optional sequence-guarded memory mappings."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +6,7 @@ from typing import Protocol
 
 
 DEFAULT_SEQUENCE_ATTACH_ATTEMPTS = 8
+_UINT32_MASK = 0xFFFF_FFFF
 
 
 class Kernel32SequenceApi(Protocol):
@@ -36,6 +37,34 @@ class SequenceMappingAttachment:
     handle: int | None
     view: int | None
     attempts_remaining: int
+
+
+@dataclass(frozen=True)
+class SequenceWriteMarkers:
+    writing: int
+    committed: int
+
+
+def next_sequence_write_markers(
+    last_committed_sequence: int,
+) -> SequenceWriteMarkers:
+    """Return the next odd writing marker and even committed marker.
+
+    Writers keep the last *successfully* committed even value locally. If a
+    payload copy fails after the odd marker is visible, the local value remains
+    unchanged and the same marker pair is reused on the next attempt. This lets
+    a complete retry restore the mapping to a readable even state.
+    """
+    committed = int(last_committed_sequence)
+    if not 0 <= committed <= _UINT32_MASK or committed & 1:
+        raise ValueError(
+            "last committed sequence must be an even unsigned 32-bit integer"
+        )
+    writing = (committed + 1) & _UINT32_MASK
+    return SequenceWriteMarkers(
+        writing=writing,
+        committed=(writing + 1) & _UINT32_MASK,
+    )
 
 
 def try_attach_sequence_mapping(
