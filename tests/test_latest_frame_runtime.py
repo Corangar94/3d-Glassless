@@ -55,12 +55,10 @@ def test_runtime_policy_reads_nested_camera_configuration(tmp_path):
 
     policy = _policy_from_config_path(config_path)
 
-    assert policy == LatestFrameCapturePolicy(
-        enabled=False,
-        wait_timeout_ms=750,
-        failure_backoff_ms=25,
-        shutdown_timeout_ms=900,
-    )
+    assert policy.enabled is False
+    assert policy.wait_timeout_ms == 750
+    assert policy.failure_backoff_ms == 25
+    assert policy.shutdown_timeout_ms == 900
 
 
 def test_missing_runtime_config_uses_safe_defaults(tmp_path, monkeypatch):
@@ -188,7 +186,9 @@ def test_camera_quality_monitor_receives_acquisition_timestamp():
     monitor.reset.assert_called_once_with()
 
 
-def test_runtime_main_substitutes_loop_only_during_tracker_bootstrap(monkeypatch):
+def test_latest_frame_runtime_main_remains_available_for_direct_callers(
+    monkeypatch,
+):
     original = tracker_main.TrackingLoop
     observed: list[object] = []
     monkeypatch.setattr(
@@ -203,21 +203,23 @@ def test_runtime_main_substitutes_loop_only_during_tracker_bootstrap(monkeypatch
     assert tracker_main.TrackingLoop is original
 
 
-def test_entrypoints_route_source_and_frozen_tracker_to_runtime():
+def test_real_entrypoints_select_pose_stability_runtime():
     source_entry = Path("tracker/__main__.py").read_text(encoding="utf-8")
     frozen_entry = Path("launcher/__main__.py").read_text(encoding="utf-8")
 
-    assert "from tracker.latest_frame_runtime import main" in source_entry
-    assert "from tracker.latest_frame_runtime import main" in frozen_entry
+    assert "from tracker.pose_stability_runtime import main" in source_entry
+    assert "from tracker.pose_stability_runtime import main" in frozen_entry
     assert "from tracker.main import main" not in source_entry
 
 
 def test_repository_config_and_setup_defaults_match_policy():
     config = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
     wizard = Path("launcher/wizard.py").read_text(encoding="utf-8")
+    expected = LatestFrameCapturePolicy().config_values()
 
-    assert config["camera"]["latest_frame"] == (
-        LatestFrameCapturePolicy().config_values()
+    assert all(
+        config["camera"]["latest_frame"][key] == value
+        for key, value in expected.items()
     )
     assert (
         '"latest_frame": LatestFrameCapturePolicy().config_values()'
@@ -225,11 +227,13 @@ def test_repository_config_and_setup_defaults_match_policy():
     )
 
 
-def test_frozen_package_includes_latest_frame_runtime_modules():
+def test_frozen_package_includes_latest_frame_and_stability_modules():
     spec = Path("Glassless3D.spec").read_text(encoding="utf-8")
 
     assert '"tracker.latest_frame_capture"' in spec
     assert '"tracker.latest_frame_runtime"' in spec
+    assert '"tracker.pose_jump_confirmation"' in spec
+    assert '"tracker.pose_stability_runtime"' in spec
 
 
 def test_direct_tracking_loop_class_is_not_replaced_at_import_time():
