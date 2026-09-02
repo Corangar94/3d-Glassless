@@ -68,6 +68,40 @@ def test_candidate_window_is_measured_from_the_first_candidate():
     assert snapshot.confirmed_jump_count == 0
     assert snapshot.candidate_sample_count == 1
     assert snapshot.candidate_timestamp_ms == 1165
+    assert snapshot.candidate_latest_timestamp_ms == 1165
+
+
+def test_duplicate_timestamp_cannot_confirm_the_same_candidate_twice():
+    gate = PoseJumpConfirmationGate()
+    gate.filter(_pose(1000))
+    candidate = _pose(1033, x=60.0, z=125.0)
+
+    assert gate.filter(candidate) is None
+    assert gate.filter(candidate) is None
+
+    snapshot = gate.snapshot()
+    assert snapshot.confirmed_jump_count == 0
+    assert snapshot.candidate_sample_count == 1
+    assert snapshot.duplicate_timestamp_drop_count == 1
+    assert snapshot.last_rejection_reason == (
+        "pose jump confirmation received a duplicate timestamp"
+    )
+
+
+def test_newer_consistent_sample_still_confirms_after_duplicate_drop():
+    gate = PoseJumpConfirmationGate()
+    gate.filter(_pose(1000))
+    candidate = _pose(1033, x=60.0, z=125.0)
+
+    assert gate.filter(candidate) is None
+    assert gate.filter(candidate) is None
+    confirmed = _pose(1066, x=61.0, z=124.0)
+    assert gate.filter(confirmed) is confirmed
+
+    snapshot = gate.snapshot()
+    assert snapshot.confirmed_jump_count == 1
+    assert snapshot.duplicate_timestamp_drop_count == 1
+    assert snapshot.candidate_sample_count == 0
 
 
 @pytest.mark.parametrize(
@@ -78,9 +112,11 @@ def test_candidate_window_is_measured_from_the_first_candidate():
         {"candidate_timeout_ms": 250.5},
         {"reset_after_ms": False},
         {"candidate_timeout_ms": "250.0"},
+        {"minimum_xy_jump_cm": True},
+        {"minimum_candidate_confidence": False},
     ],
 )
-def test_fractional_or_boolean_integer_settings_fall_back_atomically(values):
+def test_fractional_or_boolean_numeric_settings_fall_back_atomically(values):
     logs: list[str] = []
 
     policy = parse_pose_jump_confirmation_policy(
@@ -97,10 +133,27 @@ def test_fractional_or_boolean_integer_settings_fall_back_atomically(values):
     [
         {"confirmation_samples": 2.5},
         {"confirmation_samples": True},
+        {"confirmation_samples": 11},
         {"candidate_timeout_ms": 250.5},
+        {"candidate_timeout_ms": 60_001},
         {"reset_after_ms": False},
+        {"reset_after_ms": 60_001},
+        {"minimum_xy_jump_cm": True},
+        {"minimum_candidate_confidence": False},
     ],
 )
-def test_direct_policy_requires_real_integer_timing_fields(kwargs):
+def test_direct_policy_requires_bounded_strict_numeric_fields(kwargs):
     with pytest.raises(ValueError):
         PoseJumpConfirmationPolicy(**kwargs)
+
+
+def test_maximum_supported_policy_values_are_valid():
+    policy = PoseJumpConfirmationPolicy(
+        confirmation_samples=10,
+        candidate_timeout_ms=60_000,
+        reset_after_ms=60_000,
+    )
+
+    assert policy.confirmation_samples == 10
+    assert policy.candidate_timeout_ms == 60_000
+    assert policy.reset_after_ms == 60_000
