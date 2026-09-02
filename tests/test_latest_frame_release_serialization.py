@@ -22,11 +22,50 @@ class _StoppedThread:
         pass
 
 
+class _OwnershipLock:
+    """Test lock that distinguishes current-thread ownership from contention."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._owner: int | None = None
+
+    def acquire(
+        self,
+        blocking: bool = True,
+        timeout: float = -1.0,
+    ) -> bool:
+        acquired = (
+            self._lock.acquire(blocking)
+            if timeout == -1.0
+            else self._lock.acquire(blocking, timeout)
+        )
+        if acquired:
+            self._owner = threading.get_ident()
+        return acquired
+
+    def release(self) -> None:
+        self._owner = None
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def owned_by_current_thread(self) -> bool:
+        return self._owner == threading.get_ident()
+
+    def __enter__(self) -> "_OwnershipLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
 class _Capture:
     def __init__(self) -> None:
         self.release_count = 0
-        self.io_lock: threading.Lock | None = None
-        self.release_saw_lock = False
+        self.io_lock: _OwnershipLock | None = None
+        self.release_owned_lock = False
         self.events: list[str] = []
 
     def read(self):
@@ -34,8 +73,9 @@ class _Capture:
 
     def release(self) -> None:
         self.release_count += 1
-        self.release_saw_lock = bool(
-            self.io_lock is not None and self.io_lock.locked()
+        self.release_owned_lock = bool(
+            self.io_lock is not None
+            and self.io_lock.owned_by_current_thread()
         )
         self.events.append("release")
 
@@ -54,7 +94,9 @@ def _wrapper(
         ),
         thread_factory=lambda **_kwargs: _StoppedThread(),
     )
-    capture.io_lock = wrapper._io_lock
+    ownership_lock = _OwnershipLock()
+    wrapper._io_lock = ownership_lock
+    capture.io_lock = ownership_lock
     return wrapper
 
 
@@ -65,7 +107,7 @@ def test_normal_release_holds_camera_io_lock():
     wrapper.release()
 
     assert capture.release_count == 1
-    assert capture.release_saw_lock
+    assert capture.release_owned_lock
     assert not wrapper.owns_capture
 
 
@@ -95,7 +137,7 @@ def test_release_waits_for_short_inflight_control_call():
 
     assert not control.is_alive()
     assert capture.release_count == 1
-    assert capture.release_saw_lock
+    assert capture.release_owned_lock
     assert capture.events == ["get-start", "get-end", "release"]
 
 
@@ -120,7 +162,7 @@ def test_stuck_read_uses_bounded_unlocked_release_escape():
 
     assert elapsed < 0.25
     assert capture.release_count == 1
-    assert not capture.release_saw_lock
+    assert not capture.release_owned_lock
     assert not wrapper.owns_capture
 
     unblock_holder.set()
