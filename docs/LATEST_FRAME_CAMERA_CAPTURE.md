@@ -13,6 +13,7 @@ The normal source and frozen tracker entrypoints use `LatestFrameCapture`:
 - only the newest completed event is retained;
 - a slow processing loop skips superseded frames instead of performing tracking work on them;
 - a successful frame that has already waited too long is retired before camera-quality analysis or tracker inference;
+- sustained byte-identical successful frames are converted into camera failures for the existing reopen policy;
 - the consumer continues waiting for a newer generation within its original read deadline;
 - failure events remain deliverable so camera reopen and reconnect accounting is unchanged;
 - an unexpectedly terminated worker wakes consumers and causes immediate failed reads instead of repeated full-timeout waits;
@@ -32,6 +33,8 @@ camera:
     enabled: true
     wait_timeout_ms: 1000
     max_frame_age_ms: 250
+    freeze_check_interval_ms: 250
+    freeze_timeout_ms: 3000
     failure_backoff_ms: 20
     shutdown_timeout_ms: 1000
 ```
@@ -43,6 +46,14 @@ camera:
 `max_frame_age_ms` limits time spent in the latest-frame slot after the native read completed. A successful event at the exact limit remains eligible; an older event is retired once and the consumer keeps waiting. Set it to `0` to disable this early gate. Valid values are 0–60,000 ms.
 
 This age is measured with a process-local steady clock, independently of the wrapping wire timestamp sent to tracker backends. A backwards, non-finite, or unavailable steady-clock observation is treated as unknown rather than falsely stale. The gate does not estimate sensor exposure time; it bounds delay after OpenCV returns the completed frame.
+
+`freeze_check_interval_ms` limits full-buffer fingerprinting frequency. The default 250 ms interval hashes at most four accepted frames per second rather than every camera frame. Set it to `0` to check every successful frame. Valid values are 0–60,000 ms.
+
+`freeze_timeout_ms` is the required duration of exact full-buffer identity before the camera is considered frozen. The default is 3,000 ms. Set it to `0` to disable frozen-frame detection. Valid values are 0–60,000 ms.
+
+The freeze detector uses a 128-bit BLAKE2 digest of the complete contiguous frame buffer plus frame type, format, shape, strides, item size, and byte count. It does not use visual similarity or sampled pixels. Non-contiguous and opaque third-party frame objects are passed through unchanged. A truly static physical webcam normally still produces sensor or compression variation; virtual cameras that intentionally emit perfectly identical frames can disable this detector.
+
+Once frozen, successful identical reads are published as failed camera events until the next scheduled full-buffer check proves the image changed. A changed image clears the episode immediately at that check. An ordinary failed native read resets the identity history.
 
 `failure_backoff_ms` prevents a disconnected or failing backend from spinning at full CPU while it reports failed reads. Valid values are 0–10,000 ms.
 
@@ -65,6 +76,7 @@ Each camera opened by initial startup or backend rotation is wrapped independent
 - captured and delivered frame counts;
 - frames superseded before delivery;
 - successful frames retired by the age gate and the most recent stale age;
+- failed frozen-frame events, freeze episode count, and most recent frozen duration;
 - failed native reads and consumer timeouts;
 - latest and delivered generation numbers;
 - latest and last-delivered acquisition timestamps;
