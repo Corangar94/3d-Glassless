@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from enum import IntFlag
 import math
 import struct
+import threading
 
 from tracker.pose import FilteredPose, monotonic_ms
 from tracker.sequence_mapping import (
     DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
+    next_sequence_write_markers,
     try_attach_sequence_mapping,
 )
 
@@ -79,6 +81,8 @@ def _prediction_lead_ms(pose: FilteredPose, publish_timestamp_ms: int) -> int:
 class PoseStateWriter:
     def __init__(self, name: str = POSE_V2_NAME) -> None:
         self._name = name
+        self._committed_sequence = 0
+        self._write_lock = threading.RLock()
         self._handle: int | None = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, POSE_V2_SIZE, name
         )
@@ -122,74 +126,86 @@ class PoseStateWriter:
         )
 
     def write(self, pose: FilteredPose, *, valid: bool = True) -> None:
-        if self._view is None:
-            raise RuntimeError("write() called after close()")
-        values = (
-            pose.x_cm,
-            pose.y_cm,
-            pose.z_cm,
-            pose.vx_cm_s,
-            pose.vy_cm_s,
-            pose.vz_cm_s,
-            pose.yaw_deg,
-            pose.pitch_deg,
-            pose.roll_deg,
-            pose.confidence,
-        )
-        if not all(math.isfinite(float(value)) for value in values):
-            raise ValueError("pose packet contains non-finite values")
-        # The old reserved uint32 now carries producer prediction lead.
-        # Mark that semantic explicitly so a newer overlay can remain safe when
-        # paired with an older V2 writer that still leaves the word at zero.
-        flags = (
-            (PoseFlags.VALID if valid else PoseFlags(0))
-            | PoseFlags.PREDICTION_LEAD_VALID
-        )
-        if pose.predicted:
-            flags |= PoseFlags.PREDICTED
-        if any(
-            abs(value) > 1e-4
-            for value in (pose.yaw_deg, pose.pitch_deg, pose.roll_deg)
-        ):
-            flags |= PoseFlags.ORIENTATION_VALID
-        publish_timestamp_ms = int(
-            pose.publish_timestamp_ms or monotonic_ms()
-        ) & _UINT32_MASK
-        prediction_lead_ms = _prediction_lead_ms(pose, publish_timestamp_ms)
-        data = struct.pack(
-            POSE_V2_FORMAT,
-            POSE_V2_MAGIC,
-            POSE_V2_VERSION,
-            *[float(value) for value in values],
-            int(pose.capture_timestamp_ms) & _UINT32_MASK,
-            publish_timestamp_ms,
-            int(flags),
-            prediction_lead_ms,
-        )
-        sequence = (
-            ctypes.c_uint32.from_address(self._seq_view)
-            if self._seq_view
-            else None
-        )
-        if sequence is not None:
-            sequence.value = (sequence.value + 1) & _UINT32_MASK
-        ctypes.memmove(self._view, data, POSE_V2_SIZE)
-        if sequence is not None:
-            sequence.value = (sequence.value + 1) & _UINT32_MASK
+        with self._write_lock:
+            view = self._view
+            if view is None:
+                raise RuntimeError("write() called after close()")
+            values = (
+                pose.x_cm,
+                pose.y_cm,
+                pose.z_cm,
+                pose.vx_cm_s,
+                pose.vy_cm_s,
+                pose.vz_cm_s,
+                pose.yaw_deg,
+                pose.pitch_deg,
+                pose.roll_deg,
+                pose.confidence,
+            )
+            if not all(math.isfinite(float(value)) for value in values):
+                raise ValueError("pose packet contains non-finite values")
+            # The old reserved uint32 now carries producer prediction lead.
+            # Mark that semantic explicitly so a newer overlay can remain safe when
+            # paired with an older V2 writer that still leaves the word at zero.
+            flags = (
+                (PoseFlags.VALID if valid else PoseFlags(0))
+                | PoseFlags.PREDICTION_LEAD_VALID
+            )
+            if pose.predicted:
+                flags |= PoseFlags.PREDICTED
+            if any(
+                abs(value) > 1e-4
+                for value in (pose.yaw_deg, pose.pitch_deg, pose.roll_deg)
+            ):
+                flags |= PoseFlags.ORIENTATION_VALID
+            publish_timestamp_ms = int(
+                pose.publish_timestamp_ms or monotonic_ms()
+            ) & _UINT32_MASK
+            prediction_lead_ms = _prediction_lead_ms(
+                pose,
+                publish_timestamp_ms,
+            )
+            data = struct.pack(
+                POSE_V2_FORMAT,
+                POSE_V2_MAGIC,
+                POSE_V2_VERSION,
+                *[float(value) for value in values],
+                int(pose.capture_timestamp_ms) & _UINT32_MASK,
+                publish_timestamp_ms,
+                int(flags),
+                prediction_lead_ms,
+            )
+            sequence = (
+                ctypes.c_uint32.from_address(self._seq_view)
+                if self._seq_view
+                else None
+            )
+            if sequence is None:
+                ctypes.memmove(view, data, POSE_V2_SIZE)
+                return
+
+            markers = next_sequence_write_markers(
+                self._committed_sequence
+            )
+            sequence.value = markers.writing
+            ctypes.memmove(view, data, POSE_V2_SIZE)
+            sequence.value = markers.committed
+            self._committed_sequence = markers.committed
 
     def close(self) -> None:
-        if self._view is not None:
-            _k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
-        if self._seq_view is not None:
-            _k32.UnmapViewOfFile(self._seq_view)
-            self._seq_view = None
-        if self._seq_handle is not None:
-            _k32.CloseHandle(self._seq_handle)
-            self._seq_handle = None
+        with self._write_lock:
+            if self._view is not None:
+                _k32.UnmapViewOfFile(self._view)
+                self._view = None
+            if self._handle is not None:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
+            if self._seq_view is not None:
+                _k32.UnmapViewOfFile(self._seq_view)
+                self._seq_view = None
+            if self._seq_handle is not None:
+                _k32.CloseHandle(self._seq_handle)
+                self._seq_handle = None
 
     def __enter__(self) -> "PoseStateWriter":
         return self
