@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from launcher.edid import detect_screen_size_cm
 from launcher.overlay_process import find_depth_model, find_overlay_exe
+from tracker.latest_frame_capture import LatestFrameCapturePolicy
 from tracker.mediapipe_runtime_policy import MediaPipeRuntimePolicy
 
 
@@ -271,6 +272,7 @@ class DonePage(QWizardPage):
                 "width": 1280,
                 "height": 720,
                 "fps": 30,
+                "latest_frame": LatestFrameCapturePolicy().config_values(),
                 "reconnect": dict(_DEFAULT_CAMERA_RECONNECT),
             },
             "screen": {
