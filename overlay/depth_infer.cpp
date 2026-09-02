@@ -438,8 +438,11 @@ struct DepthInferImpl {
 
     void publish_freshness_snapshot() {
         const auto snapshot = result_freshness.snapshot();
-        published_depth_updates.store(
-            snapshot.accepted_count,
+        last_depth_source_generation.store(
+            snapshot.last_published_generation,
+            std::memory_order_relaxed);
+        last_depth_source_ms.store(
+            snapshot.last_published_source_ms,
             std::memory_order_relaxed);
         stale_depth_drops.store(
             snapshot.stale_drop_count,
@@ -450,12 +453,10 @@ struct DepthInferImpl {
         invalid_depth_drops.store(
             snapshot.invalid_drop_count,
             std::memory_order_relaxed);
-        last_depth_source_generation.store(
-            snapshot.last_published_generation,
-            std::memory_order_relaxed);
-        last_depth_source_ms.store(
-            snapshot.last_published_source_ms,
-            std::memory_order_relaxed);
+        // Published count is the release marker for source/upload metadata.
+        published_depth_updates.store(
+            snapshot.accepted_count,
+            std::memory_order_release);
     }
 
     void reset_temporal_depth_history_after_rejection() {
@@ -463,13 +464,13 @@ struct DepthInferImpl {
         // run_once cannot queue the next tensor until after this reset. Clear
         // every CPU-side temporal cache that the rejected postprocess touched;
         // leave the current valid GPU depth textures and their blend untouched.
-        const int N = DepthInferencer::kModelSize;
         prev_norm_f32.clear();
-        prev_norm_tiles.assign(tile_count, {});
-        cached_tile_norm.assign(
-            tile_count,
-            std::vector<float>(static_cast<size_t>(N) * N, 0.5f));
-        tile_generation.assign(tile_count, 0);
+        for (auto& previous : prev_norm_tiles) previous.clear();
+        for (auto& cached : cached_tile_norm) {
+            std::fill(cached.begin(), cached.end(), 0.5f);
+        }
+        std::fill(tile_generation.begin(), tile_generation.end(), 0);
+        scheduler_cycle = 0;  // fast mode refreshes the center tile next.
         completion_generation = 0;
         smoothed_global_lo = 0.0f;
         smoothed_global_hi = 1.0f;
@@ -1463,7 +1464,6 @@ float4 main(I i):SV_Target {
             const auto decision = result_freshness.consider(
                 drained_source,
                 now_ms);
-            publish_freshness_snapshot();
             if (decision == g3d::depth::PublishDecision::Accept) {
                 const int N = DepthInferencer::kModelSize;
                 ctx->CopyResource(depth_prev_tex, depth_tex);
@@ -1492,6 +1492,9 @@ float4 main(I i):SV_Target {
             } else {
                 reset_temporal_depth_history_after_rejection();
             }
+            // A release store makes source/upload metadata visible before the
+            // accepted-publication counter observed by diagnostics/visibility.
+            publish_freshness_snapshot();
         }
         if (worker_busy) return true;
 
@@ -2000,7 +2003,7 @@ uint64_t DepthInferencer::gpu_io_fallbacks() const {
 
 uint64_t DepthInferencer::depth_updates_published() const {
     return impl_
-        ? impl_->published_depth_updates.load(std::memory_order_relaxed)
+        ? impl_->published_depth_updates.load(std::memory_order_acquire)
         : 0;
 }
 
