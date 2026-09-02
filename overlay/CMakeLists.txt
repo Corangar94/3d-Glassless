@@ -22,6 +22,15 @@ if(BUILD_TESTING)
     )
     target_compile_features(pose_prediction_tests PRIVATE cxx_std_17)
     add_test(NAME pose_prediction_tests COMMAND pose_prediction_tests)
+
+    add_executable(depth_result_freshness_tests
+        depth_result_freshness_tests.cpp
+    )
+    target_compile_features(depth_result_freshness_tests PRIVATE cxx_std_17)
+    add_test(
+        NAME depth_result_freshness_tests
+        COMMAND depth_result_freshness_tests
+    )
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
