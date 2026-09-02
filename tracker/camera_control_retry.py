@@ -6,18 +6,29 @@ from dataclasses import dataclass
 from tracker.pose import elapsed_u32_ms, normalize_wire_timestamp
 
 
-_CONTROL_RESULT_KEYS = ("autofocus_locked", "auto_exposure_locked")
+_CONTROL_RESULT_GROUPS = (
+    ("autofocus_locked", "focus_preserved"),
+    ("auto_exposure_locked", "exposure_preserved"),
+)
 
 
 def camera_controls_locked(result: dict[str, object]) -> bool:
-    """Return whether every control exposed by the backend was locked.
+    """Return whether every exposed control transaction completed safely.
 
-    Missing result keys mean the corresponding OpenCV property is unavailable,
-    so there is nothing to retry. A present false key means the backend exposed
-    that operation but did not accept manual mode during this attempt.
+    Missing groups mean the backend does not expose that automatic control. For
+    backward compatibility, an older result containing only a true ``*_locked``
+    key remains complete. New transactional results also contain a preservation
+    key; when present, it must be true so a camera cannot be reported locked
+    after disabling auto mode but failing to restore the current manual value.
     """
-    attempted = [bool(result[key]) for key in _CONTROL_RESULT_KEYS if key in result]
-    return not attempted or all(attempted)
+    for lock_key, preservation_key in _CONTROL_RESULT_GROUPS:
+        if lock_key not in result and preservation_key not in result:
+            continue
+        if not bool(result.get(lock_key, False)):
+            return False
+        if preservation_key in result and not bool(result[preservation_key]):
+            return False
+    return True
 
 
 @dataclass

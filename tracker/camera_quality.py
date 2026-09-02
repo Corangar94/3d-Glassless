@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 import math
 import statistics
-from typing import Protocol
+from typing import Iterable, Protocol
 
 import cv2
 import numpy as np
@@ -284,23 +284,206 @@ def _write_camera_control(
     value: float,
     name: str,
     errors: list[str],
+    *,
+    report_rejection: bool = True,
 ) -> bool:
     if property_id is None:
+        if report_rejection:
+            errors.append(f"{name} control is unavailable")
         return False
     try:
-        return bool(cap.set(property_id, float(value)))
+        accepted = bool(cap.set(property_id, float(value)))
     except Exception as error:  # OpenCV backends may throw instead of returning False
         errors.append(f"{name} write failed: {type(error).__name__}")
         return False
+    if not accepted and report_rejection:
+        errors.append(f"{name} write was rejected")
+    return accepted
+
+
+def _finite_unique(values: Iterable[float | None]) -> tuple[float, ...]:
+    result: list[float] = []
+    for value in values:
+        if value is None:
+            continue
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            continue
+        if not any(abs(parsed - existing) <= 1e-6 for existing in result):
+            result.append(parsed)
+    return tuple(result)
+
+
+def _write_first_accepted(
+    cap: CameraLike,
+    property_id: int | None,
+    values: Iterable[float | None],
+    name: str,
+    errors: list[str],
+) -> tuple[bool, float | None]:
+    candidates = _finite_unique(values)
+    if property_id is None:
+        errors.append(f"{name} control is unavailable")
+        return False, None
+    for value in candidates:
+        if _write_camera_control(
+            cap,
+            property_id,
+            value,
+            name,
+            errors,
+            report_rejection=False,
+        ):
+            return True, value
+    errors.append(f"{name} write was rejected")
+    return False, None
+
+
+def _approximately(value: float | None, target: float) -> bool:
+    return value is not None and abs(float(value) - float(target)) <= 1e-3
+
+
+def _lock_focus_controls(
+    cap: CameraLike,
+    autofocus: int,
+    focus: int | None,
+    result: dict[str, object],
+    errors: list[str],
+) -> None:
+    focus_value = _read_camera_control(cap, focus, "focus", errors)
+    autofocus_value = _read_camera_control(
+        cap,
+        autofocus,
+        "autofocus",
+        errors,
+    )
+    result["focus_value"] = focus_value
+    result["autofocus_value"] = autofocus_value
+
+    if focus is None:
+        errors.append("focus control is unavailable")
+    if focus_value is None:
+        # Disabling autofocus without a restorable manual value can leave the
+        # camera permanently soft. Do not cross that hardware state boundary.
+        result["autofocus_locked"] = False
+        result["focus_preserved"] = False
+        return
+    if _approximately(autofocus_value, 0.0):
+        result["autofocus_locked"] = True
+        result["focus_preserved"] = True
+        return
+
+    locked = _write_camera_control(
+        cap,
+        autofocus,
+        0.0,
+        "autofocus manual mode",
+        errors,
+    )
+    preserved = bool(
+        locked
+        and _write_camera_control(
+            cap,
+            focus,
+            focus_value,
+            "focus restore",
+            errors,
+        )
+    )
+    rollback = False
+    if locked and not preserved:
+        rollback, _value = _write_first_accepted(
+            cap,
+            autofocus,
+            (autofocus_value, 1.0),
+            "autofocus rollback",
+            errors,
+        )
+        result["autofocus_rollback"] = rollback
+
+    # Report final safe lock state, not merely whether the temporary mode write
+    # was accepted before restoration or rollback.
+    result["autofocus_locked"] = bool(locked and preserved)
+    result["focus_preserved"] = preserved
+
+
+def _lock_exposure_controls(
+    cap: CameraLike,
+    auto_exposure: int,
+    exposure: int | None,
+    result: dict[str, object],
+    errors: list[str],
+) -> None:
+    exposure_value = _read_camera_control(cap, exposure, "exposure", errors)
+    auto_exposure_value = _read_camera_control(
+        cap,
+        auto_exposure,
+        "auto exposure",
+        errors,
+    )
+    result["exposure_value"] = exposure_value
+    result["auto_exposure_value"] = auto_exposure_value
+
+    if exposure is None:
+        errors.append("exposure control is unavailable")
+    if exposure_value is None:
+        # As with focus, never disable the automatic controller unless the
+        # current manual value can be restored transactionally.
+        result["auto_exposure_locked"] = False
+        result["exposure_preserved"] = False
+        return
+    if _approximately(auto_exposure_value, 0.0) or _approximately(
+        auto_exposure_value,
+        0.25,
+    ):
+        result["auto_exposure_locked"] = True
+        result["exposure_preserved"] = True
+        return
+
+    locked, manual_mode = _write_first_accepted(
+        cap,
+        auto_exposure,
+        (0.25, 0.0),
+        "auto exposure manual mode",
+        errors,
+    )
+    if manual_mode is not None:
+        result["auto_exposure_manual_value"] = manual_mode
+    preserved = bool(
+        locked
+        and _write_camera_control(
+            cap,
+            exposure,
+            exposure_value,
+            "exposure restore",
+            errors,
+        )
+    )
+    rollback = False
+    if locked and not preserved:
+        rollback, rollback_value = _write_first_accepted(
+            cap,
+            auto_exposure,
+            (auto_exposure_value, 0.75, 1.0),
+            "auto exposure rollback",
+            errors,
+        )
+        result["auto_exposure_rollback"] = rollback
+        if rollback_value is not None:
+            result["auto_exposure_rollback_value"] = rollback_value
+
+    result["auto_exposure_locked"] = bool(locked and preserved)
+    result["exposure_preserved"] = preserved
 
 
 def try_lock_camera_controls(cap: CameraLike) -> dict[str, object]:
-    """Best-effort focus/exposure locking after a stable warm-up.
+    """Best-effort transactional focus/exposure locking after warm-up.
 
-    Camera backends disagree on supported properties, AUTO_EXPOSURE values, and
-    whether unsupported access returns ``False``/``None`` or raises. This
-    optional optimization must never terminate tracking. Values are restored
-    only after the corresponding automatic mode was successfully disabled.
+    Automatic mode is disabled only when the current manual value has been read
+    successfully. If restoring that value fails, the function immediately tries
+    to roll the corresponding automatic mode back on. This optional optimization
+    must never leave the camera in a worse state merely because a backend
+    accepted the first half of a control transaction.
     """
     result: dict[str, object] = {}
     errors: list[str] = []
@@ -310,58 +493,21 @@ def try_lock_camera_controls(cap: CameraLike) -> dict[str, object]:
     exposure = getattr(cv2, "CAP_PROP_EXPOSURE", None)
 
     if autofocus is not None:
-        focus_value = _read_camera_control(cap, focus, "focus", errors)
-        autofocus_locked = _write_camera_control(
+        _lock_focus_controls(
             cap,
             autofocus,
-            0.0,
-            "autofocus",
+            focus,
+            result,
             errors,
-        )
-        result["focus_value"] = focus_value
-        result["autofocus_locked"] = autofocus_locked
-        result["focus_preserved"] = bool(
-            autofocus_locked
-            and focus_value is not None
-            and _write_camera_control(
-                cap,
-                focus,
-                focus_value,
-                "focus",
-                errors,
-            )
         )
 
     if auto_exposure is not None:
-        exposure_value = _read_camera_control(cap, exposure, "exposure", errors)
-        # DirectShow commonly uses 0.25 for manual mode; some MSMF/backends use 0.
-        auto_exposure_locked = _write_camera_control(
+        _lock_exposure_controls(
             cap,
             auto_exposure,
-            0.25,
-            "auto exposure",
+            exposure,
+            result,
             errors,
-        )
-        if not auto_exposure_locked:
-            auto_exposure_locked = _write_camera_control(
-                cap,
-                auto_exposure,
-                0.0,
-                "auto exposure fallback",
-                errors,
-            )
-        result["exposure_value"] = exposure_value
-        result["auto_exposure_locked"] = auto_exposure_locked
-        result["exposure_preserved"] = bool(
-            auto_exposure_locked
-            and exposure_value is not None
-            and _write_camera_control(
-                cap,
-                exposure,
-                exposure_value,
-                "exposure",
-                errors,
-            )
         )
 
     if errors:
