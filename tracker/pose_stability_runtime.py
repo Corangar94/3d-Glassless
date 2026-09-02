@@ -31,18 +31,39 @@ class _ConfirmedMeasurementAdmission:
     def confirmation(self) -> PoseJumpConfirmationGate:
         return self._confirmation
 
-    def accept(self, *args: object, **kwargs: object) -> Any:
-        accepted = self._admission.accept(*args, **kwargs)
+    def _apply(
+        self,
+        method_name: str,
+        *args: object,
+        **kwargs: object,
+    ) -> Any:
+        method = getattr(self._admission, method_name)
+        accepted = method(*args, **kwargs)
         return self._confirmation.filter(accepted)
 
+    def accept(self, *args: object, **kwargs: object) -> Any:
+        return self._apply("accept", *args, **kwargs)
+
     def admit(self, *args: object, **kwargs: object) -> Any:
-        admitted = self._admission.admit(*args, **kwargs)
-        return self._confirmation.filter(admitted)
+        return self._apply("admit", *args, **kwargs)
+
+    def filter(self, *args: object, **kwargs: object) -> Any:
+        return self._apply("filter", *args, **kwargs)
+
+    def __call__(self, *args: object, **kwargs: object) -> Any:
+        admission = self._admission
+        if not callable(admission):
+            raise TypeError("measurement admission boundary is not callable")
+        accepted = admission(*args, **kwargs)
+        return self._confirmation.filter(accepted)
 
     def reset(self, *args: object, **kwargs: object) -> Any:
-        result = self._admission.reset(*args, **kwargs)
-        self._confirmation.reset()
-        return result
+        try:
+            return self._admission.reset(*args, **kwargs)
+        finally:
+            # Never retain a viewer anchor or candidate across a lifecycle reset,
+            # even when the delegated boundary reports its own reset failure.
+            self._confirmation.reset()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._admission, name)
