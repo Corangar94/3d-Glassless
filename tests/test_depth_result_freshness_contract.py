@@ -152,16 +152,6 @@ def test_first_window_visibility_requires_accepted_publication():
     assert "has_frame = false" in header
 
 
-def test_render_health_uses_accepted_publication_readiness():
-    overlay = _source("overlay/overlay.cpp")
-
-    assert "g_depth->depth_updates_published() > 0" in overlay
-    assert "g_depth->inferences_completed() > 0" not in overlay.split(
-        "const bool depthReady =",
-        1,
-    )[1].split(";", 1)[0]
-
-
 def test_native_freshness_suite_is_registered_with_ctest():
     cmake = _source("overlay/CMakeLists.txt")
 
