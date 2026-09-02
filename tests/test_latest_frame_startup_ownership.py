@@ -175,6 +175,7 @@ def test_snapshot_and_release_tolerate_missing_worker():
     wrapper._capture = capture
     wrapper._policy = _policy()
     wrapper._clock = lambda: 1
+    wrapper._steady_clock = lambda: 1.0
     wrapper._condition = __import__("threading").Condition()
     wrapper._io_lock = __import__("threading").Lock()
     wrapper._release_lock = __import__("threading").Lock()
@@ -192,13 +193,17 @@ def test_snapshot_and_release_tolerate_missing_worker():
     wrapper._superseded_frame_count = 0
     wrapper._capture_failure_count = 0
     wrapper._read_timeout_count = 0
+    wrapper._stale_frame_drop_count = 0
     wrapper._last_capture_timestamp_ms = None
     wrapper._last_delivered_capture_timestamp_ms = None
+    wrapper._last_stale_frame_age_ms = None
     wrapper._last_error = ""
 
     snapshot = wrapper.snapshot()
     wrapper.release()
 
     assert not snapshot.worker_alive
+    assert snapshot.stale_frame_drop_count == 0
+    assert snapshot.last_stale_frame_age_ms is None
     assert wrapper.snapshot().released
     assert capture.release_count == 0
