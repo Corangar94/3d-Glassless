@@ -53,6 +53,7 @@ def _custom_tracking_config() -> dict[str, object]:
             "max_result_age_ms": 180,
             "max_consecutive_stale_results": 4,
             "stale_result_window_ms": 700,
+            "max_input_width_px": 720,
         },
     }
 
@@ -60,7 +61,7 @@ def _custom_tracking_config() -> dict[str, object]:
 def _production_like_tracker_kwargs() -> dict[str, object]:
     # tracker.main still includes these two legacy-safe defaults in its base
     # constructor mapping. The configured composite policy overrides them for
-    # MediaPipe and removes them from OpenCV construction.
+    # MediaPipe and removes every MediaPipe-only key from OpenCV construction.
     return {
         "real_ipd_cm": 6.3,
         "async_stall_timeout_ms": 5_000,
@@ -76,6 +77,7 @@ def _expected_runtime_kwargs() -> dict[str, int]:
         "async_max_result_age_ms": 180,
         "async_max_consecutive_stale_results": 4,
         "async_stale_result_window_ms": 700,
+        "max_input_width_px": 720,
     }
 
 
@@ -102,6 +104,7 @@ def test_parser_remains_a_backend_failover_policy_subtype():
         max_result_age_ms=180,
         max_consecutive_stale_results=4,
         stale_result_window_ms=700,
+        max_input_width_px=720,
     )
 
 
@@ -110,7 +113,7 @@ def test_configured_policy_equality_includes_mediapipe_limits():
     changed_config = _custom_tracking_config()
     changed_config["mediapipe_runtime"] = {
         **changed_config["mediapipe_runtime"],
-        "max_backlog_ms": 91,
+        "max_input_width_px": 721,
     }
     changed = parse_backend_failover_policy(changed_config)
     same = parse_backend_failover_policy(_custom_tracking_config())
@@ -193,7 +196,10 @@ def test_strict_cv2_strips_configured_mediapipe_only_limits():
 
     tracker, selected = create_face_tracker(
         "cv2",
-        tracker_kwargs=_production_like_tracker_kwargs(),
+        tracker_kwargs={
+            **_production_like_tracker_kwargs(),
+            "max_input_width_px": 1234,
+        },
         failover_policy=policy,
         import_module=lambda _name: _module_with(_Tracker),
     )
@@ -208,6 +214,7 @@ def test_plain_failover_policy_preserves_direct_caller_kwargs():
         tracker_kwargs={
             "real_ipd_cm": 6.3,
             "async_max_backlog_ms": 77,
+            "max_input_width_px": 640,
         },
         failover_policy=BackendFailoverPolicy(),
         import_module=lambda _name: _module_with(_Tracker),
@@ -216,6 +223,7 @@ def test_plain_failover_policy_preserves_direct_caller_kwargs():
     assert tracker.kwargs == {
         "real_ipd_cm": 6.3,
         "async_max_backlog_ms": 77,
+        "max_input_width_px": 640,
     }
 
 
@@ -227,20 +235,20 @@ def test_invalid_failover_settings_do_not_discard_valid_media_policy():
     policy = parse_backend_failover_policy(config, logger=logs.append)
 
     assert _failover_values(policy) == (30_000, 1, 100, 5_000, 3)
-    assert policy.mediapipe_runtime_policy.max_backlog_ms == 90
+    assert policy.mediapipe_runtime_policy.max_input_width_px == 720
     assert any("backend failover" in message for message in logs)
 
 
 def test_invalid_media_policy_does_not_discard_valid_failover_settings():
     logs: list[str] = []
     config = _custom_tracking_config()
-    config["mediapipe_runtime"] = {"max_backlog_ms": -1}
+    config["mediapipe_runtime"] = {"max_input_width_px": 100}
 
     policy = parse_backend_failover_policy(config, logger=logs.append)
 
     assert _failover_values(policy) == (0, 1, 100, 4_000, 4)
     assert policy.mediapipe_runtime_policy == MediaPipeRuntimePolicy()
-    assert any("MediaPipe async runtime" in message for message in logs)
+    assert any("MediaPipe runtime" in message for message in logs)
 
 
 def test_repository_config_contains_complete_nested_policy():
@@ -254,6 +262,7 @@ def test_repository_config_contains_complete_nested_policy():
     )
     assert "async_stall_timeout_ms" not in tracking
     assert "async_max_result_age_ms" not in tracking
+    assert "async_max_input_width_px" not in tracking
 
 
 def test_first_run_defaults_use_the_same_policy_object():
@@ -281,6 +290,7 @@ def test_frozen_package_preserves_all_runtime_gates_and_policy():
 
     for module in (
         "tracker.mediapipe_runtime_policy",
+        "tracker.mediapipe_input",
         "tracker.async_callback_order",
         "tracker.async_result_freshness",
         "tracker.pose_result_timeline",
