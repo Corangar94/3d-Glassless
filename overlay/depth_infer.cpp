@@ -458,6 +458,31 @@ struct DepthInferImpl {
             std::memory_order_relaxed);
     }
 
+    void reset_temporal_depth_history_after_rejection() {
+        // The worker has already completed when output_ready is drained, and
+        // run_once cannot queue the next tensor until after this reset. Clear
+        // every CPU-side temporal cache that the rejected postprocess touched;
+        // leave the current valid GPU depth textures and their blend untouched.
+        const int N = DepthInferencer::kModelSize;
+        prev_norm_f32.clear();
+        prev_norm_tiles.assign(tile_count, {});
+        cached_tile_norm.assign(
+            tile_count,
+            std::vector<float>(static_cast<size_t>(N) * N, 0.5f));
+        tile_generation.assign(tile_count, 0);
+        completion_generation = 0;
+        smoothed_global_lo = 0.0f;
+        smoothed_global_hi = 1.0f;
+        global_range_valid = false;
+        smoothed_contrast_mean = 0.5f;
+        smoothed_contrast_gain = 1.0f;
+        contrast_state_valid = false;
+        percentile_scratch.clear();
+        global_samples_scratch.clear();
+        normalized_scratch.clear();
+        motion_warp_scratch.clear();
+    }
+
     uint32_t resolve_performance_mode(uint32_t requested) {
         if (requested <= 2) {
             active_performance_mode.store(requested, std::memory_order_relaxed);
@@ -1464,6 +1489,8 @@ float4 main(I i):SV_Target {
                 last_depth_source_generation.store(
                     drained_source.generation,
                     std::memory_order_relaxed);
+            } else {
+                reset_temporal_depth_history_after_rejection();
             }
         }
         if (worker_busy) return true;
