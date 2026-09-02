@@ -42,6 +42,8 @@ hidden_imports = [
     "tracker.latest_frame_capture",
     "tracker.frame_freeze_detector",
     "tracker.latest_frame_runtime",
+    "tracker.pose_jump_confirmation",
+    "tracker.pose_stability_runtime",
     "tracker.backend_factory",
     "tracker.backend_failover",
     "tracker.backend_pose_bridge",
