@@ -70,6 +70,7 @@ class LatestFrameCaptureSnapshot:
     latest_generation: int
     delivered_generation: int
     last_capture_timestamp_ms: int | None
+    last_delivered_capture_timestamp_ms: int | None
     worker_alive: bool
     released: bool
     last_error: str
@@ -145,9 +146,10 @@ class LatestFrameCapture:
     """Single-consumer latest-frame proxy around an opened capture object.
 
     The worker is the only caller of the underlying ``read`` method. Control
-    property access is serialized with reads when possible. Release first asks
-    the worker to stop, then releases the device to unblock a backend read that
-    did not return during the configured grace interval.
+    property access is serialized with reads and receives priority between
+    frames. Release first asks the worker to stop, then releases the device to
+    unblock a backend read that did not return during the configured grace
+    interval.
     """
 
     __g3d_latest_frame_capture__ = True
@@ -169,6 +171,7 @@ class LatestFrameCapture:
         self._stop_event = threading.Event()
         self._released = False
         self._underlying_released = False
+        self._control_waiters = 0
         self._generation = 0
         self._delivered_generation = 0
         self._event: _CaptureEvent | None = None
@@ -178,6 +181,7 @@ class LatestFrameCapture:
         self._capture_failure_count = 0
         self._read_timeout_count = 0
         self._last_capture_timestamp_ms: int | None = None
+        self._last_delivered_capture_timestamp_ms: int | None = None
         self._last_error = ""
         self._worker = threading.Thread(
             target=self._capture_loop,
@@ -193,6 +197,11 @@ class LatestFrameCapture:
     @property
     def policy(self) -> LatestFrameCapturePolicy:
         return self._policy
+
+    @property
+    def last_delivered_capture_timestamp_ms(self) -> int | None:
+        with self._condition:
+            return self._last_delivered_capture_timestamp_ms
 
     @property
     def failure_summary(self) -> str:
@@ -211,6 +220,20 @@ class LatestFrameCapture:
     @staticmethod
     def _error_text(stage: str, error: BaseException) -> str:
         return f"{stage}:{type(error).__name__}"
+
+    def _safe_timestamp(self) -> int:
+        try:
+            return normalize_wire_timestamp(self._clock())
+        except Exception:
+            return normalize_wire_timestamp(
+                int(time.monotonic() * 1000.0)
+            )
+
+    def _wait_for_control_calls(self) -> bool:
+        with self._condition:
+            while self._control_waiters > 0 and not self._stop_event.is_set():
+                self._condition.wait()
+            return not self._stop_event.is_set()
 
     def _publish_event(
         self,
@@ -241,12 +264,13 @@ class LatestFrameCapture:
                 self._last_error = ""
             else:
                 self._capture_failure_count += 1
-                if error_text:
-                    self._last_error = error_text
+                self._last_error = error_text or "read:CaptureFailure"
             self._condition.notify_all()
 
     def _capture_loop(self) -> None:
         while not self._stop_event.is_set():
+            if not self._wait_for_control_calls():
+                break
             error_text = ""
             try:
                 with self._io_lock:
@@ -258,7 +282,7 @@ class LatestFrameCapture:
                 ok, frame = False, None
                 error_text = self._error_text("read", error)
 
-            timestamp_ms = normalize_wire_timestamp(self._clock())
+            timestamp_ms = self._safe_timestamp()
             if self._stop_event.is_set():
                 break
             self._publish_event(
@@ -284,13 +308,16 @@ class LatestFrameCapture:
         with self._condition:
             while True:
                 if self._released:
-                    return False, None, normalize_wire_timestamp(self._clock())
+                    return False, None, self._safe_timestamp()
                 event = self._event
                 if (
                     event is not None
                     and event.generation > self._delivered_generation
                 ):
                     self._delivered_generation = event.generation
+                    self._last_delivered_capture_timestamp_ms = (
+                        event.capture_timestamp_ms
+                    )
                     if event.ok:
                         self._delivered_frame_count += 1
                     return (
@@ -302,11 +329,7 @@ class LatestFrameCapture:
                 if remaining <= 0.0:
                     self._read_timeout_count += 1
                     self._last_error = "read:TimeoutError"
-                    return (
-                        False,
-                        None,
-                        normalize_wire_timestamp(self._clock()),
-                    )
+                    return False, None, self._safe_timestamp()
                 self._condition.wait(remaining)
 
     def read(self) -> tuple[bool, object | None]:
@@ -319,8 +342,11 @@ class LatestFrameCapture:
         default: object,
         *args: object,
     ) -> object:
-        if self._released:
-            return default
+        with self._condition:
+            if self._released:
+                return default
+            self._control_waiters += 1
+            self._condition.notify_all()
         try:
             method = getattr(self._capture, name)
             with self._io_lock:
@@ -331,6 +357,10 @@ class LatestFrameCapture:
             with self._condition:
                 self._last_error = self._error_text(name, error)
             return default
+        finally:
+            with self._condition:
+                self._control_waiters = max(0, self._control_waiters - 1)
+                self._condition.notify_all()
 
     def isOpened(self) -> bool:  # OpenCV spelling is part of the API
         return bool(self._proxy_call("isOpened", False))
@@ -359,6 +389,9 @@ class LatestFrameCapture:
                 latest_generation=self._generation,
                 delivered_generation=self._delivered_generation,
                 last_capture_timestamp_ms=self._last_capture_timestamp_ms,
+                last_delivered_capture_timestamp_ms=(
+                    self._last_delivered_capture_timestamp_ms
+                ),
                 worker_alive=self._worker.is_alive(),
                 released=self._released,
                 last_error=self._last_error,
