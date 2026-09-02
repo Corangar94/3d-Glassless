@@ -15,6 +15,7 @@ The normal source and frozen tracker entrypoints use `LatestFrameCapture`:
 - a successful frame that has already waited too long is retired before camera-quality analysis or tracker inference;
 - the consumer continues waiting for a newer generation within its original read deadline;
 - failure events remain deliverable so camera reopen and reconnect accounting is unchanged;
+- an unexpectedly terminated worker wakes consumers and causes immediate failed reads instead of repeated full-timeout waits;
 - the single consumer never receives the same generation twice;
 - tracker backends and camera-quality analysis receive the selected frame's acquisition timestamp rather than the later processing-loop timestamp;
 - camera property reads and writes are serialized with frame reads and receive priority between frames;
@@ -49,6 +50,12 @@ This age is measured with a process-local steady clock, independently of the wra
 
 Invalid values cause the entire latest-frame policy to fall back to safe defaults. If worker creation itself fails, tracking logs the failure and continues with the existing synchronous camera path.
 
+## Worker failure boundary
+
+Ordinary camera-driver exceptions remain per-read failure events and keep the worker alive. A worker-level termination outside that normal boundary—for example a fatal exception in the worker infrastructure—is recorded once, wakes every waiting consumer, and makes subsequent reads fail immediately. This allows the existing three-read reopen policy to replace the camera without adding up to three configured read timeouts first.
+
+A frame already published before the fatal termination remains eligible and is delivered before the worker-failure signal. Normal stop/release sets the stop event first and is never recorded as an unexpected worker failure.
+
 ## Recovery and observability
 
 Each camera opened by initial startup or backend rotation is wrapped independently. Releasing the wrapper releases the native capture once, and the next recovered camera receives a new worker and generation timeline. A final snapshot from the retired wrapper remains available for diagnostics.
@@ -61,7 +68,8 @@ Each camera opened by initial startup or backend rotation is wrapped independent
 - failed native reads and consumer timeouts;
 - latest and delivered generation numbers;
 - latest and last-delivered acquisition timestamps;
-- worker/release state; and
+- worker liveness, unexpected-failure state, and failure episode count;
+- wrapper/release state; and
 - the last contained error.
 
 The existing safe `VideoCapture` boundary remains underneath this adapter, so constructor, state-query, property, read, and release exceptions continue to become bounded recovery signals rather than terminating the tracker process.

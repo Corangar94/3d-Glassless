@@ -184,6 +184,9 @@ def test_snapshot_and_release_tolerate_missing_worker():
     wrapper._underlying_released = False
     wrapper._owns_capture = False
     wrapper._worker = None
+    wrapper._worker_finished = False
+    wrapper._worker_failed = False
+    wrapper._worker_failure_count = 0
     wrapper._control_waiters = 0
     wrapper._generation = 0
     wrapper._delivered_generation = 0
@@ -203,6 +206,8 @@ def test_snapshot_and_release_tolerate_missing_worker():
     wrapper.release()
 
     assert not snapshot.worker_alive
+    assert not snapshot.worker_failed
+    assert snapshot.worker_failure_count == 0
     assert snapshot.stale_frame_drop_count == 0
     assert snapshot.last_stale_frame_age_ms is None
     assert wrapper.snapshot().released

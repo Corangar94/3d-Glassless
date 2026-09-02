@@ -113,6 +113,8 @@ class LatestFrameCaptureSnapshot:
     last_error: str
     stale_frame_drop_count: int = 0
     last_stale_frame_age_ms: int | None = None
+    worker_failure_count: int = 0
+    worker_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,9 @@ class LatestFrameCapture:
         self._underlying_released = False
         self._owns_capture = False
         self._worker: threading.Thread | None = None
+        self._worker_finished = False
+        self._worker_failed = False
+        self._worker_failure_count = 0
         self._control_waiters = 0
         self._generation = 0
         self._delivered_generation = 0
@@ -258,6 +263,11 @@ class LatestFrameCapture:
     @property
     def owns_capture(self) -> bool:
         return self._owns_capture
+
+    @property
+    def worker_failed(self) -> bool:
+        with self._condition:
+            return self._worker_failed
 
     @property
     def last_delivered_capture_timestamp_ms(self) -> int | None:
@@ -363,38 +373,54 @@ class LatestFrameCapture:
             self._condition.notify_all()
 
     def _capture_loop(self) -> None:
-        while not self._stop_event.is_set():
-            if not self._wait_for_control_calls():
-                break
-            error_text = ""
-            try:
-                with self._io_lock:
-                    if self._stop_event.is_set():
-                        break
-                    result = self._capture.read()
-                ok, frame = _normalized_read_result(result)
-            except Exception as error:
-                ok, frame = False, None
-                error_text = self._error_text("read", error)
+        worker_error: BaseException | None = None
+        try:
+            while not self._stop_event.is_set():
+                if not self._wait_for_control_calls():
+                    break
+                error_text = ""
+                try:
+                    with self._io_lock:
+                        if self._stop_event.is_set():
+                            break
+                        result = self._capture.read()
+                    ok, frame = _normalized_read_result(result)
+                except Exception as error:
+                    ok, frame = False, None
+                    error_text = self._error_text("read", error)
 
-            completed_at_s = self._safe_steady_time()
-            timestamp_ms = self._safe_timestamp()
-            if self._stop_event.is_set():
-                break
-            self._publish_event(
-                ok,
-                frame,
-                timestamp_ms,
-                completed_at_s,
-                error_text=error_text,
-            )
-            if not ok and self._policy.failure_backoff_ms > 0:
-                self._stop_event.wait(
-                    self._policy.failure_backoff_ms / 1000.0
+                completed_at_s = self._safe_steady_time()
+                timestamp_ms = self._safe_timestamp()
+                if self._stop_event.is_set():
+                    break
+                self._publish_event(
+                    ok,
+                    frame,
+                    timestamp_ms,
+                    completed_at_s,
+                    error_text=error_text,
                 )
-
-        with self._condition:
-            self._condition.notify_all()
+                if not ok and self._policy.failure_backoff_ms > 0:
+                    self._stop_event.wait(
+                        self._policy.failure_backoff_ms / 1000.0
+                    )
+        except BaseException as error:
+            # Ordinary driver failures are converted to failure events by the
+            # inner Exception boundary. This outer boundary is only for a fatal
+            # worker-level termination that would otherwise disappear silently.
+            worker_error = error
+        finally:
+            with self._condition:
+                self._worker_finished = True
+                if not self._stop_event.is_set():
+                    self._worker_failed = True
+                    self._worker_failure_count += 1
+                    self._last_error = (
+                        self._error_text("worker", worker_error)
+                        if worker_error is not None
+                        else "worker:UnexpectedExit"
+                    )
+                self._condition.notify_all()
 
     def read_with_timestamp(
         self,
@@ -426,6 +452,11 @@ class LatestFrameCapture:
                         event.frame,
                         event.capture_timestamp_ms,
                     )
+                if self._worker_failed:
+                    # Return an immediate failed read on every call. The camera
+                    # loop's existing three-failure policy can then reopen the
+                    # device without paying this wrapper's full timeout each time.
+                    return False, None, self._safe_timestamp()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
                     self._read_timeout_count += 1
@@ -527,6 +558,8 @@ class LatestFrameCapture:
                 last_error=self._last_error,
                 stale_frame_drop_count=self._stale_frame_drop_count,
                 last_stale_frame_age_ms=self._last_stale_frame_age_ms,
+                worker_failure_count=self._worker_failure_count,
+                worker_failed=self._worker_failed,
             )
 
     def _release_underlying(self) -> None:
