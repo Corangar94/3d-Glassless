@@ -3,6 +3,11 @@ camera:
   height: 720
   index: 0
   width: 1280
+  latest_frame:
+    enabled: true
+    wait_timeout_ms: 1000
+    failure_backoff_ms: 20
+    shutdown_timeout_ms: 1000
   reconnect:
     immediate_retries: 1
     max_failures: 8
