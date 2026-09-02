@@ -12,6 +12,9 @@ The normal source and frozen tracker entrypoints use `LatestFrameCapture`:
 - every completed read receives a wrap-safe monotonic acquisition timestamp immediately;
 - only the newest completed event is retained;
 - a slow processing loop skips superseded frames instead of performing tracking work on them;
+- a successful frame that has already waited too long is retired before camera-quality analysis or tracker inference;
+- the consumer continues waiting for a newer generation within its original read deadline;
+- failure events remain deliverable so camera reopen and reconnect accounting is unchanged;
 - the single consumer never receives the same generation twice;
 - tracker backends and camera-quality analysis receive the selected frame's acquisition timestamp rather than the later processing-loop timestamp;
 - camera property reads and writes are serialized with frame reads and receive priority between frames;
@@ -27,6 +30,7 @@ camera:
   latest_frame:
     enabled: true
     wait_timeout_ms: 1000
+    max_frame_age_ms: 250
     failure_backoff_ms: 20
     shutdown_timeout_ms: 1000
 ```
@@ -34,6 +38,10 @@ camera:
 `enabled` controls the packaged/source tracker entrypoint. Direct `tracker.main.TrackingLoop` callers retain the historical synchronous capture behavior unless they explicitly use `LatestFrameTrackingLoop` or `LatestFrameCapture`.
 
 `wait_timeout_ms` bounds both consumer waits for a newer generation and camera-control waits behind an in-progress native read. A frame timeout is returned as a failed camera read and participates in existing reconnect handling. Valid values are 1–60,000 ms.
+
+`max_frame_age_ms` limits time spent in the latest-frame slot after the native read completed. A successful event at the exact limit remains eligible; an older event is retired once and the consumer keeps waiting. Set it to `0` to disable this early gate. Valid values are 0–60,000 ms.
+
+This age is measured with a process-local steady clock, independently of the wrapping wire timestamp sent to tracker backends. A backwards, non-finite, or unavailable steady-clock observation is treated as unknown rather than falsely stale. The gate does not estimate sensor exposure time; it bounds delay after OpenCV returns the completed frame.
 
 `failure_backoff_ms` prevents a disconnected or failing backend from spinning at full CPU while it reports failed reads. Valid values are 0–10,000 ms.
 
@@ -49,6 +57,7 @@ Each camera opened by initial startup or backend rotation is wrapped independent
 
 - captured and delivered frame counts;
 - frames superseded before delivery;
+- successful frames retired by the age gate and the most recent stale age;
 - failed native reads and consumer timeouts;
 - latest and delivered generation numbers;
 - latest and last-delivered acquisition timestamps;
