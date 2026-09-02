@@ -57,6 +57,7 @@ tracking:
     max_result_age_ms: 250
     max_consecutive_stale_results: 3
     stale_result_window_ms: 1000
+    max_input_width_px: 960
   camera_fov_deg: 90.0
   camera_tilt_deg: -17.92
   hold_ms: 500
