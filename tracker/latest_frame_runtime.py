@@ -17,7 +17,7 @@ from tracker.latest_frame_capture import (
 
 
 class _AcquisitionTimestampQualityMonitor:
-    """Give camera-quality cadence the worker's acquisition timestamp."""
+    """Give quality analysis the selected frame's acquisition timestamp."""
 
     def __init__(self, monitor: object, owner: "LatestFrameTrackingLoop") -> None:
         self._monitor = monitor
@@ -91,14 +91,34 @@ class LatestFrameTrackingLoop(tracker_main.TrackingLoop):
         self,
     ) -> LatestFrameCaptureSnapshot | None:
         active = self._active_latest_frame_capture
-        return active.snapshot() if active is not None else self._last_latest_frame_snapshot
+        return (
+            active.snapshot()
+            if active is not None
+            else self._last_latest_frame_snapshot
+        )
 
     def capture_timestamp_ms(self, fallback_timestamp_ms: int) -> int:
         active = self._active_latest_frame_capture
         if active is None:
             return int(fallback_timestamp_ms)
         timestamp = active.last_delivered_capture_timestamp_ms
-        return int(fallback_timestamp_ms) if timestamp is None else int(timestamp)
+        return (
+            int(fallback_timestamp_ms)
+            if timestamp is None
+            else int(timestamp)
+        )
+
+    def _retire_active_capture_snapshot(self) -> None:
+        previous = self._active_latest_frame_capture
+        self._active_latest_frame_capture = None
+        if previous is None:
+            return
+        try:
+            self._last_latest_frame_snapshot = previous.snapshot()
+        except Exception:
+            # Capture wrapping is a latency optimization. Diagnostics from a
+            # retiring wrapper must never block synchronous fallback/recovery.
+            self._last_latest_frame_snapshot = None
 
     def _open_camera_with_recovery(
         self,
@@ -116,18 +136,22 @@ class LatestFrameTrackingLoop(tracker_main.TrackingLoop):
             camera_fps,
             backend_start_index=backend_start_index,
         )
+        self._retire_active_capture_snapshot()
         if capture is None or not self._latest_frame_capture_policy.enabled:
-            self._active_latest_frame_capture = None
             return capture, backend_index
 
-        wrapped = wrap_latest_frame_capture(
-            capture,
-            self._latest_frame_capture_policy,
-        )
+        try:
+            wrapped = wrap_latest_frame_capture(
+                capture,
+                self._latest_frame_capture_policy,
+            )
+        except Exception as error:
+            print(
+                "[G3D] Latest-frame camera worker unavailable "
+                f"({type(error).__name__}); using synchronous reads"
+            )
+            return capture, backend_index
         if isinstance(wrapped, LatestFrameCapture):
-            previous = self._active_latest_frame_capture
-            if previous is not None and previous is not wrapped:
-                self._last_latest_frame_snapshot = previous.snapshot()
             self._active_latest_frame_capture = wrapped
         return wrapped, backend_index
 
