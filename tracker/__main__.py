@@ -1,4 +1,4 @@
-from tracker.latest_frame_runtime import main
+from tracker.pose_stability_runtime import main
 
 
 if __name__ == "__main__":
