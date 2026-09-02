@@ -31,7 +31,7 @@ def validated_mediapipe_input_width_px(value: object) -> int:
         raise ValueError("max_input_width_px must be an integer") from error
     if parsed == 0:
         return 0
-    if not MIN_MEDIAPIPE_INPUT_WIDTH_PX <= parsed <= MAX_MEDIAPIPE_INPUT_WIDTH_PX:
+    if not MIN_MEDIAPIIPE_INPUT_WIDTH_PX <= parsed <= MAX_MEDIAPIPE_INPUT_WIDTH_PX:
         raise ValueError(
             "max_input_width_px must be 0 or between "
             f"{MIN_MEDIAPIPE_INPUT_WIDTH_PX} and "
@@ -148,11 +148,9 @@ def parse_mediapipe_runtime_policy(
                 stale_result_window_ms=int(
                     nested.get("stale_result_window_ms", 1_000)
                 ),
-                max_input_width_px=int(
-                    nested.get(
-                        "max_input_width_px",
-                        DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
-                    )
+                max_input_width_px=nested.get(
+                    "max_input_width_px",
+                    DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
                 ),
             )
 
@@ -175,11 +173,9 @@ def parse_mediapipe_runtime_policy(
             stale_result_window_ms=int(
                 tracking.get("async_stale_result_window_ms", 1_000)
             ),
-            max_input_width_px=int(
-                tracking.get(
-                    "async_max_input_width_px",
-                    DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
-                )
+            max_input_width_px=tracking.get(
+                "async_max_input_width_px",
+                DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
             ),
         )
     except (TypeError, ValueError, OverflowError):
