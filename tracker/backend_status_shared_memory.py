@@ -4,10 +4,12 @@ from __future__ import annotations
 import ctypes
 from dataclasses import dataclass
 import struct
+import threading
 
 from tracker.pose import elapsed_u32_ms, monotonic_ms, normalize_wire_timestamp
 from tracker.sequence_mapping import (
     DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
+    next_sequence_write_markers,
     try_attach_sequence_mapping,
 )
 
@@ -324,6 +326,8 @@ class TrackerBackendStatusWriter:
     def __init__(self, name: str = STATUS_MAPPING_NAME) -> None:
         self._name = name
         self._k32 = _kernel32()
+        self._committed_sequence = 0
+        self._write_lock = threading.RLock()
         self._handle: int | None = self._k32.CreateFileMappingW(
             _INVALID_HANDLE,
             None,
@@ -367,33 +371,42 @@ class TrackerBackendStatusWriter:
             ctypes.c_uint32.from_address(self._seq_view).value = 0
 
     def write(self, status: TrackerBackendStatus) -> None:
-        if self._view is None:
-            raise RuntimeError("write() called after close()")
-        payload = encode_tracker_backend_status(status)
-        seq_word = (
-            ctypes.c_uint32.from_address(self._seq_view)
-            if self._seq_view
-            else None
-        )
-        if seq_word is not None:
-            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF
-        ctypes.memmove(self._view, payload, STATUS_SIZE)
-        if seq_word is not None:
-            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF
+        with self._write_lock:
+            view = self._view
+            if view is None:
+                raise RuntimeError("write() called after close()")
+            payload = encode_tracker_backend_status(status)
+            seq_word = (
+                ctypes.c_uint32.from_address(self._seq_view)
+                if self._seq_view
+                else None
+            )
+            if seq_word is None:
+                ctypes.memmove(view, payload, STATUS_SIZE)
+                return
+
+            markers = next_sequence_write_markers(
+                self._committed_sequence
+            )
+            seq_word.value = markers.writing
+            ctypes.memmove(view, payload, STATUS_SIZE)
+            seq_word.value = markers.committed
+            self._committed_sequence = markers.committed
 
     def close(self) -> None:
-        if self._view is not None:
-            self._k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            self._k32.CloseHandle(self._handle)
-            self._handle = None
-        if self._seq_view is not None:
-            self._k32.UnmapViewOfFile(self._seq_view)
-            self._seq_view = None
-        if self._seq_handle is not None:
-            self._k32.CloseHandle(self._seq_handle)
-            self._seq_handle = None
+        with self._write_lock:
+            if self._view is not None:
+                self._k32.UnmapViewOfFile(self._view)
+                self._view = None
+            if self._handle is not None:
+                self._k32.CloseHandle(self._handle)
+                self._handle = None
+            if self._seq_view is not None:
+                self._k32.UnmapViewOfFile(self._seq_view)
+                self._seq_view = None
+            if self._seq_handle is not None:
+                self._k32.CloseHandle(self._seq_handle)
+                self._seq_handle = None
 
     def __enter__(self) -> "TrackerBackendStatusWriter":
         return self
