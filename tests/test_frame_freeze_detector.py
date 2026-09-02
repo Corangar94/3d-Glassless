@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from tracker.frame_freeze_detector import FrameFreezeDetector
 
@@ -72,9 +73,9 @@ def test_changed_frame_clears_a_frozen_episode():
     )
     frozen_frame = _frame(1)
     detector.observe(frozen_frame, 1.0)
-    assert detector.observe(frozen_frame.copy(), 1.1).frozen
+    assert detector.observe(frozen_frame.copy(), 1.101).frozen
 
-    changed = detector.observe(_frame(2), 1.101)
+    changed = detector.observe(_frame(2), 1.102)
 
     assert changed.checked
     assert not changed.frozen
@@ -110,7 +111,7 @@ def test_failure_reset_starts_a_new_identity_episode():
     )
     frame = _frame(5)
     detector.observe(frame, 1.0)
-    assert detector.observe(frame.copy(), 1.1).frozen
+    assert detector.observe(frame.copy(), 1.101).frozen
 
     detector.reset()
     restarted = detector.observe(frame.copy(), 5.0)
@@ -208,9 +209,24 @@ def test_episode_count_increments_only_on_new_freeze_transitions():
     second = _frame(9)
 
     detector.observe(first, 1.0)
-    assert detector.observe(first.copy(), 1.1).episode_started
+    assert detector.observe(first.copy(), 1.101).episode_started
     assert not detector.observe(first.copy(), 1.2).episode_started
     detector.observe(second, 1.3)
-    assert detector.observe(second.copy(), 1.4).episode_started
+    assert detector.observe(second.copy(), 1.401).episode_started
 
     assert detector.snapshot().freeze_episode_count == 2
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"check_interval_ms": -1},
+        {"freeze_timeout_ms": -1},
+        {"check_interval_ms": 1.5},
+        {"freeze_timeout_ms": True},
+        {"check_interval_ms": "250"},
+    ],
+)
+def test_invalid_detector_timing_fails_closed(kwargs):
+    with pytest.raises(ValueError):
+        FrameFreezeDetector(**kwargs)
