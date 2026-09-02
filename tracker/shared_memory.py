@@ -2,10 +2,12 @@
 import ctypes
 from enum import IntEnum
 import struct
+import threading
 
 from tracker.pose import monotonic_ms
 from tracker.sequence_mapping import (
     DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
+    next_sequence_write_markers,
     try_attach_sequence_mapping,
 )
 
@@ -55,6 +57,8 @@ class SharedMemoryWriter:
         self._view: int | None = None
         self._seq_handle: int | None = None
         self._seq_view: int | None = None
+        self._committed_sequence = 0
+        self._write_lock = threading.RLock()
         self._handle = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STRUCT_SIZE, name,
         )
@@ -77,37 +81,49 @@ class SharedMemoryWriter:
                 self._seq_handle, _FILE_MAP_ALL_ACCESS, 0, 0, SEQ_STRUCT_SIZE,
             )
         if self._seq_view:
-            ctypes.c_long.from_address(self._seq_view).value = 0
+            ctypes.c_uint32.from_address(self._seq_view).value = 0
         self.write(x=0.0, y=0.0, z=60.0)
 
     def write(self, x: float, y: float, z: float) -> None:
         """Write head position using the native overlay's shared uptime clock."""
-        view = self._view
-        if view is None:
-            raise RuntimeError("write() called after close()")
-        ts = monotonic_ms()
-        data = struct.pack(STRUCT_FORMAT, x, y, z, ts)
-        seq_word = ctypes.c_uint32.from_address(self._seq_view) if self._seq_view else None
-        if seq_word is not None:
-            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF  # odd
-        ctypes.memmove(view, data, STRUCT_SIZE)
-        if seq_word is not None:
-            seq_word.value = (seq_word.value + 1) & 0xFFFF_FFFF  # even
+        with self._write_lock:
+            view = self._view
+            if view is None:
+                raise RuntimeError("write() called after close()")
+            ts = monotonic_ms()
+            data = struct.pack(STRUCT_FORMAT, x, y, z, ts)
+            seq_word = (
+                ctypes.c_uint32.from_address(self._seq_view)
+                if self._seq_view
+                else None
+            )
+            if seq_word is None:
+                ctypes.memmove(view, data, STRUCT_SIZE)
+                return
+
+            markers = next_sequence_write_markers(
+                self._committed_sequence
+            )
+            seq_word.value = markers.writing
+            ctypes.memmove(view, data, STRUCT_SIZE)
+            seq_word.value = markers.committed
+            self._committed_sequence = markers.committed
 
     def close(self) -> None:
         """Release the shared memory mapping and handle."""
-        if self._view is not None:
-            _k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
-        if self._seq_view is not None:
-            _k32.UnmapViewOfFile(self._seq_view)
-            self._seq_view = None
-        if self._seq_handle is not None:
-            _k32.CloseHandle(self._seq_handle)
-            self._seq_handle = None
+        with self._write_lock:
+            if self._view is not None:
+                _k32.UnmapViewOfFile(self._view)
+                self._view = None
+            if self._handle is not None:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
+            if self._seq_view is not None:
+                _k32.UnmapViewOfFile(self._seq_view)
+                self._seq_view = None
+            if self._seq_handle is not None:
+                _k32.CloseHandle(self._seq_handle)
+                self._seq_handle = None
 
     def __enter__(self) -> "SharedMemoryWriter":
         return self
