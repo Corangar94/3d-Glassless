@@ -81,7 +81,11 @@ def test_resize_uses_area_interpolation(monkeypatch):
     prepared = prepare_mediapipe_bgr_frame(frame, 960)
 
     assert prepared.resized
-    assert calls == [(frame, (960, 540), mediapipe_input.cv2.INTER_AREA)]
+    assert len(calls) == 1
+    source, size, interpolation = calls[0]
+    assert source is frame
+    assert size == (960, 540)
+    assert interpolation == mediapipe_input.cv2.INTER_AREA
 
 
 @pytest.mark.parametrize(
