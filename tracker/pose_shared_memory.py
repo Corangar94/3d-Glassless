@@ -14,6 +14,10 @@ import math
 import struct
 
 from tracker.pose import FilteredPose, monotonic_ms
+from tracker.sequence_mapping import (
+    DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
+    try_attach_sequence_mapping,
+)
 
 POSE_V2_NAME = "G3D_PoseV2"
 POSE_V2_MAGIC = 0x32443347
@@ -201,33 +205,47 @@ class PoseStateReader:
         self._view: int | None = None
         self._seq_handle: int | None = None
         self._seq_view: int | None = None
+        self._seq_attach_attempts_remaining = (
+            DEFAULT_SEQUENCE_ATTACH_ATTEMPTS
+        )
         self._try_attach()
 
     def _try_attach(self) -> None:
-        if self._view is not None:
-            return
-        self._handle = _k32.OpenFileMappingW(_FILE_MAP_READ, False, self._name)
-        if not self._handle:
-            self._handle = None
-            return
-        self._view = _k32.MapViewOfFile(
-            self._handle, _FILE_MAP_READ, 0, 0, POSE_V2_SIZE
-        )
-        if not self._view:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
-            return
-        self._seq_handle = _k32.OpenFileMappingW(
-            _FILE_MAP_READ, False, f"{self._name}_Seq"
-        )
-        if self._seq_handle:
-            self._seq_view = _k32.MapViewOfFile(
-                self._seq_handle,
+        if self._view is None:
+            if self._handle is None:
+                self._handle = _k32.OpenFileMappingW(
+                    _FILE_MAP_READ,
+                    False,
+                    self._name,
+                )
+                if not self._handle:
+                    self._handle = None
+                    return
+            self._view = _k32.MapViewOfFile(
+                self._handle,
                 _FILE_MAP_READ,
                 0,
                 0,
-                POSE_V2_SEQ_SIZE,
+                POSE_V2_SIZE,
             )
+            if not self._view:
+                _k32.CloseHandle(self._handle)
+                self._handle = None
+                self._view = None
+                return
+
+        attachment = try_attach_sequence_mapping(
+            _k32,
+            f"{self._name}_Seq",
+            handle=self._seq_handle,
+            view=self._seq_view,
+            attempts_remaining=self._seq_attach_attempts_remaining,
+            file_map_read=_FILE_MAP_READ,
+            size=POSE_V2_SEQ_SIZE,
+        )
+        self._seq_handle = attachment.handle
+        self._seq_view = attachment.view
+        self._seq_attach_attempts_remaining = attachment.attempts_remaining
 
     def read(self) -> PosePacketV2 | None:
         self._try_attach()
