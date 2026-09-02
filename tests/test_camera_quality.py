@@ -27,6 +27,15 @@ def _install_control_ids(monkeypatch):
     return values
 
 
+def _normal_control_value(ids, property_id):
+    return {
+        ids["CAP_PROP_AUTOFOCUS"]: 1.0,
+        ids["CAP_PROP_FOCUS"]: 42.0,
+        ids["CAP_PROP_AUTO_EXPOSURE"]: 0.75,
+        ids["CAP_PROP_EXPOSURE"]: -6.0,
+    }[property_id]
+
+
 def test_camera_quality_reports_good_textured_stable_sequence():
     monitor = CameraQualityMonitor(
         window_size=30,
@@ -79,8 +88,9 @@ def test_camera_quality_detects_exposure_hunting():
 def test_camera_controls_are_best_effort_and_preserve_values(monkeypatch):
     ids = _install_control_ids(monkeypatch)
     cap = MagicMock()
-    cap.get.side_effect = lambda property_id: (
-        42.0 if property_id == ids["CAP_PROP_FOCUS"] else -6.0
+    cap.get.side_effect = lambda property_id: _normal_control_value(
+        ids,
+        property_id,
     )
     cap.set.return_value = True
 
@@ -90,10 +100,11 @@ def test_camera_controls_are_best_effort_and_preserve_values(monkeypatch):
     assert result["focus_preserved"] is True
     assert result["auto_exposure_locked"] is True
     assert result["exposure_preserved"] is True
+    assert result["auto_exposure_manual_value"] == 0.25
     assert "errors" not in result
 
 
-def test_none_control_values_do_not_crash_or_get_written_back(monkeypatch):
+def test_missing_manual_values_do_not_disable_automatic_modes(monkeypatch):
     ids = _install_control_ids(monkeypatch)
     cap = MagicMock()
     cap.get.return_value = None
@@ -103,18 +114,16 @@ def test_none_control_values_do_not_crash_or_get_written_back(monkeypatch):
 
     assert result["focus_value"] is None
     assert result["exposure_value"] is None
-    assert result["autofocus_locked"] is True
-    assert result["auto_exposure_locked"] is True
+    assert result["autofocus_locked"] is False
+    assert result["auto_exposure_locked"] is False
     assert result["focus_preserved"] is False
     assert result["exposure_preserved"] is False
-    written_properties = [call.args[0] for call in cap.set.call_args_list]
-    assert ids["CAP_PROP_FOCUS"] not in written_properties
-    assert ids["CAP_PROP_EXPOSURE"] not in written_properties
+    assert cap.set.call_args_list == []
     assert any("focus read failed" in error for error in result["errors"])
     assert any("exposure read failed" in error for error in result["errors"])
 
 
-def test_backend_get_and_set_exceptions_are_reported_not_raised(monkeypatch):
+def test_backend_get_exceptions_are_reported_without_hardware_writes(monkeypatch):
     _install_control_ids(monkeypatch)
     cap = MagicMock()
     cap.get.side_effect = RuntimeError("unsupported get")
@@ -126,12 +135,13 @@ def test_backend_get_and_set_exceptions_are_reported_not_raised(monkeypatch):
     assert result["auto_exposure_locked"] is False
     assert result["focus_preserved"] is False
     assert result["exposure_preserved"] is False
-    assert len(result["errors"]) >= 5
+    assert cap.set.call_args_list == []
+    assert len(result["errors"]) == 4
     assert all("RuntimeError" in error for error in result["errors"])
 
 
-def test_nonfinite_values_are_not_restored(monkeypatch):
-    ids = _install_control_ids(monkeypatch)
+def test_nonfinite_values_are_not_restored_or_used_to_disable_auto(monkeypatch):
+    _install_control_ids(monkeypatch)
     cap = MagicMock()
     cap.get.return_value = float("nan")
     cap.set.return_value = True
@@ -140,19 +150,20 @@ def test_nonfinite_values_are_not_restored(monkeypatch):
 
     assert result["focus_value"] is None
     assert result["exposure_value"] is None
+    assert result["autofocus_locked"] is False
+    assert result["auto_exposure_locked"] is False
     assert result["focus_preserved"] is False
     assert result["exposure_preserved"] is False
-    written_properties = [call.args[0] for call in cap.set.call_args_list]
-    assert ids["CAP_PROP_FOCUS"] not in written_properties
-    assert ids["CAP_PROP_EXPOSURE"] not in written_properties
+    assert cap.set.call_args_list == []
     assert any("non-finite" in error for error in result["errors"])
 
 
 def test_auto_exposure_uses_backend_fallback_before_restoring_value(monkeypatch):
     ids = _install_control_ids(monkeypatch)
     cap = MagicMock()
-    cap.get.side_effect = lambda property_id: (
-        42.0 if property_id == ids["CAP_PROP_FOCUS"] else -6.0
+    cap.get.side_effect = lambda property_id: _normal_control_value(
+        ids,
+        property_id,
     )
 
     def set_control(property_id, value):
@@ -166,6 +177,7 @@ def test_auto_exposure_uses_backend_fallback_before_restoring_value(monkeypatch)
 
     assert result["auto_exposure_locked"] is True
     assert result["exposure_preserved"] is True
+    assert result["auto_exposure_manual_value"] == 0.0
     auto_values = [
         call.args[1]
         for call in cap.set.call_args_list
@@ -175,6 +187,102 @@ def test_auto_exposure_uses_backend_fallback_before_restoring_value(monkeypatch)
     assert (ids["CAP_PROP_EXPOSURE"], -6.0) in [
         tuple(call.args) for call in cap.set.call_args_list
     ]
+    assert "errors" not in result
+
+
+def test_focus_restore_failure_rolls_autofocus_back_on(monkeypatch):
+    ids = _install_control_ids(monkeypatch)
+    cap = MagicMock()
+    cap.get.side_effect = lambda property_id: _normal_control_value(
+        ids,
+        property_id,
+    )
+
+    def set_control(property_id, value):
+        if property_id == ids["CAP_PROP_FOCUS"]:
+            return False
+        return True
+
+    cap.set.side_effect = set_control
+
+    result = try_lock_camera_controls(cap)
+
+    assert result["autofocus_locked"] is False
+    assert result["focus_preserved"] is False
+    assert result["autofocus_rollback"] is True
+    calls = [tuple(call.args) for call in cap.set.call_args_list]
+    assert (ids["CAP_PROP_AUTOFOCUS"], 0.0) in calls
+    assert (ids["CAP_PROP_FOCUS"], 42.0) in calls
+    assert (ids["CAP_PROP_AUTOFOCUS"], 1.0) in calls
+    assert any("focus restore write was rejected" in error for error in result["errors"])
+
+
+def test_exposure_restore_failure_rolls_auto_exposure_back_on(monkeypatch):
+    ids = _install_control_ids(monkeypatch)
+    cap = MagicMock()
+    cap.get.side_effect = lambda property_id: _normal_control_value(
+        ids,
+        property_id,
+    )
+
+    def set_control(property_id, value):
+        if property_id == ids["CAP_PROP_EXPOSURE"]:
+            return False
+        return True
+
+    cap.set.side_effect = set_control
+
+    result = try_lock_camera_controls(cap)
+
+    assert result["auto_exposure_locked"] is False
+    assert result["exposure_preserved"] is False
+    assert result["auto_exposure_rollback"] is True
+    assert result["auto_exposure_rollback_value"] == 0.75
+    calls = [tuple(call.args) for call in cap.set.call_args_list]
+    assert (ids["CAP_PROP_AUTO_EXPOSURE"], 0.25) in calls
+    assert (ids["CAP_PROP_EXPOSURE"], -6.0) in calls
+    assert (ids["CAP_PROP_AUTO_EXPOSURE"], 0.75) in calls
+    assert any("exposure restore write was rejected" in error for error in result["errors"])
+
+
+def test_missing_manual_property_ids_do_not_disable_auto(monkeypatch):
+    ids = _install_control_ids(monkeypatch)
+    monkeypatch.setattr(cv2, "CAP_PROP_FOCUS", None, raising=False)
+    monkeypatch.setattr(cv2, "CAP_PROP_EXPOSURE", None, raising=False)
+    cap = MagicMock()
+    cap.get.side_effect = lambda property_id: (
+        1.0
+        if property_id == ids["CAP_PROP_AUTOFOCUS"]
+        else 0.75
+    )
+
+    result = try_lock_camera_controls(cap)
+
+    assert result["autofocus_locked"] is False
+    assert result["auto_exposure_locked"] is False
+    assert cap.set.call_args_list == []
+    assert "focus control is unavailable" in result["errors"]
+    assert "exposure control is unavailable" in result["errors"]
+
+
+def test_already_manual_controls_are_complete_without_rewriting_values(monkeypatch):
+    ids = _install_control_ids(monkeypatch)
+    cap = MagicMock()
+    cap.get.side_effect = lambda property_id: {
+        ids["CAP_PROP_AUTOFOCUS"]: 0.0,
+        ids["CAP_PROP_FOCUS"]: 42.0,
+        ids["CAP_PROP_AUTO_EXPOSURE"]: 0.25,
+        ids["CAP_PROP_EXPOSURE"]: -6.0,
+    }[property_id]
+
+    result = try_lock_camera_controls(cap)
+
+    assert result["autofocus_locked"] is True
+    assert result["focus_preserved"] is True
+    assert result["auto_exposure_locked"] is True
+    assert result["exposure_preserved"] is True
+    assert cap.set.call_args_list == []
+    assert "errors" not in result
 
 
 def test_tracker_runtime_integrates_quality_monitor_and_opt_in_lock():
@@ -183,4 +291,4 @@ def test_tracker_runtime_integrates_quality_monitor_and_opt_in_lock():
     assert "CameraQualityMonitor" in source
     assert "camera_quality.stable_for_lock" in source
     assert "try_lock_camera_controls(cap)" in source
-    assert 'lock_controls_after_warmup' in source
+    assert "lock_controls_after_warmup" in source
