@@ -13,14 +13,26 @@ def test_maximum_supported_timing_values_are_valid():
         wait_timeout_ms=60_000,
         failure_backoff_ms=10_000,
         shutdown_timeout_ms=60_000,
+        max_frame_age_ms=60_000,
     )
 
     assert policy.config_values() == {
         "enabled": True,
         "wait_timeout_ms": 60_000,
+        "max_frame_age_ms": 60_000,
         "failure_backoff_ms": 10_000,
         "shutdown_timeout_ms": 60_000,
     }
+
+
+def test_new_age_field_does_not_shift_historical_positional_arguments():
+    policy = LatestFrameCapturePolicy(False, 750, 25, 900)
+
+    assert policy.enabled is False
+    assert policy.wait_timeout_ms == 750
+    assert policy.failure_backoff_ms == 25
+    assert policy.shutdown_timeout_ms == 900
+    assert policy.max_frame_age_ms == 250
 
 
 @pytest.mark.parametrize(
@@ -28,11 +40,14 @@ def test_maximum_supported_timing_values_are_valid():
     [
         {"wait_timeout_ms": 0},
         {"wait_timeout_ms": 60_001},
+        {"max_frame_age_ms": -1},
+        {"max_frame_age_ms": 60_001},
         {"failure_backoff_ms": -1},
         {"failure_backoff_ms": 10_001},
         {"shutdown_timeout_ms": -1},
         {"shutdown_timeout_ms": 60_001},
         {"wait_timeout_ms": 1.5},
+        {"max_frame_age_ms": True},
         {"failure_backoff_ms": True},
         {"shutdown_timeout_ms": "1000"},
     ],
@@ -46,6 +61,7 @@ def test_direct_policy_rejects_unbounded_or_noninteger_timing(kwargs):
     "latest_frame",
     [
         {"wait_timeout_ms": 10**200},
+        {"max_frame_age_ms": 10**200},
         {"failure_backoff_ms": 10**200},
         {"shutdown_timeout_ms": 10**200},
     ],

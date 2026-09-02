@@ -8,11 +8,13 @@ tracking is temporarily slower than the device cadence.
 ``LatestFrameCapture`` gives one worker thread exclusive ownership of frame
 reads and retains only the newest completed result. The processing thread waits
 for a new generation and receives the acquisition timestamp atomically with the
-frame, while superseded frames are discarded before tracking work begins.
+frame, while superseded or already stale frames are discarded before tracking
+work begins.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import numbers
 import threading
 import time
@@ -22,9 +24,11 @@ from tracker.pose import monotonic_ms, normalize_wire_timestamp
 
 
 Clock = Callable[[], int]
+SteadyClock = Callable[[], float]
 LogFunction = Callable[[str], None]
 ThreadFactory = Callable[..., threading.Thread]
 _MAX_WAIT_TIMEOUT_MS = 60_000
+_MAX_FRAME_AGE_MS = 60_000
 _MAX_FAILURE_BACKOFF_MS = 10_000
 _MAX_SHUTDOWN_TIMEOUT_MS = 60_000
 _MAX_RELEASE_LOCK_WAIT_S = 0.250
@@ -40,18 +44,26 @@ class CaptureLike(Protocol):
 
 @dataclass(frozen=True)
 class LatestFrameCapturePolicy:
-    """Bounded worker, consumer, and shutdown timing."""
+    """Bounded worker, freshness, consumer, and shutdown timing."""
 
     enabled: bool = True
     wait_timeout_ms: int = 1_000
     failure_backoff_ms: int = 20
     shutdown_timeout_ms: int = 1_000
+    # Appended to preserve the historical four positional arguments above.
+    max_frame_age_ms: int = 250
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
         for name, value, minimum, maximum in (
             ("wait_timeout_ms", self.wait_timeout_ms, 1, _MAX_WAIT_TIMEOUT_MS),
+            (
+                "max_frame_age_ms",
+                self.max_frame_age_ms,
+                0,
+                _MAX_FRAME_AGE_MS,
+            ),
             (
                 "failure_backoff_ms",
                 self.failure_backoff_ms,
@@ -79,6 +91,7 @@ class LatestFrameCapturePolicy:
         return {
             "enabled": self.enabled,
             "wait_timeout_ms": int(self.wait_timeout_ms),
+            "max_frame_age_ms": int(self.max_frame_age_ms),
             "failure_backoff_ms": int(self.failure_backoff_ms),
             "shutdown_timeout_ms": int(self.shutdown_timeout_ms),
         }
@@ -98,6 +111,8 @@ class LatestFrameCaptureSnapshot:
     worker_alive: bool
     released: bool
     last_error: str
+    stale_frame_drop_count: int = 0
+    last_stale_frame_age_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +121,7 @@ class _CaptureEvent:
     ok: bool
     frame: object | None
     capture_timestamp_ms: int
+    completed_at_s: float
 
 
 def _parse_bool(value: object) -> bool:
@@ -143,6 +159,7 @@ def parse_latest_frame_capture_policy(
             shutdown_timeout_ms=int(
                 values.get("shutdown_timeout_ms", 1_000)
             ),
+            max_frame_age_ms=int(values.get("max_frame_age_ms", 250)),
         )
     except (TypeError, ValueError, OverflowError):
         logger(
@@ -188,12 +205,14 @@ class LatestFrameCapture:
         policy: LatestFrameCapturePolicy = LatestFrameCapturePolicy(),
         *,
         clock: Clock = monotonic_ms,
+        steady_clock: SteadyClock = time.monotonic,
         thread_name: str = "G3D-LatestFrameCapture",
         thread_factory: ThreadFactory = threading.Thread,
     ) -> None:
         self._capture = capture
         self._policy = policy
         self._clock = clock
+        self._steady_clock = steady_clock
         self._condition = threading.Condition()
         self._io_lock = threading.Lock()
         self._release_lock = threading.Lock()
@@ -211,8 +230,10 @@ class LatestFrameCapture:
         self._superseded_frame_count = 0
         self._capture_failure_count = 0
         self._read_timeout_count = 0
+        self._stale_frame_drop_count = 0
         self._last_capture_timestamp_ms: int | None = None
         self._last_delivered_capture_timestamp_ms: int | None = None
+        self._last_stale_frame_age_ms: int | None = None
         self._last_error = ""
         worker = thread_factory(
             target=self._capture_loop,
@@ -269,6 +290,38 @@ class LatestFrameCapture:
                 int(time.monotonic() * 1000.0)
             )
 
+    def _safe_steady_time(self) -> float:
+        try:
+            value = float(self._steady_clock())
+        except Exception:
+            value = float(time.monotonic())
+        if not math.isfinite(value):
+            value = float(time.monotonic())
+        return value
+
+    def _event_age_ms(self, event: _CaptureEvent) -> float | None:
+        try:
+            now_s = float(self._steady_clock())
+        except Exception:
+            return None
+        if not math.isfinite(now_s) or not math.isfinite(event.completed_at_s):
+            return None
+        age_ms = (now_s - event.completed_at_s) * 1000.0
+        return None if age_ms < 0.0 else age_ms
+
+    def _discard_stale_event_locked(self, event: _CaptureEvent) -> bool:
+        maximum_age_ms = self._policy.max_frame_age_ms
+        if not event.ok or maximum_age_ms <= 0:
+            return False
+        age_ms = self._event_age_ms(event)
+        if age_ms is None or age_ms <= maximum_age_ms:
+            return False
+        displayed_age_ms = max(1, int(math.ceil(age_ms)))
+        self._stale_frame_drop_count += 1
+        self._last_stale_frame_age_ms = displayed_age_ms
+        self._last_error = f"read:StaleFrame({displayed_age_ms}ms)"
+        return True
+
     def _wait_for_control_calls(self) -> bool:
         with self._condition:
             while self._control_waiters > 0 and not self._stop_event.is_set():
@@ -280,6 +333,7 @@ class LatestFrameCapture:
         ok: bool,
         frame: object | None,
         timestamp_ms: int,
+        completed_at_s: float,
         *,
         error_text: str = "",
     ) -> None:
@@ -297,6 +351,7 @@ class LatestFrameCapture:
                 ok=bool(ok),
                 frame=frame if ok else None,
                 capture_timestamp_ms=timestamp_ms,
+                completed_at_s=completed_at_s,
             )
             self._last_capture_timestamp_ms = timestamp_ms
             if ok:
@@ -322,6 +377,7 @@ class LatestFrameCapture:
                 ok, frame = False, None
                 error_text = self._error_text("read", error)
 
+            completed_at_s = self._safe_steady_time()
             timestamp_ms = self._safe_timestamp()
             if self._stop_event.is_set():
                 break
@@ -329,6 +385,7 @@ class LatestFrameCapture:
                 ok,
                 frame,
                 timestamp_ms,
+                completed_at_s,
                 error_text=error_text,
             )
             if not ok and self._policy.failure_backoff_ms > 0:
@@ -342,7 +399,7 @@ class LatestFrameCapture:
     def read_with_timestamp(
         self,
     ) -> tuple[bool, object | None, int]:
-        """Return the newest event newer than the previous consumer read."""
+        """Return the newest fresh event newer than the previous consumer read."""
         timeout_s = self._policy.wait_timeout_ms / 1000.0
         deadline = time.monotonic() + timeout_s
         with self._condition:
@@ -354,7 +411,11 @@ class LatestFrameCapture:
                     event is not None
                     and event.generation > self._delivered_generation
                 ):
+                    # Retire the generation before freshness evaluation so an
+                    # old successful frame cannot be reconsidered on every read.
                     self._delivered_generation = event.generation
+                    if self._discard_stale_event_locked(event):
+                        continue
                     self._last_delivered_capture_timestamp_ms = (
                         event.capture_timestamp_ms
                     )
@@ -464,6 +525,8 @@ class LatestFrameCapture:
                 worker_alive=self._worker_is_alive(),
                 released=self._released,
                 last_error=self._last_error,
+                stale_frame_drop_count=self._stale_frame_drop_count,
+                last_stale_frame_age_ms=self._last_stale_frame_age_ms,
             )
 
     def _release_underlying(self) -> None:
