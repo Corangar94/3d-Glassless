@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections import deque
 
+import pytest
+
 from tracker.sequence_mapping import (
     DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
+    next_sequence_write_markers,
     try_attach_sequence_mapping,
 )
 
@@ -132,3 +135,31 @@ def test_negative_retry_budget_is_treated_as_exhausted():
     assert result.handle is None
     assert result.view is None
     assert kernel32.open_calls == []
+
+
+@pytest.mark.parametrize(
+    ("committed", "writing", "next_committed"),
+    [
+        (0, 1, 2),
+        (2, 3, 4),
+        (100, 101, 102),
+        (0xFFFF_FFFE, 0xFFFF_FFFF, 0),
+    ],
+)
+def test_sequence_write_markers_are_odd_then_even(
+    committed,
+    writing,
+    next_committed,
+):
+    markers = next_sequence_write_markers(committed)
+
+    assert markers.writing == writing
+    assert markers.committed == next_committed
+    assert markers.writing & 1
+    assert not (markers.committed & 1)
+
+
+@pytest.mark.parametrize("committed", [-1, 1, 3, 0x1_0000_0000])
+def test_sequence_write_markers_reject_invalid_committed_state(committed):
+    with pytest.raises(ValueError):
+        next_sequence_write_markers(committed)
