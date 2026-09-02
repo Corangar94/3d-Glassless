@@ -48,9 +48,10 @@ class LatestFrameCapturePolicy:
 
     enabled: bool = True
     wait_timeout_ms: int = 1_000
-    max_frame_age_ms: int = 250
     failure_backoff_ms: int = 20
     shutdown_timeout_ms: int = 1_000
+    # Appended to preserve the historical four positional arguments above.
+    max_frame_age_ms: int = 250
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -152,13 +153,13 @@ def parse_latest_frame_capture_policy(
         return LatestFrameCapturePolicy(
             enabled=_parse_bool(values.get("enabled", True)),
             wait_timeout_ms=int(values.get("wait_timeout_ms", 1_000)),
-            max_frame_age_ms=int(values.get("max_frame_age_ms", 250)),
             failure_backoff_ms=int(
                 values.get("failure_backoff_ms", 20)
             ),
             shutdown_timeout_ms=int(
                 values.get("shutdown_timeout_ms", 1_000)
             ),
+            max_frame_age_ms=int(values.get("max_frame_age_ms", 250)),
         )
     except (TypeError, ValueError, OverflowError):
         logger(
