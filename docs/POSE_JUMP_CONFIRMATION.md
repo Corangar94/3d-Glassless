@@ -2,7 +2,7 @@
 
 A pose can be fresh, timestamp-correct, and above the normal confidence threshold while still representing a one-frame landmark failure or an accidental switch to another visible face. Passing that sample directly into translation limiting and the adaptive filter can tug the virtual camera away from the established viewer.
 
-The packaged/source runtime now applies `PoseJumpConfirmationGate` **after** the existing freshness and confidence admission boundary and **before** raw translation/orientation limiting.
+The normal source and frozen tracker entrypoints now apply `PoseJumpConfirmationGate` **after** the existing freshness and confidence admission boundary and **before** raw translation/orientation limiting.
 
 ## Behavior
 
@@ -16,23 +16,25 @@ The angular comparison uses the shortest circular path, so `179° → -179°` is
 
 An extreme result is held as a candidate rather than published. The next admitted result confirms the change only when it:
 
-- arrives within 250 ms;
-- is within 12 cm in X/Y, 15 cm in Z, and 20 degrees of the candidate;
+- arrives within 250 ms of the **first** candidate;
+- remains within 12 cm in X/Y, 15 cm in Z, and 20 degrees of that first candidate; and
 - has confidence of at least 0.45.
 
 Two consistent samples, including the first candidate, confirm the new pose. This adds only one accepted-measurement interval to a genuine persistent viewer change while completely suppressing an isolated bad frame. Once confirmed, the existing physical-speed limiter still bounds how quickly the displayed pose moves toward the new measurement.
 
-A normal result near the established viewer immediately cancels an unconfirmed candidate and resumes the ordinary path.
+For a custom three-or-more-sample policy, the first candidate remains the fixed geometric reference and the timeout remains one fixed window measured from that first sample. Later candidates cannot move the reference by one tolerance radius per frame or extend the confirmation deadline indefinitely.
+
+A normal result near the established viewer immediately cancels an unconfirmed candidate and resumes the ordinary path. A duplicate candidate timestamp is rejected rather than counted as another independent confirmation sample.
 
 ## Episode reset
 
 The gate starts a new episode and accepts the next admitted pose directly when:
 
 - the existing measurement-admission boundary is reset after camera reconnect or true face loss;
-- the tracker backend transition generation changes;
+- the tracker backend transition generation changes; or
 - at least 750 ms separates the accepted pose timestamps.
 
-This prevents confirmation from dragging a newly reacquired viewer toward an obsolete pre-dropout anchor.
+Confirmation reset runs even when the delegated admission reset raises, so a failed lifecycle reset cannot leave an old viewer anchor or candidate active. This prevents confirmation from dragging a newly reacquired viewer toward an obsolete pre-dropout anchor.
 
 ## Optional configuration
 
@@ -57,10 +59,15 @@ tracking:
     minimum_candidate_confidence: 0.45
 ```
 
-`enabled: false` preserves the admitted-pose path exactly. Invalid configuration falls back atomically to the safe defaults.
+`enabled: false` preserves the admitted-pose path exactly. `confirmation_samples` must be an integer from 2 through 10. Candidate and reset timing values must be integers from 1 through 60,000 ms, with `reset_after_ms` at least as large as `candidate_timeout_ms`. Fractional or boolean timing/count values are rejected. Invalid configuration causes the complete optional block to fall back atomically to safe defaults.
 
-## Compatibility
+## Runtime and packaging
 
-Direct imports of `tracker.main.TrackingLoop` and `tracker.latest_frame_runtime.LatestFrameTrackingLoop` retain their existing behavior. The normal source entrypoint and frozen `--tracker-child` entrypoint use `StableLatestFrameTrackingLoop`, which subclasses the latest-frame runtime and wraps its existing measurement-admission object.
+`StableLatestFrameTrackingLoop` subclasses `LatestFrameTrackingLoop`, so latest-only camera acquisition remains active. Both real entrypoints select the stability runtime:
 
-Opaque or historical zero-timestamp direct values pass through unchanged. The gate exposes lifetime accepted, suspected, confirmed, rejected, and low-confidence counts together with current candidate state for diagnostics and focused tests.
+- `python -m tracker`;
+- frozen launcher `--tracker-child`.
+
+The two confirmation modules are listed explicitly in the PyInstaller hidden imports. Direct imports of `tracker.main.TrackingLoop` and `tracker.latest_frame_runtime.LatestFrameTrackingLoop` retain their existing behavior for library and test callers.
+
+Opaque or historical zero-timestamp direct values pass through unchanged. The gate exposes lifetime accepted, suspected, confirmed, rejected, low-confidence, and duplicate-timestamp counts together with current candidate timestamps for diagnostics and focused tests.
