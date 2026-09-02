@@ -29,6 +29,14 @@ The exact 750 ms boundary is accepted. A result at 751 ms is discarded without t
 
 The 750 ms budget matches the native parallax-health point where depth contribution already reaches zero. A result too old to contribute therefore cannot masquerade as new merely because its GPU upload happens now.
 
+## Temporal-history isolation
+
+Depth postprocessing maintains CPU-side history for motion-aligned EMA smoothing, tile reuse, global percentile range, and contrast stabilization. An inference has already touched those caches before the main thread makes the final source-age decision.
+
+When a completion is rejected, the runtime clears that CPU-side temporal history before staging the next inference. The existing valid GPU depth textures and their current blend remain untouched. The next accepted inference therefore starts a fresh postprocessing episode rather than inheriting tile or normalization state from a map that was never publishable.
+
+This reset is safe at the handoff boundary: `output_ready` is set only after the worker marks itself idle, and the main thread cannot queue the next tensor until after it drains and classifies the completion.
+
 ## Depth age semantics
 
 `DepthInferencer::depth_age_ms()` now reports the age of the captured desktop frame that produced the currently published depth. It returns `UINT32_MAX` until a source-aware result has actually been published.
