@@ -23,6 +23,7 @@ from tracker.pose import monotonic_ms, normalize_wire_timestamp
 
 Clock = Callable[[], int]
 LogFunction = Callable[[str], None]
+ThreadFactory = Callable[..., threading.Thread]
 _MAX_WAIT_TIMEOUT_MS = 60_000
 _MAX_FAILURE_BACKOFF_MS = 10_000
 _MAX_SHUTDOWN_TIMEOUT_MS = 60_000
@@ -172,6 +173,10 @@ class LatestFrameCapture:
     frames. Release first asks the worker to stop, then releases the device to
     unblock a backend read that did not return during the configured grace
     interval.
+
+    Capture ownership transfers only after the worker starts successfully. A
+    half-constructed wrapper therefore cannot release a raw capture that the
+    runtime has retained for synchronous fallback.
     """
 
     __g3d_latest_frame_capture__ = True
@@ -183,6 +188,7 @@ class LatestFrameCapture:
         *,
         clock: Clock = monotonic_ms,
         thread_name: str = "G3D-LatestFrameCapture",
+        thread_factory: ThreadFactory = threading.Thread,
     ) -> None:
         self._capture = capture
         self._policy = policy
@@ -193,6 +199,8 @@ class LatestFrameCapture:
         self._stop_event = threading.Event()
         self._released = False
         self._underlying_released = False
+        self._owns_capture = False
+        self._worker: threading.Thread | None = None
         self._control_waiters = 0
         self._generation = 0
         self._delivered_generation = 0
@@ -205,12 +213,17 @@ class LatestFrameCapture:
         self._last_capture_timestamp_ms: int | None = None
         self._last_delivered_capture_timestamp_ms: int | None = None
         self._last_error = ""
-        self._worker = threading.Thread(
+        worker = thread_factory(
             target=self._capture_loop,
             name=thread_name,
             daemon=True,
         )
-        self._worker.start()
+        self._worker = worker
+        worker.start()
+        # ``start`` is the ownership commit point. Before it returns, the raw
+        # capture still belongs to the caller and must remain available if
+        # construction raises and the runtime falls back to synchronous reads.
+        self._owns_capture = True
 
     @property
     def native_capture(self) -> object:
@@ -219,6 +232,10 @@ class LatestFrameCapture:
     @property
     def policy(self) -> LatestFrameCapturePolicy:
         return self._policy
+
+    @property
+    def owns_capture(self) -> bool:
+        return self._owns_capture
 
     @property
     def last_delivered_capture_timestamp_ms(self) -> int | None:
@@ -409,6 +426,26 @@ class LatestFrameCapture:
     def getBackendName(self) -> str:
         return str(self._proxy_call("getBackendName", ""))
 
+    def _worker_is_alive(self) -> bool:
+        worker = self._worker
+        if worker is None:
+            return False
+        try:
+            return bool(worker.is_alive())
+        except Exception:
+            return False
+
+    def _join_worker(self, timeout_s: float) -> None:
+        worker = self._worker
+        if worker is None or worker is threading.current_thread():
+            return
+        try:
+            # Joining a thread whose ``start`` raised is itself an error.
+            if worker.ident is not None:
+                worker.join(max(0.0, timeout_s))
+        except (AttributeError, RuntimeError):
+            return
+
     def snapshot(self) -> LatestFrameCaptureSnapshot:
         with self._condition:
             return LatestFrameCaptureSnapshot(
@@ -423,15 +460,16 @@ class LatestFrameCapture:
                 last_delivered_capture_timestamp_ms=(
                     self._last_delivered_capture_timestamp_ms
                 ),
-                worker_alive=self._worker.is_alive(),
+                worker_alive=self._worker_is_alive(),
                 released=self._released,
                 last_error=self._last_error,
             )
 
     def _release_underlying(self) -> None:
-        if self._underlying_released:
+        if not self._owns_capture or self._underlying_released:
             return
         self._underlying_released = True
+        self._owns_capture = False
         try:
             self._capture.release()
         except Exception as error:
@@ -450,14 +488,15 @@ class LatestFrameCapture:
             timeout_s = self._policy.shutdown_timeout_ms / 1000.0
             grace_s = min(0.100, timeout_s * 0.5)
             if grace_s > 0.0:
-                self._worker.join(grace_s)
+                self._join_worker(grace_s)
 
             # Release is also the escape hatch for a backend read blocked inside
-            # native code. It is intentionally outside ``_io_lock`` in that case.
+            # native code. A wrapper that never completed worker startup does not
+            # own the raw capture and deliberately skips this operation.
             self._release_underlying()
             remaining_s = max(0.0, timeout_s - grace_s)
-            if self._worker.is_alive() and remaining_s > 0.0:
-                self._worker.join(remaining_s)
+            if self._worker_is_alive() and remaining_s > 0.0:
+                self._join_worker(remaining_s)
             with self._condition:
                 self._condition.notify_all()
 
