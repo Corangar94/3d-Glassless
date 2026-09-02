@@ -13,6 +13,7 @@ frame, while superseded frames are discarded before tracking work begins.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import numbers
 import threading
 import time
 from typing import Callable, Protocol
@@ -22,6 +23,9 @@ from tracker.pose import monotonic_ms, normalize_wire_timestamp
 
 Clock = Callable[[], int]
 LogFunction = Callable[[str], None]
+_MAX_WAIT_TIMEOUT_MS = 60_000
+_MAX_FAILURE_BACKOFF_MS = 10_000
+_MAX_SHUTDOWN_TIMEOUT_MS = 60_000
 
 
 class CaptureLike(Protocol):
@@ -44,19 +48,37 @@ class LatestFrameCapturePolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
-        if self.wait_timeout_ms < 1:
-            raise ValueError("wait_timeout_ms must be at least one")
-        if self.failure_backoff_ms < 0:
-            raise ValueError("failure_backoff_ms cannot be negative")
-        if self.shutdown_timeout_ms < 0:
-            raise ValueError("shutdown_timeout_ms cannot be negative")
+        for name, value, minimum, maximum in (
+            ("wait_timeout_ms", self.wait_timeout_ms, 1, _MAX_WAIT_TIMEOUT_MS),
+            (
+                "failure_backoff_ms",
+                self.failure_backoff_ms,
+                0,
+                _MAX_FAILURE_BACKOFF_MS,
+            ),
+            (
+                "shutdown_timeout_ms",
+                self.shutdown_timeout_ms,
+                0,
+                _MAX_SHUTDOWN_TIMEOUT_MS,
+            ),
+        ):
+            if isinstance(value, bool) or not isinstance(
+                value,
+                numbers.Integral,
+            ):
+                raise ValueError(f"{name} must be an integer")
+            if not minimum <= int(value) <= maximum:
+                raise ValueError(
+                    f"{name} must be between {minimum} and {maximum}"
+                )
 
     def config_values(self) -> dict[str, object]:
         return {
             "enabled": self.enabled,
-            "wait_timeout_ms": self.wait_timeout_ms,
-            "failure_backoff_ms": self.failure_backoff_ms,
-            "shutdown_timeout_ms": self.shutdown_timeout_ms,
+            "wait_timeout_ms": int(self.wait_timeout_ms),
+            "failure_backoff_ms": int(self.failure_backoff_ms),
+            "shutdown_timeout_ms": int(self.shutdown_timeout_ms),
         }
 
 
