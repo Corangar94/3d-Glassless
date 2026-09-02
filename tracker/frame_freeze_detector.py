@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import math
+import numbers
 
 
 @dataclass(frozen=True)
@@ -74,14 +75,19 @@ class FrameFreezeDetector:
         check_interval_ms: int = 250,
         freeze_timeout_ms: int = 3_000,
     ) -> None:
-        interval = int(check_interval_ms)
-        timeout = int(freeze_timeout_ms)
-        if interval < 0:
-            raise ValueError("check_interval_ms cannot be negative")
-        if timeout < 0:
-            raise ValueError("freeze_timeout_ms cannot be negative")
-        self._check_interval_ms = interval
-        self._freeze_timeout_ms = timeout
+        for name, value in (
+            ("check_interval_ms", check_interval_ms),
+            ("freeze_timeout_ms", freeze_timeout_ms),
+        ):
+            if isinstance(value, bool) or not isinstance(
+                value,
+                numbers.Integral,
+            ):
+                raise ValueError(f"{name} must be an integer")
+            if int(value) < 0:
+                raise ValueError(f"{name} cannot be negative")
+        self._check_interval_ms = int(check_interval_ms)
+        self._freeze_timeout_ms = int(freeze_timeout_ms)
         self._last_check_s: float | None = None
         self._last_signature: tuple[object, ...] | None = None
         self._identical_since_s: float | None = None
@@ -157,6 +163,7 @@ class FrameFreezeDetector:
             if elapsed_ms < self._check_interval_ms:
                 return self._observation(
                     checked=False,
+                    supported=self._last_signature is not None,
                     observed_at_s=now_s,
                 )
 
