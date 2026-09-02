@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import numbers
 from typing import Any, Callable
 
 from tracker.backend_transition_state import (
@@ -13,11 +14,44 @@ from tracker.pose import elapsed_u32_ms, normalize_wire_timestamp
 
 LogFunction = Callable[[str], None]
 _UINT32_HALF_RANGE = 0x8000_0000
+_MAX_CONFIRMATION_SAMPLES = 10
+_MAX_POLICY_TIME_MS = 60_000
+
+
+def _validated_integer(
+    value: object,
+    name: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{name} must be an integer")
+    parsed = int(value)
+    if not minimum <= parsed <= maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return parsed
+
+
+def _validated_nonnegative_float(value: object, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite non-negative number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(
+            f"{name} must be a finite non-negative number"
+        ) from error
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return parsed
 
 
 @dataclass(frozen=True)
 class PoseJumpConfirmationPolicy:
-    """Time-aware thresholds for a likely landmark error or viewer switch.
+    """Time-aware thresholds for likely landmark errors or viewer switches.
 
     The trigger is intentionally above the normal raw-pose speed limiter. A
     physically plausible fast movement therefore keeps the existing low-latency
@@ -42,38 +76,77 @@ class PoseJumpConfirmationPolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("enabled must be a boolean")
-        for name, value in (
-            ("minimum_xy_jump_cm", self.minimum_xy_jump_cm),
-            ("minimum_z_jump_cm", self.minimum_z_jump_cm),
-            ("minimum_angle_jump_deg", self.minimum_angle_jump_deg),
-            ("trigger_xy_speed_cm_s", self.trigger_xy_speed_cm_s),
-            ("trigger_z_speed_cm_s", self.trigger_z_speed_cm_s),
-            (
-                "trigger_angular_speed_deg_s",
-                self.trigger_angular_speed_deg_s,
-            ),
-            ("candidate_xy_tolerance_cm", self.candidate_xy_tolerance_cm),
-            ("candidate_z_tolerance_cm", self.candidate_z_tolerance_cm),
-            (
-                "candidate_angle_tolerance_deg",
-                self.candidate_angle_tolerance_deg,
-            ),
+
+        for name in (
+            "minimum_xy_jump_cm",
+            "minimum_z_jump_cm",
+            "minimum_angle_jump_deg",
+            "trigger_xy_speed_cm_s",
+            "trigger_z_speed_cm_s",
+            "trigger_angular_speed_deg_s",
+            "candidate_xy_tolerance_cm",
+            "candidate_z_tolerance_cm",
+            "candidate_angle_tolerance_deg",
         ):
-            if not math.isfinite(float(value)) or float(value) < 0.0:
-                raise ValueError(f"{name} must be finite and non-negative")
-        if self.confirmation_samples < 2:
-            raise ValueError("confirmation_samples must be at least two")
-        if self.candidate_timeout_ms < 1:
-            raise ValueError("candidate_timeout_ms must be at least one")
-        if self.reset_after_ms < self.candidate_timeout_ms:
+            object.__setattr__(
+                self,
+                name,
+                _validated_nonnegative_float(getattr(self, name), name),
+            )
+
+        confirmation_samples = _validated_integer(
+            self.confirmation_samples,
+            "confirmation_samples",
+            minimum=2,
+            maximum=_MAX_CONFIRMATION_SAMPLES,
+        )
+        candidate_timeout_ms = _validated_integer(
+            self.candidate_timeout_ms,
+            "candidate_timeout_ms",
+            minimum=1,
+            maximum=_MAX_POLICY_TIME_MS,
+        )
+        reset_after_ms = _validated_integer(
+            self.reset_after_ms,
+            "reset_after_ms",
+            minimum=1,
+            maximum=_MAX_POLICY_TIME_MS,
+        )
+        if reset_after_ms < candidate_timeout_ms:
             raise ValueError(
                 "reset_after_ms must be at least candidate_timeout_ms"
             )
-        confidence = float(self.minimum_candidate_confidence)
+        object.__setattr__(
+            self,
+            "confirmation_samples",
+            confirmation_samples,
+        )
+        object.__setattr__(
+            self,
+            "candidate_timeout_ms",
+            candidate_timeout_ms,
+        )
+        object.__setattr__(self, "reset_after_ms", reset_after_ms)
+
+        if isinstance(self.minimum_candidate_confidence, bool):
+            raise ValueError(
+                "minimum_candidate_confidence must be in [0, 1]"
+            )
+        try:
+            confidence = float(self.minimum_candidate_confidence)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "minimum_candidate_confidence must be in [0, 1]"
+            ) from error
         if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
             raise ValueError(
                 "minimum_candidate_confidence must be in [0, 1]"
             )
+        object.__setattr__(
+            self,
+            "minimum_candidate_confidence",
+            confidence,
+        )
 
     def config_values(self) -> dict[str, object]:
         return {
@@ -107,9 +180,11 @@ class PoseJumpConfirmationSnapshot:
     confirmed_jump_count: int
     rejected_candidate_count: int
     low_confidence_jump_count: int
+    duplicate_timestamp_drop_count: int
     candidate_sample_count: int
     anchor_timestamp_ms: int | None
     candidate_timestamp_ms: int | None
+    candidate_latest_timestamp_ms: int | None
     last_rejection_reason: str
     backend_transition_generation: int
 
@@ -138,6 +213,22 @@ def _parse_bool(value: object) -> bool:
         if normalized in {"false", "no", "off", "0"}:
             return False
     raise ValueError("enabled must be a boolean")
+
+
+def _parse_integer(value: object, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{field_name} must be an integer")
+        try:
+            return int(text, 10)
+        except ValueError as error:
+            raise ValueError(f"{field_name} must be an integer") from error
+    raise ValueError(f"{field_name} must be an integer")
 
 
 def parse_pose_jump_confirmation_policy(
@@ -188,11 +279,12 @@ def parse_pose_jump_confirmation_policy(
                     defaults.trigger_angular_speed_deg_s,
                 )
             ),
-            confirmation_samples=int(
+            confirmation_samples=_parse_integer(
                 values.get(
                     "confirmation_samples",
                     defaults.confirmation_samples,
-                )
+                ),
+                "confirmation_samples",
             ),
             candidate_xy_tolerance_cm=float(
                 values.get(
@@ -212,14 +304,16 @@ def parse_pose_jump_confirmation_policy(
                     defaults.candidate_angle_tolerance_deg,
                 )
             ),
-            candidate_timeout_ms=int(
+            candidate_timeout_ms=_parse_integer(
                 values.get(
                     "candidate_timeout_ms",
                     defaults.candidate_timeout_ms,
-                )
+                ),
+                "candidate_timeout_ms",
             ),
-            reset_after_ms=int(
-                values.get("reset_after_ms", defaults.reset_after_ms)
+            reset_after_ms=_parse_integer(
+                values.get("reset_after_ms", defaults.reset_after_ms),
+                "reset_after_ms",
             ),
             minimum_candidate_confidence=float(
                 values.get(
@@ -237,7 +331,9 @@ def parse_pose_jump_confirmation_policy(
 
 
 def _angle_distance(first_deg: float, second_deg: float) -> float:
-    return abs((float(first_deg) - float(second_deg) + 180.0) % 360.0 - 180.0)
+    return abs(
+        (float(first_deg) - float(second_deg) + 180.0) % 360.0 - 180.0
+    )
 
 
 def _forward_delta_ms(newer_ms: int, older_ms: int) -> int | None:
@@ -254,13 +350,18 @@ class PoseJumpConfirmationGate:
     ) -> None:
         self._policy = policy
         self._anchor: _PoseSample | None = None
+        # Candidate position remains fixed at the first sample in the sequence.
+        # This prevents a configurable 3+ sample confirmation from drifting by
+        # one tolerance radius per sample until it represents a different pose.
         self._candidate: _PoseSample | None = None
+        self._candidate_latest_timestamp_ms: int | None = None
         self._candidate_sample_count = 0
         self._accepted_count = 0
         self._suspected_jump_count = 0
         self._confirmed_jump_count = 0
         self._rejected_candidate_count = 0
         self._low_confidence_jump_count = 0
+        self._duplicate_timestamp_drop_count = 0
         self._last_rejection_reason = ""
         self._backend_transition_generation = (
             current_backend_transition_generation()
@@ -270,11 +371,15 @@ class PoseJumpConfirmationGate:
     def policy(self) -> PoseJumpConfirmationPolicy:
         return self._policy
 
+    def _clear_candidate(self) -> None:
+        self._candidate = None
+        self._candidate_latest_timestamp_ms = None
+        self._candidate_sample_count = 0
+
     def reset(self) -> None:
         """Start a new viewer episode while retaining lifetime counters."""
         self._anchor = None
-        self._candidate = None
-        self._candidate_sample_count = 0
+        self._clear_candidate()
         self._last_rejection_reason = ""
         self._backend_transition_generation = (
             current_backend_transition_generation()
@@ -285,8 +390,7 @@ class PoseJumpConfirmationGate:
         if generation == self._backend_transition_generation:
             return
         self._anchor = None
-        self._candidate = None
-        self._candidate_sample_count = 0
+        self._clear_candidate()
         self._last_rejection_reason = ""
         self._backend_transition_generation = generation
 
@@ -304,23 +408,22 @@ class PoseJumpConfirmationGate:
         )
         try:
             raw = [getattr(value, name) for name in names]
-        except (AttributeError, TypeError, ValueError):
-            return None
-        try:
-            numbers = [float(component) for component in raw[:7]]
+            numeric_values = [float(component) for component in raw[:7]]
             timestamp = int(raw[7])
-        except (TypeError, ValueError, OverflowError):
+        except Exception:
             return None
-        if timestamp <= 0 or not all(math.isfinite(item) for item in numbers):
+        if timestamp <= 0 or not all(
+            math.isfinite(item) for item in numeric_values
+        ):
             return None
         return _PoseSample(
-            x_cm=numbers[0],
-            y_cm=numbers[1],
-            z_cm=numbers[2],
-            yaw_deg=numbers[3],
-            pitch_deg=numbers[4],
-            roll_deg=numbers[5],
-            confidence=numbers[6],
+            x_cm=numeric_values[0],
+            y_cm=numeric_values[1],
+            z_cm=numeric_values[2],
+            yaw_deg=numeric_values[3],
+            pitch_deg=numeric_values[4],
+            roll_deg=numeric_values[5],
+            confidence=numeric_values[6],
             timestamp_ms=normalize_wire_timestamp(timestamp),
         )
 
@@ -367,15 +470,9 @@ class PoseJumpConfirmationGate:
             or angle_deg > angle_limit
         )
 
-    def _candidate_matches(self, sample: _PoseSample) -> bool:
+    def _candidate_geometry_matches(self, sample: _PoseSample) -> bool:
         candidate = self._candidate
         if candidate is None:
-            return False
-        delta_ms = _forward_delta_ms(
-            sample.timestamp_ms,
-            candidate.timestamp_ms,
-        )
-        if delta_ms is None or delta_ms > self._policy.candidate_timeout_ms:
             return False
         xy_cm, z_cm, angle_deg = self._differences(sample, candidate)
         return (
@@ -384,10 +481,36 @@ class PoseJumpConfirmationGate:
             and angle_deg <= self._policy.candidate_angle_tolerance_deg
         )
 
+    def _candidate_is_timely(self, sample: _PoseSample) -> bool:
+        candidate = self._candidate
+        latest_timestamp = self._candidate_latest_timestamp_ms
+        if candidate is None or latest_timestamp is None:
+            return False
+        total_delta_ms = _forward_delta_ms(
+            sample.timestamp_ms,
+            candidate.timestamp_ms,
+        )
+        step_delta_ms = _forward_delta_ms(
+            sample.timestamp_ms,
+            latest_timestamp,
+        )
+        return bool(
+            total_delta_ms is not None
+            and step_delta_ms is not None
+            and 0 < step_delta_ms
+            and total_delta_ms <= self._policy.candidate_timeout_ms
+        )
+
+    def _start_candidate(self, sample: _PoseSample, reason: str) -> None:
+        self._candidate = sample
+        self._candidate_latest_timestamp_ms = sample.timestamp_ms
+        self._candidate_sample_count = 1
+        self._rejected_candidate_count += 1
+        self._last_rejection_reason = reason
+
     def _accept(self, value: Any, sample: _PoseSample) -> Any:
         self._anchor = sample
-        self._candidate = None
-        self._candidate_sample_count = 0
+        self._clear_candidate()
         self._accepted_count += 1
         self._last_rejection_reason = ""
         return value
@@ -400,7 +523,7 @@ class PoseJumpConfirmationGate:
         sample = self._sample(value)
         if sample is None:
             # Opaque and timestamp-less direct integrations retain their
-            # historical behavior. Earlier validation remains authoritative for
+            # historical behavior. Earlier admission remains authoritative for
             # malformed real pose packets.
             return value
         anchor = self._anchor
@@ -413,13 +536,54 @@ class PoseJumpConfirmationGate:
         )
         if delta_ms is None or delta_ms >= self._policy.reset_after_ms:
             return self._accept(value, sample)
+        if delta_ms == 0:
+            self._duplicate_timestamp_drop_count += 1
+            self._rejected_candidate_count += 1
+            self._last_rejection_reason = (
+                "pose jump confirmation received a duplicate timestamp"
+            )
+            return None
+
+        # A sample near the existing candidate must complete the confirmation
+        # inside one fixed window from the first candidate. Once that window
+        # expires, restart confirmation instead of allowing elapsed time to make
+        # the same discontinuity look like ordinary low-speed motion.
+        if self._candidate_geometry_matches(sample):
+            self._suspected_jump_count += 1
+            if sample.confidence < self._policy.minimum_candidate_confidence:
+                self._clear_candidate()
+                self._low_confidence_jump_count += 1
+                self._rejected_candidate_count += 1
+                self._last_rejection_reason = (
+                    "extreme pose jump below confirmation confidence"
+                )
+                return None
+            if self._candidate_is_timely(sample):
+                self._candidate_latest_timestamp_ms = sample.timestamp_ms
+                self._candidate_sample_count += 1
+                if (
+                    self._candidate_sample_count
+                    >= self._policy.confirmation_samples
+                ):
+                    self._confirmed_jump_count += 1
+                    return self._accept(value, sample)
+                self._rejected_candidate_count += 1
+                self._last_rejection_reason = (
+                    "extreme pose jump awaiting confirmation"
+                )
+                return None
+            self._start_candidate(
+                sample,
+                "extreme pose jump confirmation window restarted",
+            )
+            return None
+
         if not self._is_extreme_jump(sample, anchor, delta_ms):
             return self._accept(value, sample)
 
         self._suspected_jump_count += 1
         if sample.confidence < self._policy.minimum_candidate_confidence:
-            self._candidate = None
-            self._candidate_sample_count = 0
+            self._clear_candidate()
             self._low_confidence_jump_count += 1
             self._rejected_candidate_count += 1
             self._last_rejection_reason = (
@@ -427,19 +591,10 @@ class PoseJumpConfirmationGate:
             )
             return None
 
-        if self._candidate_matches(sample):
-            self._candidate = sample
-            self._candidate_sample_count += 1
-        else:
-            self._candidate = sample
-            self._candidate_sample_count = 1
-
-        if self._candidate_sample_count >= self._policy.confirmation_samples:
-            self._confirmed_jump_count += 1
-            return self._accept(value, sample)
-
-        self._rejected_candidate_count += 1
-        self._last_rejection_reason = "extreme pose jump awaiting confirmation"
+        self._start_candidate(
+            sample,
+            "extreme pose jump awaiting confirmation",
+        )
         return None
 
     def snapshot(self) -> PoseJumpConfirmationSnapshot:
@@ -449,6 +604,9 @@ class PoseJumpConfirmationGate:
             confirmed_jump_count=self._confirmed_jump_count,
             rejected_candidate_count=self._rejected_candidate_count,
             low_confidence_jump_count=self._low_confidence_jump_count,
+            duplicate_timestamp_drop_count=(
+                self._duplicate_timestamp_drop_count
+            ),
             candidate_sample_count=self._candidate_sample_count,
             anchor_timestamp_ms=(
                 None if self._anchor is None else self._anchor.timestamp_ms
@@ -457,6 +615,9 @@ class PoseJumpConfirmationGate:
                 None
                 if self._candidate is None
                 else self._candidate.timestamp_ms
+            ),
+            candidate_latest_timestamp_ms=(
+                self._candidate_latest_timestamp_ms
             ),
             last_rejection_reason=self._last_rejection_reason,
             backend_transition_generation=(
