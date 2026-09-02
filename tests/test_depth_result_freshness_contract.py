@@ -37,7 +37,7 @@ def test_depth_source_identity_crosses_every_async_state():
     assert running < ready
 
 
-def test_publication_gate_runs_before_depth_texture_upload():
+def test_publication_gate_runs_before_depth_texture_upload_and_commit_marker():
     source = _source("overlay/depth_infer.cpp")
     run_once = source.split("    bool run_once(", 1)[1].split(
         "    // WORKER THREAD:",
@@ -48,9 +48,34 @@ def test_publication_gate_runs_before_depth_texture_upload():
     upload = run_once.index("ctx->UpdateSubresource(")
     blend = run_once.index("blend_started = now")
     source_time = run_once.index("last_depth_source_ms.store(")
+    commit = run_once.index("publish_freshness_snapshot()")
 
-    assert decision < upload < blend
-    assert decision < source_time
+    assert decision < upload < blend < commit
+    assert decision < source_time < commit
+
+
+def test_publication_counter_is_release_acquire_commit_marker():
+    source = _source("overlay/depth_infer.cpp")
+    publisher = source.split(
+        "    void publish_freshness_snapshot()",
+        1,
+    )[1].split(
+        "    void reset_temporal_depth_history_after_rejection()",
+        1,
+    )[0]
+    accessor = source.split(
+        "uint64_t DepthInferencer::depth_updates_published() const",
+        1,
+    )[1].split(
+        "uint64_t DepthInferencer::stale_depth_results_dropped() const",
+        1,
+    )[0]
+
+    source_metadata = publisher.index("last_depth_source_generation.store(")
+    accepted_count = publisher.index("published_depth_updates.store(")
+    assert source_metadata < accepted_count
+    assert "std::memory_order_release" in publisher
+    assert "std::memory_order_acquire" in accessor
 
 
 def test_rejected_completion_resets_temporal_history_before_next_stage():
@@ -64,13 +89,14 @@ def test_rejected_completion_resets_temporal_history_before_next_stage():
     reset = run_once.index(
         "reset_temporal_depth_history_after_rejection()"
     )
+    commit = run_once.index("publish_freshness_snapshot()")
     worker_gate = run_once.index("if (worker_busy) return true;")
     staging = run_once.index("stage_sources[stage_write]")
 
-    assert decision < reset < worker_gate < staging
+    assert decision < reset < commit < worker_gate < staging
 
 
-def test_temporal_history_reset_clears_every_postprocess_cache():
+def test_temporal_history_reset_is_in_place_and_clears_every_cache():
     source = _source("overlay/depth_infer.cpp")
     reset = source.split(
         "    void reset_temporal_depth_history_after_rejection()",
@@ -79,9 +105,10 @@ def test_temporal_history_reset_clears_every_postprocess_cache():
 
     for statement in (
         "prev_norm_f32.clear()",
-        "prev_norm_tiles.assign(tile_count, {})",
-        "cached_tile_norm.assign(",
-        "tile_generation.assign(tile_count, 0)",
+        "for (auto& previous : prev_norm_tiles) previous.clear()",
+        "std::fill(cached.begin(), cached.end(), 0.5f)",
+        "std::fill(tile_generation.begin(), tile_generation.end(), 0)",
+        "scheduler_cycle = 0",
         "completion_generation = 0",
         "global_range_valid = false",
         "contrast_state_valid = false",
@@ -91,6 +118,10 @@ def test_temporal_history_reset_clears_every_postprocess_cache():
         "motion_warp_scratch.clear()",
     ):
         assert statement in reset
+
+    # Controlled rejection must not allocate replacement tile vectors on the
+    # render thread. Existing capacities are reused via clear/fill.
+    assert "assign(" not in reset
 
     # Publication history remains on the GPU and is not reset by a controlled
     # drop; only worker-side state touched by the rejected postprocess is cleared.
@@ -119,6 +150,16 @@ def test_first_window_visibility_requires_accepted_publication():
 
     assert "depth->depth_updates_published() > 0" in header
     assert "has_frame = false" in header
+
+
+def test_render_health_uses_accepted_publication_readiness():
+    overlay = _source("overlay/overlay.cpp")
+
+    assert "g_depth->depth_updates_published() > 0" in overlay
+    assert "g_depth->inferences_completed() > 0" not in overlay.split(
+        "const bool depthReady =",
+        1,
+    )[1].split(";", 1)[0]
 
 
 def test_native_freshness_suite_is_registered_with_ctest():
