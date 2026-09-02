@@ -23,6 +23,11 @@ from tracker.async_result_freshness import (
     AsyncResultFreshnessPolicy,
 )
 from tracker.camera_geometry import CameraGeometry, euler_degrees_from_rotation_matrix
+from tracker.mediapipe_input import prepare_mediapipe_bgr_frame
+from tracker.mediapipe_runtime_policy import (
+    DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
+    validated_mediapipe_input_width_px,
+)
 from tracker.pose import (
     HeadPosition,
     elapsed_u32_ms,
@@ -150,12 +155,16 @@ class FaceTracker:
         async_max_result_age_ms: int = 250,
         async_max_consecutive_stale_results: int = 3,
         async_stale_result_window_ms: int = 1000,
+        max_input_width_px: int = DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
     ) -> None:
         if not (0.0 < camera_fov_deg < 180.0):
             raise ValueError(f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}")
         backlog_ms = int(async_max_backlog_ms)
         if backlog_ms < 0:
             raise ValueError("async_max_backlog_ms cannot be negative")
+        input_width_px = validated_mediapipe_input_width_px(
+            max_input_width_px
+        )
         freshness_policy = AsyncResultFreshnessPolicy(
             max_result_age_ms=int(async_max_result_age_ms),
             max_consecutive_stale_results=int(
@@ -171,6 +180,7 @@ class FaceTracker:
         self._async_mode = bool(async_mode)
         self._async_max_backlog_ms = backlog_ms
         self._async_max_result_age_ms = freshness_policy.max_result_age_ms
+        self._max_input_width_px = input_width_px
         self._lock = threading.Lock()
         self._latest_pose: HeadPosition | None = None
         self._last_delivered_timestamp_ms: int | None = None
@@ -215,6 +225,10 @@ class FaceTracker:
             result_callback=self._on_result if self._async_mode else None,
         )
         self._landmarker = tasks.vision.FaceLandmarker.create_from_options(options)
+
+    @property
+    def max_input_width_px(self) -> int:
+        return int(getattr(self, "_max_input_width_px", 0))
 
     def async_result_freshness_snapshot(self):
         gate = getattr(self, "_async_result_freshness", None)
@@ -567,12 +581,25 @@ class FaceTracker:
         )
         return mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
+    def _prepared_mediapipe_image(
+        self,
+        frame_bgr: np.ndarray,
+    ) -> tuple[mp.Image, int, int]:
+        prepared = prepare_mediapipe_bgr_frame(
+            frame_bgr,
+            getattr(self, "_max_input_width_px", 0),
+        )
+        return (
+            self._mediapipe_image(prepared.frame_bgr),
+            prepared.width,
+            prepared.height,
+        )
+
     def process_frame(
         self,
         frame_bgr: np.ndarray,
         capture_timestamp_ms: int | None = None,
     ) -> HeadPosition | None:
-        h, w = frame_bgr.shape[:2]
         wire_timestamp_ms = (
             monotonic_ms()
             if capture_timestamp_ms is None
@@ -598,11 +625,13 @@ class FaceTracker:
                     watchdog.record_throttled_submission()
                     return self._poll_latest(wire_timestamp_ms)
 
-            # Conversion/allocation is deliberately after timestamp and backlog
+            # Resize and conversion/allocation remain after timestamp and backlog
             # admission so duplicate, out-of-order, and overloaded inputs stay
-            # cheap. MediaPipe LIVE_STREAM may drop busy inputs itself; avoiding
-            # the work before that boundary reduces camera-thread CPU and GC.
-            image = self._mediapipe_image(frame_bgr)
+            # cheap. BGR resizing occurs before RGB conversion and ``mp.Image``
+            # allocation so both operate on the bounded pixel count.
+            image, _prepared_width, _prepared_height = (
+                self._prepared_mediapipe_image(frame_bgr)
+            )
             try:
                 self._landmarker.detect_async(image, media_timestamp_ms)
             except (RuntimeError, ValueError) as error:
@@ -618,9 +647,16 @@ class FaceTracker:
                     watchdog.raise_if_unhealthy(media_timestamp_ms)
             return self._poll_latest(wire_timestamp_ms)
 
-        image = self._mediapipe_image(frame_bgr)
+        image, prepared_width, prepared_height = (
+            self._prepared_mediapipe_image(frame_bgr)
+        )
         result = self._landmarker.detect(image)
-        return self._pose_from_result(result, w, h, wire_timestamp_ms)
+        return self._pose_from_result(
+            result,
+            prepared_width,
+            prepared_height,
+            wire_timestamp_ms,
+        )
 
     def close(self) -> None:
         with self._lock:
