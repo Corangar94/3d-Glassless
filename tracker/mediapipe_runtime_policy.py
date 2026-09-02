@@ -1,17 +1,48 @@
-"""Validated runtime policy for MediaPipe asynchronous tracking."""
+"""Validated runtime policy for MediaPipe tracking."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import numbers
 from typing import Callable
 
 
 LogFunction = Callable[[str], None]
 _RUNTIME_CONFIG_KEY = "mediapipe_runtime"
+DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX = 960
+MIN_MEDIAPIPE_INPUT_WIDTH_PX = 320
+MAX_MEDIAPIPE_INPUT_WIDTH_PX = 8192
+
+
+def validated_mediapipe_input_width_px(value: object) -> int:
+    """Return a bounded MediaPipe width cap; zero explicitly disables it."""
+    if isinstance(value, bool):
+        raise ValueError("max_input_width_px must be an integer")
+    if isinstance(value, numbers.Real) and not isinstance(
+        value,
+        numbers.Integral,
+    ):
+        parsed_real = float(value)
+        if not math.isfinite(parsed_real) or not parsed_real.is_integer():
+            raise ValueError("max_input_width_px must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("max_input_width_px must be an integer") from error
+    if parsed == 0:
+        return 0
+    if not MIN_MEDIAPIPE_INPUT_WIDTH_PX <= parsed <= MAX_MEDIAPIPE_INPUT_WIDTH_PX:
+        raise ValueError(
+            "max_input_width_px must be 0 or between "
+            f"{MIN_MEDIAPIPE_INPUT_WIDTH_PX} and "
+            f"{MAX_MEDIAPIPE_INPUT_WIDTH_PX}"
+        )
+    return parsed
 
 
 @dataclass(frozen=True)
 class MediaPipeRuntimePolicy:
-    """All bounded asynchronous MediaPipe health and latency settings."""
+    """Bounded MediaPipe preprocessing, health, and latency settings."""
 
     stall_timeout_ms: int = 5_000
     max_consecutive_errors: int = 3
@@ -19,6 +50,7 @@ class MediaPipeRuntimePolicy:
     max_result_age_ms: int = 250
     max_consecutive_stale_results: int = 3
     stale_result_window_ms: int = 1_000
+    max_input_width_px: int = DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX
 
     def __post_init__(self) -> None:
         if self.stall_timeout_ms < 1:
@@ -35,6 +67,11 @@ class MediaPipeRuntimePolicy:
             )
         if self.stale_result_window_ms < 1:
             raise ValueError("stale_result_window_ms must be at least one")
+        object.__setattr__(
+            self,
+            "max_input_width_px",
+            validated_mediapipe_input_width_px(self.max_input_width_px),
+        )
 
     def tracker_kwargs(self) -> dict[str, int]:
         """Return the exact keyword contract accepted by ``FaceTracker``."""
@@ -47,6 +84,7 @@ class MediaPipeRuntimePolicy:
                 self.max_consecutive_stale_results
             ),
             "async_stale_result_window_ms": self.stale_result_window_ms,
+            "max_input_width_px": self.max_input_width_px,
         }
 
     def config_values(self) -> dict[str, int]:
@@ -60,6 +98,7 @@ class MediaPipeRuntimePolicy:
                 self.max_consecutive_stale_results
             ),
             "stale_result_window_ms": self.stale_result_window_ms,
+            "max_input_width_px": self.max_input_width_px,
         }
 
 
@@ -79,7 +118,7 @@ def parse_mediapipe_runtime_policy(
     *,
     logger: LogFunction = print,
 ) -> MediaPipeRuntimePolicy:
-    """Parse all asynchronous limits atomically or use known-safe defaults.
+    """Parse all MediaPipe limits atomically or use known-safe defaults.
 
     New configurations use the nested ``tracking.mediapipe_runtime`` mapping so
     the complete group reaches the backend factory before any individual value
@@ -109,6 +148,10 @@ def parse_mediapipe_runtime_policy(
                 stale_result_window_ms=int(
                     nested.get("stale_result_window_ms", 1_000)
                 ),
+                max_input_width_px=nested.get(
+                    "max_input_width_px",
+                    DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
+                ),
             )
 
         return MediaPipeRuntimePolicy(
@@ -130,10 +173,14 @@ def parse_mediapipe_runtime_policy(
             stale_result_window_ms=int(
                 tracking.get("async_stale_result_window_ms", 1_000)
             ),
+            max_input_width_px=tracking.get(
+                "async_max_input_width_px",
+                DEFAULT_MEDIAPIPE_INPUT_WIDTH_PX,
+            ),
         )
     except (TypeError, ValueError, OverflowError):
         logger(
-            "[G3D] Invalid MediaPipe async runtime settings; "
+            "[G3D] Invalid MediaPipe runtime settings; "
             "using safe defaults"
         )
         return MediaPipeRuntimePolicy()
