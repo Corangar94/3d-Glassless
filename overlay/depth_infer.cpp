@@ -1,6 +1,7 @@
 // overlay/depth_infer.cpp — see depth_infer.h for pipeline overview.
 
 #include "depth_infer.h"
+#include "depth_result_freshness.h"
 #include <d3dcompiler.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -143,6 +144,9 @@ static inline float half_to_float(uint16_t h) {
 
 // ── Impl ─────────────────────────────────────────────────────────────────────
 struct DepthInferImpl {
+    using DepthSourceIdentity = g3d::depth::SourceIdentity;
+    static constexpr uint64_t kMaxDepthResultAgeMs = 750;
+
     // D3D11 resources (device/context NOT owned; borrowed from overlay).
     ID3D11Device*         dev          = nullptr;
     ID3D11DeviceContext*  ctx          = nullptr;
@@ -308,20 +312,33 @@ struct DepthInferImpl {
     std::atomic<float>                   runtime_frame_cpu_ms{0.0f};
     std::atomic<float>                   runtime_gpu_ms{0.0f};
     std::atomic<uint64_t>                last_depth_upload_ms{0};
+    std::atomic<uint64_t>                last_depth_source_ms{0};
+    std::atomic<uint64_t>                last_depth_source_generation{0};
+    std::atomic<uint64_t>                published_depth_updates{0};
+    std::atomic<uint64_t>                stale_depth_drops{0};
+    std::atomic<uint64_t>                nonmonotonic_depth_drops{0};
+    std::atomic<uint64_t>                invalid_depth_drops{0};
     std::atomic<bool>                    gpu_io_active{false};
     std::atomic<uint64_t>                gpu_io_fallbacks{0};
     uint32_t                             auto_candidate_mode = 1;
     uint32_t                             auto_candidate_streak = 0;
     DepthProfile                         pending_profile{};
     DepthProfile                         running_profile{};
+    DepthSourceIdentity                  pending_source{};
+    DepthSourceIdentity                  running_source{};
+    DepthSourceIdentity                  ready_source{};
     std::vector<int>                     pending_tiles;
     std::vector<int>                     running_tiles;
     std::array<DepthProfile, kReadbackRingSize> stage_profiles{};
+    std::array<DepthSourceIdentity, kReadbackRingSize> stage_sources{};
     std::array<std::vector<int>, kReadbackRingSize> stage_tiles;
     std::vector<std::vector<float>>      cached_tile_norm;
     std::vector<uint64_t>                tile_generation;
     uint64_t                             scheduler_cycle = 0;
     uint64_t                             completion_generation = 0;
+    uint64_t                             next_source_generation = 0;
+    g3d::depth::ResultFreshnessGate      result_freshness{
+        g3d::depth::FreshnessPolicy{kMaxDepthResultAgeMs}};
     std::chrono::steady_clock::time_point last_submit{};
     float                                smoothed_global_lo = 0.0f;
     float                                smoothed_global_hi = 1.0f;
@@ -411,6 +428,34 @@ struct DepthInferImpl {
     static uint64_t steady_milliseconds() {
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
+    DepthSourceIdentity next_source_identity(uint64_t captured_ms) {
+        ++next_source_generation;
+        if (next_source_generation == 0) ++next_source_generation;
+        return {next_source_generation, captured_ms};
+    }
+
+    void publish_freshness_snapshot() {
+        const auto snapshot = result_freshness.snapshot();
+        published_depth_updates.store(
+            snapshot.accepted_count,
+            std::memory_order_relaxed);
+        stale_depth_drops.store(
+            snapshot.stale_drop_count,
+            std::memory_order_relaxed);
+        nonmonotonic_depth_drops.store(
+            snapshot.nonmonotonic_drop_count,
+            std::memory_order_relaxed);
+        invalid_depth_drops.store(
+            snapshot.invalid_drop_count,
+            std::memory_order_relaxed);
+        last_depth_source_generation.store(
+            snapshot.last_published_generation,
+            std::memory_order_relaxed);
+        last_depth_source_ms.store(
+            snapshot.last_published_source_ms,
+            std::memory_order_relaxed);
     }
 
     uint32_t resolve_performance_mode(uint32_t requested) {
@@ -942,6 +987,13 @@ float4 main(I i):SV_Target {
         pending_tiles.clear();
         running_tiles.clear();
         for (auto& tiles : stage_tiles) tiles.clear();
+        for (auto& source : stage_sources) source = {};
+        pending_source = {};
+        running_source = {};
+        ready_source = {};
+        next_source_generation = 0;
+        result_freshness.reset();
+        publish_freshness_snapshot();
 
         if (!create_compact_pipeline()) return false;
 
@@ -1001,12 +1053,14 @@ float4 main(I i):SV_Target {
             depth_prev_tex, 0, nullptr, half_filled.data(),
             DepthInferencer::kModelSize * tile_count * sizeof(uint16_t), 0);
         blend_active = false;
+        has_valid_depth = false;
         global_range_valid = false;
         contrast_state_valid = false;
         last_submit = {};
         last_depth_arrival = {};
         scheduler_cycle = 0;
         completion_generation = 0;
+        last_depth_upload_ms.store(0, std::memory_order_relaxed);
         return true;
     }
 
@@ -1362,6 +1416,7 @@ float4 main(I i):SV_Target {
     // readback when busy, we reduce the D3D11_MAP_READ stalls to ~10×/s.
     bool run_once(ID3D11Texture2D* captured) {
         std::vector<uint16_t> drained_upload;
+        DepthSourceIdentity drained_source{};
         bool worker_busy = false;
         {
             std::lock_guard<std::mutex> lock(m);
@@ -1372,27 +1427,44 @@ float4 main(I i):SV_Target {
             worker_busy = input_pending || worker_running;
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
+                drained_source = ready_source;
+                ready_source = {};
                 output_ready = false;
             }
         }
         const auto now = std::chrono::steady_clock::now();
+        const uint64_t now_ms = steady_milliseconds();
         if (!drained_upload.empty()) {
-            const int N = DepthInferencer::kModelSize;
-            ctx->CopyResource(depth_prev_tex, depth_tex);
-            ctx->UpdateSubresource(
-                depth_tex, 0, nullptr, drained_upload.data(),
-                N * tile_count * sizeof(uint16_t), 0);
-            if (last_depth_arrival.time_since_epoch().count() != 0) {
-                const float interval = std::chrono::duration<float>(
-                    now - last_depth_arrival).count();
-                blend_duration_sec = std::max(
-                    0.04f, std::min(0.22f, interval * 0.90f));
+            const auto decision = result_freshness.consider(
+                drained_source,
+                now_ms);
+            publish_freshness_snapshot();
+            if (decision == g3d::depth::PublishDecision::Accept) {
+                const int N = DepthInferencer::kModelSize;
+                ctx->CopyResource(depth_prev_tex, depth_tex);
+                ctx->UpdateSubresource(
+                    depth_tex, 0, nullptr, drained_upload.data(),
+                    N * tile_count * sizeof(uint16_t), 0);
+                if (last_depth_arrival.time_since_epoch().count() != 0) {
+                    const float interval = std::chrono::duration<float>(
+                        now - last_depth_arrival).count();
+                    blend_duration_sec = std::max(
+                        0.04f, std::min(0.22f, interval * 0.90f));
+                }
+                last_depth_arrival = now;
+                blend_started = now;
+                blend_active = true;
+                has_valid_depth = true;
+                last_depth_upload_ms.store(
+                    now_ms,
+                    std::memory_order_relaxed);
+                last_depth_source_ms.store(
+                    drained_source.captured_ms,
+                    std::memory_order_relaxed);
+                last_depth_source_generation.store(
+                    drained_source.generation,
+                    std::memory_order_relaxed);
             }
-            last_depth_arrival = now;
-            blend_started = now;
-            blend_active = true;
-            has_valid_depth = true;
-            last_depth_upload_ms.store(steady_milliseconds(), std::memory_order_relaxed);
         }
         if (worker_busy) return true;
 
@@ -1411,6 +1483,7 @@ float4 main(I i):SV_Target {
             if (!render_compact(captured, requested)) return false;
             ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
             stage_profiles[stage_write] = requested;
+            stage_sources[stage_write] = next_source_identity(now_ms);
             stage_tiles[stage_write] = selected;
             stage_pending[stage_write] = true;
             stage_write = (stage_write + 1) % kReadbackRingSize;
@@ -1424,12 +1497,14 @@ float4 main(I i):SV_Target {
         if (map_hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
         if (FAILED(map_hr)) { last_err = "Map(staging ring) failed"; return false; }
         const DepthProfile profile = stage_profiles[stage_read];
+        const DepthSourceIdentity source = stage_sources[stage_read];
         const std::vector<int> selected = stage_tiles[stage_read];
         preprocess_compact(
             static_cast<const uint8_t*>(mapped.pData),
             static_cast<int>(mapped.RowPitch), profile, selected);
         ctx->Unmap(stage_bgra[stage_read], 0);
         stage_pending[stage_read] = false;
+        stage_sources[stage_read] = {};
         stage_tiles[stage_read].clear();
         stage_read = (stage_read + 1) % kReadbackRingSize;
         --stage_count;
@@ -1442,6 +1517,7 @@ float4 main(I i):SV_Target {
             }
             pending_input_f32.swap(scratch_input_f32);
             pending_profile = profile;
+            pending_source = source;
             pending_tiles = selected;
             input_pending = true;
         }
@@ -1466,6 +1542,8 @@ float4 main(I i):SV_Target {
                 if (stop.load()) return;
                 running_input_f32.swap(pending_input_f32);
                 running_profile = pending_profile;
+                running_source = pending_source;
+                pending_source = {};
                 running_tiles = pending_tiles;
                 pending_tiles.clear();
                 input_pending = false;
@@ -1668,10 +1746,12 @@ float4 main(I i):SV_Target {
                 worker_running = false;
                 if (ok) {
                     ready_upload_fp16 = std::move(produced_upload);
+                    ready_source = running_source;
                     output_ready = true;
                 } else {
                     last_err = std::move(error);
                 }
+                running_source = {};
             }
             if (ok) inferences.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1732,6 +1812,16 @@ float4 main(I i):SV_Target {
         ready_upload_fp16.clear();
         pending_tiles.clear();
         running_tiles.clear();
+        pending_source = {};
+        running_source = {};
+        ready_source = {};
+        for (auto& source : stage_sources) source = {};
+        next_source_generation = 0;
+        result_freshness.reset();
+        publish_freshness_snapshot();
+        last_depth_upload_ms.store(0, std::memory_order_relaxed);
+        has_valid_depth = false;
+        blend_active = false;
         cached_tile_norm.clear();
         tile_generation.clear();
         percentile_scratch.clear();
@@ -1766,6 +1856,9 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         std::lock_guard<std::mutex> lock(impl_->m);
         impl_->input_pending = false;
         impl_->output_ready = false;
+        impl_->pending_source = {};
+        impl_->running_source = {};
+        impl_->ready_source = {};
         impl_->last_err.clear();
     }
     impl_->stop.store(false, std::memory_order_relaxed);
@@ -1773,6 +1866,12 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     impl_->active_performance_mode.store(1, std::memory_order_relaxed);
     impl_->last_inference_ms.store(0.0f, std::memory_order_relaxed);
     impl_->last_depth_upload_ms.store(0, std::memory_order_relaxed);
+    impl_->last_depth_source_ms.store(0, std::memory_order_relaxed);
+    impl_->last_depth_source_generation.store(0, std::memory_order_relaxed);
+    impl_->published_depth_updates.store(0, std::memory_order_relaxed);
+    impl_->stale_depth_drops.store(0, std::memory_order_relaxed);
+    impl_->nonmonotonic_depth_drops.store(0, std::memory_order_relaxed);
+    impl_->invalid_depth_drops.store(0, std::memory_order_relaxed);
     impl_->gpu_io_active.store(false, std::memory_order_relaxed);
     impl_->gpu_io_fallbacks.store(0, std::memory_order_relaxed);
     impl_->dev = dev;
@@ -1794,7 +1893,7 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
 
 bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
     if (!impl_ || !impl_->env || !impl_->fixed_session(1).session) {
-        impl_->last_err = "DepthInferencer not initialized";
+        if (impl_) impl_->last_err = "DepthInferencer not initialized";
         return false;
     }
     return impl_->run_once(captured_bgra8);
@@ -1848,11 +1947,20 @@ float DepthInferencer::blend_duration_ms() const {
 }
 
 uint32_t DepthInferencer::depth_age_ms() const {
-    if (!impl_) return 0;
-    const uint64_t uploaded = impl_->last_depth_upload_ms.load(std::memory_order_relaxed);
-    if (uploaded == 0) return 0;
-    const uint64_t now = DepthInferImpl::steady_milliseconds();
-    return static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX, now - uploaded));
+    if (!impl_ || depth_updates_published() == 0) return UINT32_MAX;
+    return g3d::depth::SaturatingAgeU32(
+        DepthInferImpl::steady_milliseconds(),
+        impl_->last_depth_source_ms.load(std::memory_order_relaxed));
+}
+
+uint32_t DepthInferencer::depth_upload_age_ms() const {
+    if (!impl_ || depth_updates_published() == 0) return UINT32_MAX;
+    const uint64_t uploaded = impl_->last_depth_upload_ms.load(
+        std::memory_order_relaxed);
+    if (uploaded == 0) return UINT32_MAX;
+    return g3d::depth::SaturatingAgeU32(
+        DepthInferImpl::steady_milliseconds(),
+        uploaded);
 }
 
 bool DepthInferencer::gpu_io_active() const {
@@ -1861,6 +1969,36 @@ bool DepthInferencer::gpu_io_active() const {
 
 uint64_t DepthInferencer::gpu_io_fallbacks() const {
     return impl_ ? impl_->gpu_io_fallbacks.load(std::memory_order_relaxed) : 0;
+}
+
+uint64_t DepthInferencer::depth_updates_published() const {
+    return impl_
+        ? impl_->published_depth_updates.load(std::memory_order_relaxed)
+        : 0;
+}
+
+uint64_t DepthInferencer::stale_depth_results_dropped() const {
+    return impl_
+        ? impl_->stale_depth_drops.load(std::memory_order_relaxed)
+        : 0;
+}
+
+uint64_t DepthInferencer::nonmonotonic_depth_results_dropped() const {
+    return impl_
+        ? impl_->nonmonotonic_depth_drops.load(std::memory_order_relaxed)
+        : 0;
+}
+
+uint64_t DepthInferencer::invalid_depth_results_dropped() const {
+    return impl_
+        ? impl_->invalid_depth_drops.load(std::memory_order_relaxed)
+        : 0;
+}
+
+uint64_t DepthInferencer::latest_depth_generation() const {
+    return impl_
+        ? impl_->last_depth_source_generation.load(std::memory_order_relaxed)
+        : 0;
 }
 
 ID3D11ShaderResourceView* DepthInferencer::depth_srv() const {
