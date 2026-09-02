@@ -197,9 +197,12 @@ def test_snapshot_and_release_tolerate_missing_worker():
     wrapper._capture_failure_count = 0
     wrapper._read_timeout_count = 0
     wrapper._stale_frame_drop_count = 0
+    wrapper._frozen_frame_failure_count = 0
+    wrapper._freeze_episode_count = 0
     wrapper._last_capture_timestamp_ms = None
     wrapper._last_delivered_capture_timestamp_ms = None
     wrapper._last_stale_frame_age_ms = None
+    wrapper._last_frozen_frame_age_ms = None
     wrapper._last_error = ""
 
     snapshot = wrapper.snapshot()
@@ -210,5 +213,8 @@ def test_snapshot_and_release_tolerate_missing_worker():
     assert snapshot.worker_failure_count == 0
     assert snapshot.stale_frame_drop_count == 0
     assert snapshot.last_stale_frame_age_ms is None
+    assert snapshot.frozen_frame_failure_count == 0
+    assert snapshot.freeze_episode_count == 0
+    assert snapshot.last_frozen_frame_age_ms is None
     assert wrapper.snapshot().released
     assert capture.release_count == 0
