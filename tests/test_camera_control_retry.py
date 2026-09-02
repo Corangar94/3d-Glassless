@@ -14,6 +14,7 @@ def test_no_exposed_controls_is_complete_without_retries():
 
 
 def test_every_exposed_control_must_accept_manual_mode():
+    # Historical callers may still provide only the original lock keys.
     assert camera_controls_locked(
         {"autofocus_locked": True, "auto_exposure_locked": True}
     )
@@ -21,6 +22,40 @@ def test_every_exposed_control_must_accept_manual_mode():
         {"autofocus_locked": True, "auto_exposure_locked": False}
     )
     assert not camera_controls_locked({"autofocus_locked": False})
+
+
+def test_transactional_results_also_require_value_preservation():
+    assert camera_controls_locked(
+        {
+            "autofocus_locked": True,
+            "focus_preserved": True,
+            "auto_exposure_locked": True,
+            "exposure_preserved": True,
+        }
+    )
+    assert not camera_controls_locked(
+        {
+            "autofocus_locked": True,
+            "focus_preserved": False,
+        }
+    )
+    assert not camera_controls_locked(
+        {
+            "auto_exposure_locked": True,
+            "exposure_preserved": False,
+        }
+    )
+    assert not camera_controls_locked({"focus_preserved": True})
+
+
+def test_rollback_metadata_does_not_hide_an_incomplete_lock():
+    assert not camera_controls_locked(
+        {
+            "autofocus_locked": False,
+            "focus_preserved": False,
+            "autofocus_rollback": True,
+        }
+    )
 
 
 def test_first_stable_attempt_is_immediate():
@@ -55,7 +90,12 @@ def test_success_completes_policy_and_stops_future_attempts():
     retry = CameraControlLockRetry(max_attempts=3, retry_interval_ms=100)
     assert retry.record_result(
         1000,
-        {"autofocus_locked": True, "auto_exposure_locked": True},
+        {
+            "autofocus_locked": True,
+            "focus_preserved": True,
+            "auto_exposure_locked": True,
+            "exposure_preserved": True,
+        },
     )
 
     assert retry.complete
