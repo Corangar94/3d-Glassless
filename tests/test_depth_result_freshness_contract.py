@@ -7,6 +7,14 @@ def _source(path: str) -> str:
 
 def test_depth_source_identity_crosses_every_async_state():
     source = _source("overlay/depth_infer.cpp")
+    run_once = source.split("    bool run_once(", 1)[1].split(
+        "    // WORKER THREAD:",
+        1,
+    )[0]
+    worker = source.split("    void worker_loop()", 1)[1].split(
+        "    void cleanup()",
+        1,
+    )[0]
 
     for name in (
         "stage_sources",
@@ -16,13 +24,17 @@ def test_depth_source_identity_crosses_every_async_state():
     ):
         assert name in source
 
-    staged = source.index("stage_sources[stage_write]")
-    pending = source.index("pending_source = source")
-    running = source.index("running_source = pending_source")
-    ready = source.index("ready_source = running_source")
-    drained = source.index("drained_source = ready_source")
+    # run_once first drains the prior completed generation, then stages and
+    # queues the current captured frame.
+    drained = run_once.index("drained_source = ready_source")
+    staged = run_once.index("stage_sources[stage_write]")
+    pending = run_once.index("pending_source = source")
+    assert drained < staged < pending
 
-    assert staged < pending < running < ready < drained
+    # The worker then transfers the same identity with its tensor and output.
+    running = worker.index("running_source = pending_source")
+    ready = worker.index("ready_source = running_source")
+    assert running < ready
 
 
 def test_publication_gate_runs_before_depth_texture_upload():
