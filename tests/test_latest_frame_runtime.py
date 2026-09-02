@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import yaml
@@ -64,16 +63,17 @@ def test_runtime_policy_reads_nested_camera_configuration(tmp_path):
     )
 
 
-def test_missing_runtime_config_uses_safe_defaults(tmp_path):
+def test_missing_runtime_config_uses_safe_defaults(tmp_path, monkeypatch):
     logs: list[str] = []
     missing = tmp_path / "missing.yaml"
+    monkeypatch.setattr(
+        latest_frame_runtime,
+        "print",
+        lambda message: logs.append(str(message)),
+        raising=False,
+    )
 
-    original_print = latest_frame_runtime.print
-    latest_frame_runtime.print = lambda message: logs.append(str(message))
-    try:
-        policy = _policy_from_config_path(missing)
-    finally:
-        latest_frame_runtime.print = original_print
+    policy = _policy_from_config_path(missing)
 
     assert policy == LatestFrameCapturePolicy()
     assert any("using safe defaults" in message for message in logs)
