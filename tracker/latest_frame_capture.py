@@ -27,6 +27,7 @@ ThreadFactory = Callable[..., threading.Thread]
 _MAX_WAIT_TIMEOUT_MS = 60_000
 _MAX_FAILURE_BACKOFF_MS = 10_000
 _MAX_SHUTDOWN_TIMEOUT_MS = 60_000
+_MAX_RELEASE_LOCK_WAIT_S = 0.250
 
 
 class CaptureLike(Protocol):
@@ -476,6 +477,21 @@ class LatestFrameCapture:
             with self._condition:
                 self._last_error = self._error_text("release", error)
 
+    def _release_underlying_serialized(self, timeout_s: float) -> bool:
+        """Release under the normal I/O lock, returning False on timeout."""
+        if not self._owns_capture or self._underlying_released:
+            return True
+        acquired = False
+        try:
+            acquired = self._io_lock.acquire(timeout=max(0.0, timeout_s))
+            if not acquired:
+                return False
+            self._release_underlying()
+            return True
+        finally:
+            if acquired:
+                self._io_lock.release()
+
     def release(self) -> None:
         with self._release_lock:
             if self._released:
@@ -486,15 +502,26 @@ class LatestFrameCapture:
                 self._condition.notify_all()
 
             timeout_s = self._policy.shutdown_timeout_ms / 1000.0
+            deadline = time.monotonic() + timeout_s
             grace_s = min(0.100, timeout_s * 0.5)
             if grace_s > 0.0:
                 self._join_worker(grace_s)
 
-            # Release is also the escape hatch for a backend read blocked inside
-            # native code. A wrapper that never completed worker startup does not
-            # own the raw capture and deliberately skips this operation.
-            self._release_underlying()
-            remaining_s = max(0.0, timeout_s - grace_s)
+            # Normally serialize driver teardown with read/get/set/isOpened.
+            # Reserve at least half of the remaining budget for the post-release
+            # worker join. If a native read owns the lock beyond this short wait,
+            # fall back to the intentional cross-thread release escape hatch.
+            available_s = max(0.0, deadline - time.monotonic())
+            release_lock_wait_s = min(
+                _MAX_RELEASE_LOCK_WAIT_S,
+                available_s * 0.5,
+            )
+            if not self._release_underlying_serialized(
+                release_lock_wait_s
+            ):
+                self._release_underlying()
+
+            remaining_s = max(0.0, deadline - time.monotonic())
             if self._worker_is_alive() and remaining_s > 0.0:
                 self._join_worker(remaining_s)
             with self._condition:
