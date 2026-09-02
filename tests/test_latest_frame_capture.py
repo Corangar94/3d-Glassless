@@ -27,13 +27,18 @@ class ControlledCapture:
         self.read_count = 0
 
     def push(self, ok: bool, frame: object | None) -> None:
-        self._results.put((ok, frame))
+        self.push_outcome((ok, frame))
+
+    def push_outcome(self, outcome: object) -> None:
+        self._results.put(outcome)
 
     def read(self):
         self.read_count += 1
         result = self._results.get(timeout=2.0)
         if result is _STOP:
             return False, None
+        if isinstance(result, BaseException):
+            raise result
         return result
 
     def release(self) -> None:
@@ -112,6 +117,7 @@ def test_slow_consumer_receives_only_the_newest_completed_frame():
         assert snapshot.superseded_frame_count == 2
         assert snapshot.latest_generation == 3
         assert snapshot.delivered_generation == 3
+        assert snapshot.last_delivered_capture_timestamp_ms == 166
     finally:
         latest.release()
 
@@ -132,7 +138,9 @@ def test_capture_timestamp_is_recorded_when_worker_receives_the_frame():
 
         assert ok
         assert timestamp_ms == 4242
-        assert latest.snapshot().last_capture_timestamp_ms == 4242
+        snapshot = latest.snapshot()
+        assert snapshot.last_capture_timestamp_ms == 4242
+        assert snapshot.last_delivered_capture_timestamp_ms == 4242
     finally:
         latest.release()
 
@@ -180,34 +188,24 @@ def test_failure_and_recovery_are_delivered_as_distinct_generations():
 
 
 def test_malformed_or_throwing_backend_read_becomes_failure_event():
-    class BrokenCapture(ControlledCapture):
-        def __init__(self) -> None:
-            super().__init__()
-            self._outcomes = deque(
-                [RuntimeError("driver"), (True,), (True, "good")]
-            )
-
-        def read(self):
-            outcome = self._outcomes.popleft()
-            if isinstance(outcome, BaseException):
-                raise outcome
-            if len(outcome) == 1:
-                return outcome
-            return outcome
-
-    capture = BrokenCapture()
+    capture = ControlledCapture()
     latest = LatestFrameCapture(
         capture,
         _policy(failure_backoff_ms=1),
         clock=SequenceClock(1000, 1020, 1040),
     )
     try:
+        capture.push_outcome(RuntimeError("driver"))
         first = latest.read_with_timestamp()
+
+        capture.push_outcome((True,))
         second = latest.read_with_timestamp()
+
+        capture.push(True, "good")
         third = latest.read_with_timestamp()
 
-        assert first[:2] == (False, None)
-        assert second[:2] == (False, None)
+        assert first == (False, None, 1000)
+        assert second == (False, None, 1020)
         assert third == (True, "good", 1040)
         assert latest.snapshot().capture_failure_count == 2
     finally:
@@ -263,6 +261,44 @@ def test_capture_properties_are_proxied_and_contained():
         assert latest.getBackendName() == "CONTROLLED"
     finally:
         latest.release()
+
+
+def test_control_call_times_out_behind_a_stuck_native_read():
+    class StuckCapture(ControlledCapture):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.unblock = threading.Event()
+
+        def read(self):
+            self.read_count += 1
+            self.started.set()
+            self.unblock.wait(2.0)
+            return False, None
+
+        def release(self) -> None:
+            self.release_count += 1
+            self.released = True
+            self.unblock.set()
+
+    capture = StuckCapture()
+    latest = LatestFrameCapture(
+        capture,
+        _policy(wait_timeout_ms=20, shutdown_timeout_ms=200),
+    )
+    try:
+        assert capture.started.wait(0.5)
+        started = time.monotonic()
+
+        result = latest.get(3)
+        elapsed = time.monotonic() - started
+
+        assert result == 0.0
+        assert elapsed < 0.20
+        assert latest.snapshot().last_error == "get:TimeoutError"
+    finally:
+        latest.release()
+    assert not latest.snapshot().worker_alive
 
 
 def test_wrap_is_idempotent_and_respects_disabled_policy():
