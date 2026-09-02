@@ -44,6 +44,7 @@ hidden_imports = [
     "tracker.backend_pose_bridge",
     "tracker.backend_transition_state",
     "tracker.backend_status_shared_memory",
+    "tracker.sequence_mapping",
     "tracker.async_callback_order",
     "tracker.async_inference_watchdog",
     "tracker.async_result_freshness",
