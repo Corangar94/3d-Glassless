@@ -7,6 +7,8 @@ camera:
     enabled: true
     wait_timeout_ms: 1000
     max_frame_age_ms: 250
+    freeze_check_interval_ms: 250
+    freeze_timeout_ms: 3000
     failure_backoff_ms: 20
     shutdown_timeout_ms: 1000
   reconnect:

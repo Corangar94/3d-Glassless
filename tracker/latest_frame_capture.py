@@ -8,8 +8,8 @@ tracking is temporarily slower than the device cadence.
 ``LatestFrameCapture`` gives one worker thread exclusive ownership of frame
 reads and retains only the newest completed result. The processing thread waits
 for a new generation and receives the acquisition timestamp atomically with the
-frame, while superseded or already stale frames are discarded before tracking
-work begins.
+frame, while superseded, stale, or persistently frozen frames are discarded
+before tracking work begins.
 """
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ import threading
 import time
 from typing import Callable, Protocol
 
+from tracker.frame_freeze_detector import (
+    FrameFreezeDetector,
+    FrameFreezeObservation,
+)
 from tracker.pose import monotonic_ms, normalize_wire_timestamp
 
 
@@ -29,6 +33,8 @@ LogFunction = Callable[[str], None]
 ThreadFactory = Callable[..., threading.Thread]
 _MAX_WAIT_TIMEOUT_MS = 60_000
 _MAX_FRAME_AGE_MS = 60_000
+_MAX_FREEZE_CHECK_INTERVAL_MS = 60_000
+_MAX_FREEZE_TIMEOUT_MS = 60_000
 _MAX_FAILURE_BACKOFF_MS = 10_000
 _MAX_SHUTDOWN_TIMEOUT_MS = 60_000
 _MAX_RELEASE_LOCK_WAIT_S = 0.250
@@ -44,14 +50,16 @@ class CaptureLike(Protocol):
 
 @dataclass(frozen=True)
 class LatestFrameCapturePolicy:
-    """Bounded worker, freshness, consumer, and shutdown timing."""
+    """Bounded worker, freshness, freeze, consumer, and shutdown timing."""
 
     enabled: bool = True
     wait_timeout_ms: int = 1_000
     failure_backoff_ms: int = 20
     shutdown_timeout_ms: int = 1_000
-    # Appended to preserve the historical four positional arguments above.
+    # Appended fields preserve the historical positional arguments above.
     max_frame_age_ms: int = 250
+    freeze_check_interval_ms: int = 250
+    freeze_timeout_ms: int = 3_000
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -63,6 +71,18 @@ class LatestFrameCapturePolicy:
                 self.max_frame_age_ms,
                 0,
                 _MAX_FRAME_AGE_MS,
+            ),
+            (
+                "freeze_check_interval_ms",
+                self.freeze_check_interval_ms,
+                0,
+                _MAX_FREEZE_CHECK_INTERVAL_MS,
+            ),
+            (
+                "freeze_timeout_ms",
+                self.freeze_timeout_ms,
+                0,
+                _MAX_FREEZE_TIMEOUT_MS,
             ),
             (
                 "failure_backoff_ms",
@@ -92,6 +112,10 @@ class LatestFrameCapturePolicy:
             "enabled": self.enabled,
             "wait_timeout_ms": int(self.wait_timeout_ms),
             "max_frame_age_ms": int(self.max_frame_age_ms),
+            "freeze_check_interval_ms": int(
+                self.freeze_check_interval_ms
+            ),
+            "freeze_timeout_ms": int(self.freeze_timeout_ms),
             "failure_backoff_ms": int(self.failure_backoff_ms),
             "shutdown_timeout_ms": int(self.shutdown_timeout_ms),
         }
@@ -115,6 +139,9 @@ class LatestFrameCaptureSnapshot:
     last_stale_frame_age_ms: int | None = None
     worker_failure_count: int = 0
     worker_failed: bool = False
+    frozen_frame_failure_count: int = 0
+    freeze_episode_count: int = 0
+    last_frozen_frame_age_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +189,12 @@ def parse_latest_frame_capture_policy(
                 values.get("shutdown_timeout_ms", 1_000)
             ),
             max_frame_age_ms=int(values.get("max_frame_age_ms", 250)),
+            freeze_check_interval_ms=int(
+                values.get("freeze_check_interval_ms", 250)
+            ),
+            freeze_timeout_ms=int(
+                values.get("freeze_timeout_ms", 3_000)
+            ),
         )
     except (TypeError, ValueError, OverflowError):
         logger(
@@ -215,6 +248,10 @@ class LatestFrameCapture:
         self._policy = policy
         self._clock = clock
         self._steady_clock = steady_clock
+        self._freeze_detector = FrameFreezeDetector(
+            check_interval_ms=policy.freeze_check_interval_ms,
+            freeze_timeout_ms=policy.freeze_timeout_ms,
+        )
         self._condition = threading.Condition()
         self._io_lock = threading.Lock()
         self._release_lock = threading.Lock()
@@ -236,9 +273,12 @@ class LatestFrameCapture:
         self._capture_failure_count = 0
         self._read_timeout_count = 0
         self._stale_frame_drop_count = 0
+        self._frozen_frame_failure_count = 0
+        self._freeze_episode_count = 0
         self._last_capture_timestamp_ms: int | None = None
         self._last_delivered_capture_timestamp_ms: int | None = None
         self._last_stale_frame_age_ms: int | None = None
+        self._last_frozen_frame_age_ms: int | None = None
         self._last_error = ""
         worker = thread_factory(
             target=self._capture_loop,
@@ -332,6 +372,24 @@ class LatestFrameCapture:
         self._last_error = f"read:StaleFrame({displayed_age_ms}ms)"
         return True
 
+    def _observe_freeze(
+        self,
+        ok: bool,
+        frame: object | None,
+        completed_at_s: float,
+    ) -> FrameFreezeObservation:
+        if not ok or frame is None:
+            self._freeze_detector.reset()
+            return FrameFreezeObservation()
+        try:
+            return self._freeze_detector.observe(frame, completed_at_s)
+        except Exception:
+            # Freeze detection is an optional safety boundary. A hashing or
+            # third-party buffer failure must never turn a valid frame into a
+            # camera failure.
+            self._freeze_detector.reset()
+            return FrameFreezeObservation(supported=False)
+
     def _wait_for_control_calls(self) -> bool:
         with self._condition:
             while self._control_waiters > 0 and not self._stop_event.is_set():
@@ -346,6 +404,7 @@ class LatestFrameCapture:
         completed_at_s: float,
         *,
         error_text: str = "",
+        freeze_observation: FrameFreezeObservation | None = None,
     ) -> None:
         with self._condition:
             previous = self._event
@@ -370,6 +429,13 @@ class LatestFrameCapture:
             else:
                 self._capture_failure_count += 1
                 self._last_error = error_text or "read:CaptureFailure"
+            if freeze_observation is not None and freeze_observation.frozen:
+                self._frozen_frame_failure_count += 1
+                if freeze_observation.episode_started:
+                    self._freeze_episode_count += 1
+                self._last_frozen_frame_age_ms = (
+                    freeze_observation.frozen_age_ms
+                )
             self._condition.notify_all()
 
     def _capture_loop(self) -> None:
@@ -390,6 +456,19 @@ class LatestFrameCapture:
                     error_text = self._error_text("read", error)
 
                 completed_at_s = self._safe_steady_time()
+                freeze_observation = self._observe_freeze(
+                    ok,
+                    frame,
+                    completed_at_s,
+                )
+                if freeze_observation.frozen:
+                    frozen_age_ms = (
+                        freeze_observation.frozen_age_ms
+                        if freeze_observation.frozen_age_ms is not None
+                        else self._policy.freeze_timeout_ms
+                    )
+                    ok, frame = False, None
+                    error_text = f"read:FrozenFrame({frozen_age_ms}ms)"
                 timestamp_ms = self._safe_timestamp()
                 if self._stop_event.is_set():
                     break
@@ -399,6 +478,7 @@ class LatestFrameCapture:
                     timestamp_ms,
                     completed_at_s,
                     error_text=error_text,
+                    freeze_observation=freeze_observation,
                 )
                 if not ok and self._policy.failure_backoff_ms > 0:
                     self._stop_event.wait(
@@ -560,6 +640,13 @@ class LatestFrameCapture:
                 last_stale_frame_age_ms=self._last_stale_frame_age_ms,
                 worker_failure_count=self._worker_failure_count,
                 worker_failed=self._worker_failed,
+                frozen_frame_failure_count=(
+                    self._frozen_frame_failure_count
+                ),
+                freeze_episode_count=self._freeze_episode_count,
+                last_frozen_frame_age_ms=(
+                    self._last_frozen_frame_age_ms
+                ),
             )
 
     def _release_underlying(self) -> None:

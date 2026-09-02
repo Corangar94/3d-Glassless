@@ -40,6 +40,7 @@ hidden_imports = [
     # The frozen executable dispatches these private/optional modes at runtime.
     "tracker.main",
     "tracker.latest_frame_capture",
+    "tracker.frame_freeze_detector",
     "tracker.latest_frame_runtime",
     "tracker.backend_factory",
     "tracker.backend_failover",
