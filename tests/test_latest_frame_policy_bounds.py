@@ -11,9 +11,9 @@ from tracker.latest_frame_capture import (
 def test_maximum_supported_timing_values_are_valid():
     policy = LatestFrameCapturePolicy(
         wait_timeout_ms=60_000,
-        max_frame_age_ms=60_000,
         failure_backoff_ms=10_000,
         shutdown_timeout_ms=60_000,
+        max_frame_age_ms=60_000,
     )
 
     assert policy.config_values() == {
@@ -23,6 +23,16 @@ def test_maximum_supported_timing_values_are_valid():
         "failure_backoff_ms": 10_000,
         "shutdown_timeout_ms": 60_000,
     }
+
+
+def test_new_age_field_does_not_shift_historical_positional_arguments():
+    policy = LatestFrameCapturePolicy(False, 750, 25, 900)
+
+    assert policy.enabled is False
+    assert policy.wait_timeout_ms == 750
+    assert policy.failure_backoff_ms == 25
+    assert policy.shutdown_timeout_ms == 900
+    assert policy.max_frame_age_ms == 250
 
 
 @pytest.mark.parametrize(
