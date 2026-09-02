@@ -31,7 +31,7 @@ def validated_mediapipe_input_width_px(value: object) -> int:
         raise ValueError("max_input_width_px must be an integer") from error
     if parsed == 0:
         return 0
-    if not MIN_MEDIAPIIPE_INPUT_WIDTH_PX <= parsed <= MAX_MEDIAPIPE_INPUT_WIDTH_PX:
+    if not MIN_MEDIAPIPE_INPUT_WIDTH_PX <= parsed <= MAX_MEDIAPIPE_INPUT_WIDTH_PX:
         raise ValueError(
             "max_input_width_px must be 0 or between "
             f"{MIN_MEDIAPIPE_INPUT_WIDTH_PX} and "
