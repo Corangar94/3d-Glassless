@@ -342,6 +342,7 @@ class LatestFrameCapture:
         default: object,
         *args: object,
     ) -> object:
+        acquired = False
         with self._condition:
             if self._released:
                 return default
@@ -349,15 +350,23 @@ class LatestFrameCapture:
             self._condition.notify_all()
         try:
             method = getattr(self._capture, name)
-            with self._io_lock:
-                if self._released:
-                    return default
-                return method(*args)
+            acquired = self._io_lock.acquire(
+                timeout=self._policy.wait_timeout_ms / 1000.0
+            )
+            if not acquired:
+                with self._condition:
+                    self._last_error = f"{name}:TimeoutError"
+                return default
+            if self._released:
+                return default
+            return method(*args)
         except Exception as error:
             with self._condition:
                 self._last_error = self._error_text(name, error)
             return default
         finally:
+            if acquired:
+                self._io_lock.release()
             with self._condition:
                 self._control_waiters = max(0, self._control_waiters - 1)
                 self._condition.notify_all()
