@@ -2,6 +2,7 @@
 """Low-latency MediaPipe face tracker with camera-time pose metadata."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import os
 import threading
@@ -36,6 +37,13 @@ _UINT32_HALF_RANGE = 0x8000_0000
 _DEFAULT_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "models", "face_landmarker.task"
 )
+
+
+@dataclass(frozen=True)
+class _CalibrationSnapshot:
+    real_ipd_cm: float
+    camera_fov_deg: float
+    camera_geometry: CameraGeometry | None
 
 
 def estimate_z_cm(
@@ -245,20 +253,68 @@ class FaceTracker:
         with self._lock:
             return self._callback_order_gate_locked().snapshot()
 
+    def _calibration_snapshot(self) -> _CalibrationSnapshot:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return _CalibrationSnapshot(
+                real_ipd_cm=float(self._real_ipd_cm),
+                camera_fov_deg=float(self._camera_fov_deg),
+                camera_geometry=getattr(self, "_camera_geometry", None),
+            )
+        with lock:
+            return _CalibrationSnapshot(
+                real_ipd_cm=float(self._real_ipd_cm),
+                camera_fov_deg=float(self._camera_fov_deg),
+                camera_geometry=self._camera_geometry,
+            )
+
     def set_calibration(
         self,
         *,
         real_ipd_cm: float | None = None,
         camera_fov_deg: float | None = None,
     ) -> None:
-        if real_ipd_cm is not None and real_ipd_cm > 0.0:
-            self._real_ipd_cm = float(real_ipd_cm)
+        next_ipd_cm: float | None = None
+        if real_ipd_cm is not None:
+            try:
+                parsed_ipd_cm = float(real_ipd_cm)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError("real_ipd_cm must be finite") from error
+            if not math.isfinite(parsed_ipd_cm):
+                raise ValueError("real_ipd_cm must be finite")
+            # Preserve the historical direct-call behavior: non-positive IPD
+            # updates are ignored rather than replacing the current calibration.
+            if parsed_ipd_cm > 0.0:
+                next_ipd_cm = parsed_ipd_cm
+
+        next_fov_deg: float | None = None
         if camera_fov_deg is not None:
-            if not (0.0 < camera_fov_deg < 180.0):
+            try:
+                parsed_fov_deg = float(camera_fov_deg)
+            except (TypeError, ValueError, OverflowError) as error:
                 raise ValueError(
-                    f"camera_fov_deg must be in (0, 180), got {camera_fov_deg}"
+                    "camera_fov_deg must be finite and in (0, 180)"
+                ) from error
+            if not math.isfinite(parsed_fov_deg) or not (
+                0.0 < parsed_fov_deg < 180.0
+            ):
+                raise ValueError(
+                    f"camera_fov_deg must be finite and in (0, 180), got {camera_fov_deg}"
                 )
-            self._camera_fov_deg = float(camera_fov_deg)
+            next_fov_deg = parsed_fov_deg
+
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            if next_ipd_cm is not None:
+                self._real_ipd_cm = next_ipd_cm
+            if next_fov_deg is not None:
+                self._camera_fov_deg = next_fov_deg
+            return
+        with lock:
+            if next_ipd_cm is not None:
+                self._real_ipd_cm = next_ipd_cm
+            if next_fov_deg is not None:
+                self._camera_fov_deg = next_fov_deg
 
     def reset_session(self) -> None:
         """Forget poses that belong to a retired camera capture session.
@@ -317,6 +373,10 @@ class FaceTracker:
         image_height: int,
         timestamp_ms: int,
     ) -> HeadPosition | None:
+        # One pose must use one calibration generation. Snapshot before reading
+        # landmarks so an asynchronous callback can continue without holding the
+        # tracker lock while settings updates remain transactional.
+        calibration = self._calibration_snapshot()
         face_landmarks = getattr(result, "face_landmarks", None)
         if not face_landmarks:
             return None
@@ -334,7 +394,7 @@ class FaceTracker:
         right_iris = np.array(
             [right.x * image_width, right.y * image_height], dtype=np.float64
         )
-        geometry = self._camera_geometry
+        geometry = calibration.camera_geometry
         if geometry is not None and geometry.intrinsics is not None:
             rectified = geometry.rectified_pixels(
                 (left_iris, right_iris),
@@ -345,7 +405,10 @@ class FaceTracker:
             focal_x, _focal_y = geometry.focal_lengths(image_width, image_height)
             yaw_scale = max(0.45, abs(math.cos(math.radians(yaw_deg))))
             z_camera_cm = (
-                focal_x * self._real_ipd_cm * yaw_scale / max(ipd_px, 1.0)
+                focal_x
+                * calibration.real_ipd_cm
+                * yaw_scale
+                / max(ipd_px, 1.0)
             )
             center_px = (left_iris + right_iris) * 0.5
             x_cm, y_cm, z_cm = geometry.pixel_depth_to_screen(
@@ -365,8 +428,8 @@ class FaceTracker:
             z_cm = estimate_z_cm(
                 ipd_px,
                 image_width,
-                self._real_ipd_cm,
-                self._camera_fov_deg,
+                calibration.real_ipd_cm,
+                calibration.camera_fov_deg,
                 yaw_deg,
             )
             center_x = float((left.x + right.x) * 0.5)
@@ -375,7 +438,7 @@ class FaceTracker:
                 center_x,
                 center_y,
                 z_cm,
-                self._camera_fov_deg,
+                calibration.camera_fov_deg,
                 image_width,
                 image_height,
             )
