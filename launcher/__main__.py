@@ -17,7 +17,7 @@ def _ensure_child_streams() -> None:
 def _select_main(argv: list[str]) -> Callable[[], None]:
     if "--tracker-child" in argv:
         argv.remove("--tracker-child")
-        from tracker.main import main
+        from tracker.latest_frame_runtime import main
 
         return main
 
