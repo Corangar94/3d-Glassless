@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 from typing import Callable
 
 import numpy as np
@@ -10,6 +11,7 @@ from tracker.cv2_temporal_tracker import (
     CascadeFaceDetector,
     FaceBox,
     FaceObservation,
+    box_iou,
     select_face_candidate,
 )
 
@@ -21,7 +23,42 @@ class ScheduledCascadeFaceDetector(CascadeFaceDetector):
     misses and ``allow_full_scan`` is true. This subclass additionally supports
     a scheduled full scan even when the ROI would succeed, so a drifting track
     cannot indefinitely hide a better full-frame detection.
+
+    A scheduled global scan can occasionally miss the current face or detect
+    only another distant face. In that case a small prior ROI scan is added as a
+    continuity fallback. A plausible global candidate remains the fast path and
+    does not pay for the second cascade call.
     """
+
+    @staticmethod
+    def _compatible_with_prior(candidate: FaceBox, prior: FaceBox) -> bool:
+        if box_iou(candidate, prior) >= 0.08:
+            return True
+        distance = math.dist(candidate.center, prior.center)
+        return distance <= max(prior.width, prior.height) * 0.75
+
+    def _forced_candidates(
+        self,
+        gray: np.ndarray,
+        prior: FaceBox | None,
+    ) -> list[tuple[int, int, int, int]]:
+        full_candidates = self._full_faces(gray)
+        if prior is None:
+            return full_candidates
+
+        selected = select_face_candidate(full_candidates, prior)
+        if selected is not None:
+            clipped = selected.clipped(gray.shape[1], gray.shape[0])
+            if (
+                clipped is not None
+                and self._compatible_with_prior(clipped, prior)
+            ):
+                return full_candidates
+
+        # Keep the global candidates so a genuine reacquisition still works if
+        # the ROI also misses. When the ROI succeeds, temporal selection strongly
+        # prefers its prior-compatible face over a distant full-frame candidate.
+        return [*full_candidates, *self._roi_faces(gray, prior)]
 
     def detect(
         self,
@@ -31,10 +68,14 @@ class ScheduledCascadeFaceDetector(CascadeFaceDetector):
         allow_full_scan: bool = True,
         force_full_scan: bool = False,
     ) -> FaceObservation | None:
-        candidates = []
-        if prior is not None and not force_full_scan:
+        candidates: list[tuple[int, int, int, int]] = []
+        if force_full_scan:
+            candidates = self._forced_candidates(gray, prior)
+        elif prior is not None:
             candidates = self._roi_faces(gray, prior)
-        if force_full_scan or (not candidates and allow_full_scan):
+            if not candidates and allow_full_scan:
+                candidates = self._full_faces(gray)
+        elif allow_full_scan:
             candidates = self._full_faces(gray)
 
         selected = select_face_candidate(candidates, prior)
