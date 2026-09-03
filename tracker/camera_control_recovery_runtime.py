@@ -7,6 +7,9 @@ from typing import Any
 import yaml
 
 from tracker import main as tracker_main
+from tracker.camera_control_lock_policy import (
+    parse_camera_control_lock_enabled,
+)
 from tracker.camera_control_recovery import (
     CameraControlRecovery,
     CameraControlRecoveryPolicy,
@@ -98,22 +101,36 @@ class _CameraControlRecoveryQualityMonitor:
         return getattr(self._monitor, name)
 
 
-def _policy_from_config_path(
+def _camera_config_from_path(
     config_path: object,
-) -> CameraControlRecoveryPolicy:
+) -> dict[str, object] | None:
     if not config_path:
-        return CameraControlRecoveryPolicy()
+        return {}
     try:
         with Path(str(config_path)).open(encoding="utf-8") as config_file:
             loaded = yaml.safe_load(config_file)
         root = loaded if isinstance(loaded, dict) else {}
-        return parse_camera_control_recovery_policy(root.get("camera", {}))
+        camera = root.get("camera", {})
+        if not isinstance(camera, dict):
+            raise ValueError("camera configuration must be a mapping")
+        return camera
     except (OSError, TypeError, ValueError, yaml.YAMLError):
         print(
-            "[G3D] Could not read camera control-recovery settings; "
-            "using safe defaults"
+            "[G3D] Could not read camera control settings; "
+            "using caller defaults"
         )
-        return CameraControlRecoveryPolicy()
+        return None
+
+
+def _policy_from_config_path(
+    config_path: object,
+) -> CameraControlRecoveryPolicy:
+    camera = _camera_config_from_path(config_path)
+    return (
+        CameraControlRecoveryPolicy()
+        if camera is None
+        else parse_camera_control_recovery_policy(camera)
+    )
 
 
 class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
@@ -128,11 +145,24 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         **kwargs: object,
     ) -> None:
         config_path = kwargs.get("config_path")
+        camera_config = _camera_config_from_path(config_path)
         policy = (
             camera_control_recovery_policy
             if camera_control_recovery_policy is not None
-            else _policy_from_config_path(config_path)
+            else (
+                CameraControlRecoveryPolicy()
+                if camera_config is None
+                else parse_camera_control_recovery_policy(camera_config)
+            )
         )
+        if config_path and camera_config is not None:
+            kwargs["lock_camera_controls"] = (
+                parse_camera_control_lock_enabled(
+                    camera_config,
+                    logger=print,
+                )
+            )
+
         self._camera_control_recovery = CameraControlRecovery(policy)
         self._camera_control_lock_state: dict[str, object] = {}
         self._camera_control_recovery_capture: object | None = None
