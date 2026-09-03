@@ -20,7 +20,7 @@ camera:
   lock_controls_after_warmup: false
 ```
 
-An invalid explicit value fails closed: Glassless3D logs the problem and leaves the automatic controls enabled. Direct library callers that do not supply a packaged configuration path retain the constructor behavior they selected explicitly.
+An invalid explicit value fails closed: Glassless3D logs the problem and leaves the automatic controls enabled. A malformed configuration file or camera block preserves the caller’s prior setting. Direct library callers that do not supply a packaged configuration path retain the constructor behavior they selected explicitly.
 
 ## Recovery policy
 
@@ -55,13 +55,21 @@ The current lock result is retained by the runtime wrapper. A successful recover
 
 If autofocus succeeds while automatic exposure fails, only autofocus is cleared; the exposure episode retains its own retry state. Recovery never restarts the camera merely because an optional control property is unsupported.
 
+## Release-safe ownership
+
+Each capture opened while locking is active receives a small idempotent release wrapper. The wrapper stores that capture’s lock state separately from the live quality/retry state.
+
+This matters during camera recovery because the base loop clears quality history before releasing the failed handle. The independent snapshot still restores any controller that remained locked, then releases the underlying latest-frame/native capture. A normal tracker exit follows the same order.
+
+A controller already restored because of quality degradation is removed from the release snapshot and is not written twice. A retired capture cannot alter a replacement camera’s lock state. Failed restoration remains diagnostic only: the underlying camera is always released, and repeated release calls do nothing.
+
 ## Instance-local lock observation
 
 The base tracking loop passes every warm-up lock result to its per-loop `CameraControlLockRetry` object. The recovery runtime wraps that object with a lightweight observer that records the same result after the retry state has accepted it.
 
 This avoids replacing `tracker.main.try_lock_camera_controls` at module scope. Multiple tracking-loop instances, diagnostics, and focused tests can therefore run concurrently without borrowing or restoring one another’s camera-lock handler. The observer forwards retry state, reset calls, attempt counters, timing, and completion exactly to the original controller.
 
-A malformed direct result is normalized to a bounded diagnostic dictionary before it reaches retry accounting. Observation remains tied to the capture owned by that loop instance, and camera replacement clears the associated lock state.
+A malformed direct result is normalized to a bounded diagnostic dictionary before it reaches retry accounting. Observation remains tied to the capture owned by that loop instance, and camera replacement clears the associated live lock state without erasing the retiring wrapper’s release snapshot.
 
 ## Runtime layering
 
@@ -78,7 +86,7 @@ The runtime exposes:
 - whether camera-control locking is active;
 - the configured recovery policy;
 - the most recent transactional camera-lock state;
-- the most recent recovery result;
+- the most recent recovery or release-restoration result;
 - per-control degradation start and retry timestamps;
 - per-control attempt counts; and
 - successful autofocus and automatic-exposure recovery counts.
