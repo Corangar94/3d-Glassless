@@ -87,13 +87,6 @@ class ConfiguredBackendFailoverPolicy(BackendFailoverPolicy):
                     minimum=minimum,
                 ),
             )
-        if not isinstance(
-            self.mediapipe_runtime_policy,
-            MediaPipeRuntimePolicy,
-        ):
-            raise ValueError(
-                "mediapipe_runtime_policy must be a MediaPipeRuntimePolicy"
-            )
 
 
 def parse_backend_failover_policy(
