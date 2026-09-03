@@ -33,6 +33,10 @@ class _CameraControlLockRetryObserver:
     def delegate(self) -> object:
         return self._retry
 
+    @property
+    def owner(self) -> "CameraControlRecoveryTrackingLoop":
+        return self._owner
+
     def record_result(
         self,
         timestamp_ms: int,
@@ -135,20 +139,24 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         self._last_camera_control_recovery_result: dict[str, object] = {}
         super().__init__(*args, **kwargs)
 
-        retry = getattr(self, "_camera_control_lock_retry", None)
-        if retry is not None and not isinstance(
-            retry,
-            _CameraControlLockRetryObserver,
-        ):
-            self._camera_control_lock_retry = (
-                _CameraControlLockRetryObserver(retry, self)
-            )
-
+        self._bind_camera_control_lock_retry()
         monitor = getattr(self, "_camera_quality_monitor", None)
         if monitor is not None:
             self._camera_quality_monitor = (
                 _CameraControlRecoveryQualityMonitor(monitor, self)
             )
+
+    def _bind_camera_control_lock_retry(self) -> None:
+        retry = getattr(self, "_camera_control_lock_retry", None)
+        if retry is None:
+            return
+        if isinstance(retry, _CameraControlLockRetryObserver):
+            if retry.owner is self:
+                return
+            retry = retry.delegate
+        self._camera_control_lock_retry = (
+            _CameraControlLockRetryObserver(retry, self)
+        )
 
     @property
     def camera_control_recovery_policy(self) -> CameraControlRecoveryPolicy:
