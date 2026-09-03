@@ -58,9 +58,11 @@ def test_periodic_large_duplicate_is_exactly_confirmed_at_timeout():
     detector.observe(frame, 10.0)
     baseline = detector.observe(frame.copy(), 10.25)
 
-    observation = detector.observe(frame.copy(), 13.0)
+    before_exact_timeout = detector.observe(frame.copy(), 13.0)
+    observation = detector.observe(frame.copy(), 13.25)
 
     assert not baseline.frozen
+    assert not before_exact_timeout.frozen
     assert observation.frozen
     assert observation.frozen_age_ms == 3_000
     assert observation.episode_started
@@ -76,11 +78,13 @@ def test_sparse_large_caller_requires_two_exact_frames_before_freeze():
     detector.observe(frame, 20.0)
 
     first_exact = detector.observe(frame.copy(), 23.0)
-    confirmed = detector.observe(frame.copy(), 23.25)
+    before_timeout = detector.observe(frame.copy(), 25.75)
+    confirmed = detector.observe(frame.copy(), 26.0)
 
     assert not first_exact.frozen
+    assert not before_timeout.frozen
     assert confirmed.frozen
-    assert confirmed.frozen_age_ms == 3_250
+    assert confirmed.frozen_age_ms == 3_000
     assert detector.snapshot().full_fingerprint_count == 2
 
 
@@ -96,13 +100,15 @@ def test_change_outside_grid_cannot_cause_false_freeze():
     changed = frame.copy()
     row, column = _unsampled_coordinate()
     changed[row, column, 0] = 255
-    observation = detector.observe(changed, 33.0)
+    before_exact_timeout = detector.observe(changed, 33.0)
+    observation = detector.observe(changed.copy(), 33.25)
 
+    assert not before_exact_timeout.frozen
     assert not observation.frozen
     assert detector.snapshot().full_fingerprint_count == 2
 
     # The changed frame itself can become frozen only after a new full timeout.
-    confirmed = detector.observe(changed.copy(), 36.0)
+    confirmed = detector.observe(changed.copy(), 36.25)
     assert confirmed.frozen
     assert confirmed.frozen_age_ms == 3_000
 
@@ -115,12 +121,13 @@ def test_change_outside_grid_clears_an_established_freeze():
     frame = _large_frame()
     detector.observe(frame, 40.0)
     detector.observe(frame.copy(), 40.25)
-    assert detector.observe(frame.copy(), 43.0).frozen
+    assert not detector.observe(frame.copy(), 43.0).frozen
+    assert detector.observe(frame.copy(), 43.25).frozen
 
     changed = frame.copy()
     row, column = _unsampled_coordinate()
     changed[row, column, 1] = 255
-    observation = detector.observe(changed, 43.25)
+    observation = detector.observe(changed, 43.5)
 
     assert observation.checked
     assert not observation.frozen
