@@ -120,9 +120,8 @@ def _sampled_frame_fingerprint(frame: object) -> _FrameFingerprint | None:
 
 
 def _frame_signature(frame: object) -> tuple[object, ...] | None:
-    """Return the bounded signature retained for focused direct callers."""
-    fingerprint = _sampled_frame_fingerprint(frame)
-    return None if fingerprint is None else fingerprint.signature
+    """Retain the historical exact signature for focused direct callers."""
+    return _full_frame_signature(frame)
 
 
 def _full_frame_signature(frame: object) -> tuple[object, ...] | None:
