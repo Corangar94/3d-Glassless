@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
 
 from launcher.edid import detect_screen_size_cm
 from launcher.overlay_process import find_depth_model, find_overlay_exe
+from tracker.camera_control_lock_policy import (
+    DEFAULT_LOCK_CONTROLS_AFTER_WARMUP,
+)
 from tracker.camera_control_recovery import CameraControlRecoveryPolicy
 from tracker.latest_frame_capture import LatestFrameCapturePolicy
 from tracker.mediapipe_runtime_policy import MediaPipeRuntimePolicy
@@ -274,6 +277,9 @@ class DonePage(QWizardPage):
                 "height": 720,
                 "fps": 30,
                 "latest_frame": LatestFrameCapturePolicy().config_values(),
+                "lock_controls_after_warmup": (
+                    DEFAULT_LOCK_CONTROLS_AFTER_WARMUP
+                ),
                 "control_recovery": (
                     CameraControlRecoveryPolicy().config_values()
                 ),
