@@ -196,9 +196,11 @@ def test_missing_measurement_admission_boundary_fails_closed(monkeypatch):
         StableLatestFrameTrackingLoop()
 
 
-def test_runtime_main_substitutes_stable_loop_only_during_bootstrap(
-    monkeypatch,
-):
+def test_runtime_main_selects_full_recovery_loop_during_bootstrap(monkeypatch):
+    from tracker.camera_control_recovery_runtime import (
+        CameraControlRecoveryTrackingLoop,
+    )
+
     original = tracker_main.TrackingLoop
     observed: list[object] = []
     monkeypatch.setattr(
@@ -209,7 +211,7 @@ def test_runtime_main_substitutes_stable_loop_only_during_bootstrap(
 
     pose_stability_runtime.main()
 
-    assert observed == [StableLatestFrameTrackingLoop]
+    assert observed == [CameraControlRecoveryTrackingLoop]
     assert tracker_main.TrackingLoop is original
 
 
