@@ -15,7 +15,7 @@ camera:
 
 Existing configuration files that do not contain the key also receive the safe default. Set the value to `false` to keep autofocus and automatic exposure untouched.
 
-Boolean YAML values, `0`/`1`, and common boolean strings are accepted. An invalid explicit value fails closed: automatic controls remain enabled and the tracker logs the configuration problem.
+Boolean YAML values, `0`/`1`, and common boolean strings are accepted. An invalid explicit value fails closed: automatic controls remain enabled and the tracker logs the configuration problem. A malformed configuration root or camera block preserves the caller’s existing setting instead of enabling hardware changes.
 
 Direct library callers that instantiate `TrackingLoop`, `LatestFrameTrackingLoop`, or `StableLatestFrameTrackingLoop` without a packaged configuration path retain their existing constructor default.
 
@@ -44,6 +44,21 @@ Each automatic control is handled independently:
 Autofocus manual mode uses `0`. Automatic exposure tries `0.25` first for DirectShow-style backends and then `0` for backends using a boolean convention. Exposure rollback tries the previously reported automatic value followed by the common `0.75` and `1.0` automatic-mode values.
 
 A control group is reported complete only when both the automatic-mode lock and manual-value preservation succeed. Older direct callers that provide only the historical `*_locked` result keys retain their previous retry semantics.
+
+## Release restoration
+
+When locking is enabled, each opened capture is wrapped by an idempotent release boundary. The wrapper retains that capture’s last successful lock result independently of the active camera-quality session.
+
+Before a normal tracker shutdown or camera reconnect releases the driver, the wrapper selectively restores every automatic controller still marked locked. Restoration therefore still occurs when the base tracking loop has already cleared its quality and retry state in preparation for a reconnect.
+
+- A focus controller restored earlier by quality recovery is not written again at release.
+- A retired wrapper uses only its own lock snapshot and cannot overwrite a replacement camera’s state.
+- Restoration runs before the underlying `release()` call and uses the latest-frame wrapper’s serialized, bounded control path.
+- A rejected write or driver exception is logged but cannot prevent the underlying camera from being released.
+- Multiple release calls restore and release at most once.
+- The explicit `lock_controls_after_warmup: false` opt-out does not add the release wrapper.
+
+This keeps the stabilization policy local to the tracker session instead of relying on every webcam driver to reset manual mode when its handle closes.
 
 ## Failure behavior
 
