@@ -66,3 +66,9 @@ def test_value_only_helper_remains_compatible():
     assert "def _prediction_lead_ms(" in source
     assert "return _prediction_lead_encoding(" in source
     assert ").value_ms" in source
+
+
+def test_frozen_package_includes_prediction_lead_helper():
+    spec = _source("Glassless3D.spec")
+
+    assert '"tracker.prediction_lead"' in spec
