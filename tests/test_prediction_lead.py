@@ -5,6 +5,7 @@ import pytest
 from tracker.prediction_lead import (
     MAX_ENCODED_PREDICTION_LEAD_MS,
     PredictionLeadEncoding,
+    UINT32_MASK,
     encode_prediction_lead,
     sanitize_prediction_lead,
 )
@@ -57,6 +58,10 @@ def test_backward_or_overlong_target_is_invalid():
         (1000, False, 1000),
         (1000.0, 1000, 1000),
         (1000, 1000.0, 1000),
+        (-1, UINT32_MASK - 1, 1000),
+        (UINT32_MASK + 1, UINT32_MASK, 1000),
+        (UINT32_MASK, -1, 1000),
+        (UINT32_MASK, UINT32_MASK + 1, 1000),
         (1000, 1000, True),
         (1000, 1000, -1),
         (1000, 1000, 0x8000_0000),
@@ -70,8 +75,10 @@ def test_invalid_encoding_inputs_fail_closed(target, publish, maximum):
     ) == PredictionLeadEncoding()
 
 
-def test_sanitizer_requires_declared_validity_even_for_zero():
+def test_sanitizer_requires_real_declared_validity_even_for_zero():
     assert sanitize_prediction_lead(0, False) == PredictionLeadEncoding()
+    assert sanitize_prediction_lead(0, 1) == PredictionLeadEncoding()
+    assert sanitize_prediction_lead(0, "true") == PredictionLeadEncoding()
     assert sanitize_prediction_lead(0, True) == PredictionLeadEncoding(
         value_ms=0,
         valid=True,
@@ -81,6 +88,11 @@ def test_sanitizer_requires_declared_validity_even_for_zero():
 def test_sanitizer_clears_out_of_range_or_malformed_values():
     assert sanitize_prediction_lead(
         MAX_ENCODED_PREDICTION_LEAD_MS + 1,
+        True,
+    ) == PredictionLeadEncoding()
+    assert sanitize_prediction_lead(-1, True) == PredictionLeadEncoding()
+    assert sanitize_prediction_lead(
+        UINT32_MASK + 1,
         True,
     ) == PredictionLeadEncoding()
     assert sanitize_prediction_lead(True, True) == PredictionLeadEncoding()
