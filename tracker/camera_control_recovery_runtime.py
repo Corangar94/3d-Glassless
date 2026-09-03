@@ -23,6 +23,25 @@ from tracker.camera_control_recovery import (
 from tracker.pose_stability_runtime import StableLatestFrameTrackingLoop
 
 
+_LOCK_STATE_GROUPS = (
+    (
+        "autofocus_locked",
+        "autofocus_rollback",
+        ("focus_preserved", "autofocus_value", "focus_value"),
+    ),
+    (
+        "auto_exposure_locked",
+        "auto_exposure_rollback",
+        (
+            "exposure_preserved",
+            "auto_exposure_value",
+            "exposure_value",
+            "auto_exposure_manual_value",
+        ),
+    ),
+)
+
+
 class _CameraControlLockRetryObserver:
     """Record lock results for one loop without mutating module-global state."""
 
@@ -56,16 +75,20 @@ class _CameraControlLockRetryObserver:
                 )
             }
         )
-        complete = bool(
-            self._retry.record_result(timestamp_ms, normalized)
-        )
-        capture = self._owner._camera_control_recovery_capture
-        if capture is not None:
-            self._owner._record_camera_control_lock(
-                capture,
-                normalized,
+        try:
+            return bool(
+                self._retry.record_result(timestamp_ms, normalized)
             )
-        return complete
+        finally:
+            # The hardware transaction happened before retry accounting. Keep
+            # its ownership record even if unexpected retry bookkeeping raises,
+            # so camera release can still restore automatic controls.
+            capture = self._owner._camera_control_recovery_capture
+            if capture is not None:
+                self._owner._record_camera_control_lock(
+                    capture,
+                    normalized,
+                )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._retry, name)
@@ -90,6 +113,10 @@ class _AutomaticControlRestoringCapture:
     @property
     def delegate(self) -> object:
         return self._capture
+
+    @property
+    def owner(self) -> "CameraControlRecoveryTrackingLoop":
+        return self._owner
 
     @property
     def released(self) -> bool:
@@ -276,7 +303,7 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         ):
             return capture
         if isinstance(capture, _AutomaticControlRestoringCapture):
-            if capture._owner is self:
+            if capture.owner is self:
                 return capture
             capture = capture.delegate
         return _AutomaticControlRestoringCapture(capture, self)
@@ -302,6 +329,38 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         self._reset_camera_control_recovery_session()
         return wrapped, backend_index
 
+    def _merge_camera_control_lock_state(
+        self,
+        result: dict[str, object],
+    ) -> dict[str, object]:
+        previous = self._camera_control_lock_state
+        merged = dict(previous)
+        merged.update(result)
+        for lock_key, rollback_key, metadata_keys in _LOCK_STATE_GROUPS:
+            if not bool(previous.get(lock_key, False)):
+                continue
+            if bool(result.get(rollback_key, False)):
+                # A successful transactional rollback is explicit evidence that
+                # this automatic controller is no longer owned in manual mode.
+                merged[lock_key] = False
+                continue
+            if bool(result.get(lock_key, False)):
+                for key in metadata_keys:
+                    if (
+                        (key not in result or result.get(key) is None)
+                        and key in previous
+                    ):
+                        merged[key] = previous[key]
+                continue
+            # A failed or malformed later retry does not prove that an earlier
+            # manual-mode transition was undone. Retain ownership until an
+            # explicit rollback or quality/release recovery succeeds.
+            merged[lock_key] = True
+            for key in metadata_keys:
+                if key in previous:
+                    merged[key] = previous[key]
+        return merged
+
     def _record_camera_control_lock(
         self,
         capture: object,
@@ -309,7 +368,9 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
     ) -> None:
         if capture is not self._camera_control_recovery_capture:
             return
-        self._camera_control_lock_state = dict(result)
+        self._camera_control_lock_state = (
+            self._merge_camera_control_lock_state(result)
+        )
         self._camera_control_recovery.reset_episodes()
         if isinstance(capture, _AutomaticControlRestoringCapture):
             capture.record_lock_state(self._camera_control_lock_state)
