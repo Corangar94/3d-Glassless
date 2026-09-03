@@ -171,6 +171,7 @@ class FrameFreezeDetector:
         self._last_check_s: float | None = None
         self._last_signature: tuple[object, ...] | None = None
         self._full_baseline_signature: tuple[object, ...] | None = None
+        self._full_baseline_since_s: float | None = None
         self._identical_since_s: float | None = None
         self._frozen = False
         self._fingerprint_count = 0
@@ -186,6 +187,7 @@ class FrameFreezeDetector:
         self._last_check_s = None
         self._last_signature = None
         self._full_baseline_signature = None
+        self._full_baseline_since_s = None
         self._identical_since_s = None
         self._frozen = False
         self._last_frozen_age_ms = None
@@ -198,11 +200,26 @@ class FrameFreezeDetector:
             return None
         return parsed if math.isfinite(parsed) else None
 
-    def _age_ms(self, observed_at_s: float) -> int | None:
-        started = self._identical_since_s
-        if started is None or observed_at_s < started:
+    @staticmethod
+    def _elapsed_ms(
+        observed_at_s: float,
+        started_at_s: float | None,
+    ) -> int | None:
+        if started_at_s is None or observed_at_s < started_at_s:
             return None
-        return max(0, int(math.floor((observed_at_s - started) * 1000.0)))
+        return max(
+            0,
+            int(math.floor((observed_at_s - started_at_s) * 1000.0)),
+        )
+
+    def _age_ms(self, observed_at_s: float) -> int | None:
+        return self._elapsed_ms(observed_at_s, self._identical_since_s)
+
+    def _exact_age_ms(self, observed_at_s: float) -> int | None:
+        return self._elapsed_ms(
+            observed_at_s,
+            self._full_baseline_since_s,
+        )
 
     def _observation(
         self,
@@ -212,7 +229,7 @@ class FrameFreezeDetector:
         episode_started: bool = False,
         observed_at_s: float,
     ) -> FrameFreezeObservation:
-        age_ms = self._age_ms(observed_at_s) if self._frozen else None
+        age_ms = self._exact_age_ms(observed_at_s) if self._frozen else None
         if age_ms is not None:
             self._last_frozen_age_ms = age_ms
         return FrameFreezeObservation(
@@ -238,6 +255,9 @@ class FrameFreezeDetector:
     ) -> FrameFreezeObservation:
         self._last_signature = signature
         self._full_baseline_signature = full_signature
+        self._full_baseline_since_s = (
+            observed_at_s if full_signature is not None else None
+        )
         self._identical_since_s = observed_at_s
         self._frozen = False
         self._last_frozen_age_ms = None
@@ -275,6 +295,7 @@ class FrameFreezeDetector:
         if fingerprint is None:
             self._last_signature = None
             self._full_baseline_signature = None
+            self._full_baseline_since_s = None
             self._identical_since_s = None
             self._frozen = False
             self._last_frozen_age_ms = None
@@ -309,6 +330,8 @@ class FrameFreezeDetector:
             full_signature = self._full_signature(frame)
             if full_signature is None:
                 self._last_signature = None
+                self._full_baseline_signature = None
+                self._full_baseline_since_s = None
                 self._identical_since_s = None
                 self._frozen = False
                 return FrameFreezeObservation(
@@ -316,14 +339,19 @@ class FrameFreezeDetector:
                     supported=False,
                 )
             self._full_baseline_signature = full_signature
-            if age_ms >= self._freeze_timeout_ms:
-                # There is no earlier exact baseline to compare after a sparse
-                # caller jumps directly to the timeout. One later check confirms
-                # exact repetition; normal periodic capture established it much
-                # earlier on the first repeated sample.
-                return FrameFreezeObservation(checked=True)
+            self._full_baseline_since_s = now_s
 
-        if age_ms >= self._freeze_timeout_ms or self._frozen:
+        exact_age_ms = self._exact_age_ms(now_s)
+        if exact_age_ms is None:
+            self._full_baseline_signature = None
+            self._full_baseline_since_s = None
+            self._frozen = False
+            return FrameFreezeObservation(
+                checked=True,
+                supported=False,
+            )
+
+        if exact_age_ms >= self._freeze_timeout_ms or self._frozen:
             current_full_signature = (
                 signature
                 if fingerprint.exact
@@ -332,6 +360,7 @@ class FrameFreezeDetector:
             if current_full_signature is None:
                 self._last_signature = None
                 self._full_baseline_signature = None
+                self._full_baseline_since_s = None
                 self._identical_since_s = None
                 self._frozen = False
                 self._last_frozen_age_ms = None
@@ -350,16 +379,16 @@ class FrameFreezeDetector:
                 )
 
         episode_started = False
-        if age_ms >= self._freeze_timeout_ms and not self._frozen:
+        if exact_age_ms >= self._freeze_timeout_ms and not self._frozen:
             self._frozen = True
             self._freeze_episode_count += 1
             episode_started = True
         if self._frozen:
-            self._last_frozen_age_ms = age_ms
+            self._last_frozen_age_ms = exact_age_ms
         return FrameFreezeObservation(
             checked=True,
             frozen=self._frozen,
-            frozen_age_ms=age_ms if self._frozen else None,
+            frozen_age_ms=exact_age_ms if self._frozen else None,
             episode_started=episode_started,
         )
 
