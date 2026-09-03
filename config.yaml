@@ -11,6 +11,7 @@ camera:
     freeze_timeout_ms: 3000
     failure_backoff_ms: 20
     shutdown_timeout_ms: 1000
+  lock_controls_after_warmup: true
   control_recovery:
     degradation_hold_ms: 2000
     retry_interval_ms: 5000
