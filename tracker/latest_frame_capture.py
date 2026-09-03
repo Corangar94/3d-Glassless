@@ -167,6 +167,25 @@ def _parse_bool(value: object) -> bool:
     raise ValueError("enabled must be a boolean")
 
 
+def _parse_integer(value: object, field_name: str) -> int:
+    """Parse an explicit base-10 integer without truncation or bool coercion."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{field_name} must be an integer")
+        try:
+            return int(text, 10)
+        except ValueError as error:
+            raise ValueError(
+                f"{field_name} must be an integer"
+            ) from error
+    raise ValueError(f"{field_name} must be an integer")
+
+
 def parse_latest_frame_capture_policy(
     camera_config: object,
     *,
@@ -181,19 +200,29 @@ def parse_latest_frame_capture_policy(
             raise ValueError("camera.latest_frame must be a mapping")
         return LatestFrameCapturePolicy(
             enabled=_parse_bool(values.get("enabled", True)),
-            wait_timeout_ms=int(values.get("wait_timeout_ms", 1_000)),
-            failure_backoff_ms=int(
-                values.get("failure_backoff_ms", 20)
+            wait_timeout_ms=_parse_integer(
+                values.get("wait_timeout_ms", 1_000),
+                "wait_timeout_ms",
             ),
-            shutdown_timeout_ms=int(
-                values.get("shutdown_timeout_ms", 1_000)
+            failure_backoff_ms=_parse_integer(
+                values.get("failure_backoff_ms", 20),
+                "failure_backoff_ms",
             ),
-            max_frame_age_ms=int(values.get("max_frame_age_ms", 250)),
-            freeze_check_interval_ms=int(
-                values.get("freeze_check_interval_ms", 250)
+            shutdown_timeout_ms=_parse_integer(
+                values.get("shutdown_timeout_ms", 1_000),
+                "shutdown_timeout_ms",
             ),
-            freeze_timeout_ms=int(
-                values.get("freeze_timeout_ms", 3_000)
+            max_frame_age_ms=_parse_integer(
+                values.get("max_frame_age_ms", 250),
+                "max_frame_age_ms",
+            ),
+            freeze_check_interval_ms=_parse_integer(
+                values.get("freeze_check_interval_ms", 250),
+                "freeze_check_interval_ms",
+            ),
+            freeze_timeout_ms=_parse_integer(
+                values.get("freeze_timeout_ms", 3_000),
+                "freeze_timeout_ms",
             ),
         )
     except (TypeError, ValueError, OverflowError):
