@@ -19,9 +19,19 @@ class PredictionLeadEncoding:
 
 
 def _wire_integer(value: object) -> int | None:
+    """Return one explicit uint32 integer without silently wrapping bad input."""
     if isinstance(value, bool) or not isinstance(value, numbers.Integral):
         return None
-    return int(value) & UINT32_MASK
+    parsed = int(value)
+    return parsed if 0 <= parsed <= UINT32_MASK else None
+
+
+def _maximum_is_valid(value: object) -> bool:
+    return bool(
+        not isinstance(value, bool)
+        and isinstance(value, numbers.Integral)
+        and 0 <= int(value) < UINT32_HALF_RANGE
+    )
 
 
 def encode_prediction_lead(
@@ -40,11 +50,7 @@ def encode_prediction_lead(
     publish = _wire_integer(publish_timestamp_ms)
     if target in (None, 0) or publish in (None, 0):
         return PredictionLeadEncoding()
-    if (
-        isinstance(maximum_lead_ms, bool)
-        or not isinstance(maximum_lead_ms, numbers.Integral)
-        or not 0 <= int(maximum_lead_ms) < UINT32_HALF_RANGE
-    ):
+    if not _maximum_is_valid(maximum_lead_ms):
         return PredictionLeadEncoding()
 
     lead = (target - publish) & UINT32_MASK
@@ -60,15 +66,12 @@ def sanitize_prediction_lead(
     maximum_lead_ms: int = MAX_ENCODED_PREDICTION_LEAD_MS,
 ) -> PredictionLeadEncoding:
     """Fail closed when a received value conflicts with its validity flag."""
-    if not declared_valid:
+    if declared_valid is not True:
         return PredictionLeadEncoding()
     value = _wire_integer(value_ms)
-    if value is None:
-        return PredictionLeadEncoding()
     if (
-        isinstance(maximum_lead_ms, bool)
-        or not isinstance(maximum_lead_ms, numbers.Integral)
-        or not 0 <= int(maximum_lead_ms) < UINT32_HALF_RANGE
+        value is None
+        or not _maximum_is_valid(maximum_lead_ms)
         or value > int(maximum_lead_ms)
     ):
         return PredictionLeadEncoding()
