@@ -1,6 +1,34 @@
 # Transactional webcam control locking
 
-After a stable camera-quality warm-up, Glassless3D may disable autofocus and automatic exposure to reduce focus pumping and brightness hunting. Camera backends disagree on property support, accepted values, and whether failures return `False`, invalid numbers, or exceptions, so this optimization must fail without degrading the image.
+After a stable camera-quality warm-up, Glassless3D disables autofocus and automatic exposure when the backend can complete a reversible transaction. This reduces focus pumping and brightness hunting without forcing unsupported cameras into manual mode.
+
+Camera backends disagree on property support, accepted values, and whether failures return `False`, invalid numbers, or exceptions, so this optimization must fail without degrading the image.
+
+## Default and opt-out
+
+The packaged source and frozen tracker paths enable the stabilized-camera policy by default:
+
+```yaml
+camera:
+  lock_controls_after_warmup: true
+```
+
+Existing configuration files that do not contain the key also receive the safe default. Set the value to `false` to keep autofocus and automatic exposure untouched.
+
+Boolean YAML values, `0`/`1`, and common boolean strings are accepted. An invalid explicit value fails closed: automatic controls remain enabled and the tracker logs the configuration problem.
+
+Direct library callers that instantiate `TrackingLoop`, `LatestFrameTrackingLoop`, or `StableLatestFrameTrackingLoop` without a packaged configuration path retain their existing constructor default.
+
+## Admission before hardware changes
+
+The tracker does not lock controls immediately after opening a camera. The camera-quality monitor first requires a stable evidence window with:
+
+- enough delivered frames and image-analysis samples;
+- no underexposure, overexposure, softness, cadence, or exposure-hunting problem;
+- low brightness jitter; and
+- sharpness above the normal minimum.
+
+Only then does the bounded retry controller attempt the hardware transaction. Unsupported or incomplete control groups do not prevent face tracking.
 
 ## Safe transaction
 
@@ -24,5 +52,6 @@ A control group is reported complete only when both the automatic-mode lock and 
 - Rejected or throwing property writes are contained and reported in the result dictionary.
 - A failed restoration triggers a best-effort rollback and remains an incomplete lock attempt even when rollback succeeds.
 - The existing bounded retry controller may try again after the configured interval, then continues tracking if the hardware cannot be locked safely.
+- If a later lighting or focus change makes the stored manual value unsuitable, the sustained quality-recovery path selectively restores the affected automatic controller and starts a new warm-up.
 
-This policy favors a functioning automatic camera over an uncertain manual state. Camera-control locking remains optional and never determines whether face tracking itself can run.
+This policy favors a functioning automatic camera over an uncertain manual state. Camera-control locking never determines whether face tracking itself can run.
