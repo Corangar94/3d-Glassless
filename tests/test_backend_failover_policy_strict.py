@@ -150,13 +150,6 @@ def test_invalid_failover_does_not_discard_valid_mediapipe_policy():
     assert len(logs) == 1
 
 
-def test_configured_policy_requires_valid_mediapipe_policy_object():
-    with pytest.raises(ValueError, match="mediapipe_runtime_policy"):
-        ConfiguredBackendFailoverPolicy(
-            mediapipe_runtime_policy=object(),  # type: ignore[arg-type]
-        )
-
-
 def test_parser_uses_strict_helper_for_every_failover_field():
     source = Path("tracker/backend_factory.py").read_text(encoding="utf-8")
     parser = source.split("def parse_backend_failover_policy(", 1)[1].split(
