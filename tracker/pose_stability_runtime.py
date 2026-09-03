@@ -127,9 +127,16 @@ class StableLatestFrameTrackingLoop(LatestFrameTrackingLoop):
 
 
 def main() -> None:
-    """Run the established tracker bootstrap with both runtime protections."""
+    """Run tracker bootstrap with every packaged protection active."""
+    # Imported lazily because the recovery loop subclasses the stability loop
+    # defined above. This keeps the dependency acyclic while PyInstaller receives
+    # an explicit hidden import for both modules.
+    from tracker.camera_control_recovery_runtime import (
+        CameraControlRecoveryTrackingLoop,
+    )
+
     original_loop = tracker_main.TrackingLoop
-    tracker_main.TrackingLoop = StableLatestFrameTrackingLoop
+    tracker_main.TrackingLoop = CameraControlRecoveryTrackingLoop
     try:
         tracker_main.main()
     finally:
