@@ -105,20 +105,26 @@ class CameraQualityMonitor:
         self._analysis_count = 0
 
     @staticmethod
-    def _analyze_frame(
-        frame_bgr: np.ndarray,
-    ) -> tuple[float, float, float, float]:
+    def _reduced_analysis_frame(frame_bgr: np.ndarray) -> np.ndarray:
+        """Return an aspect-preserving BGR frame with longest edge <= 320 px."""
         height, width = frame_bgr.shape[:2]
-        target_width = min(320, width)
-        target_height = max(
-            1,
-            int(round(height * target_width / max(1, width))),
-        )
-        reduced = cv2.resize(
+        longest_edge = max(width, height)
+        scale = min(1.0, 320.0 / max(1, longest_edge))
+        if scale >= 1.0:
+            return frame_bgr
+        target_width = max(1, int(round(width * scale)))
+        target_height = max(1, int(round(height * scale)))
+        return cv2.resize(
             frame_bgr,
             (target_width, target_height),
             interpolation=cv2.INTER_AREA,
         )
+
+    @staticmethod
+    def _analyze_frame(
+        frame_bgr: np.ndarray,
+    ) -> tuple[float, float, float, float]:
+        reduced = CameraQualityMonitor._reduced_analysis_frame(frame_bgr)
         gray = cv2.cvtColor(reduced, cv2.COLOR_BGR2GRAY)
         return (
             float(np.mean(gray) / 255.0),
