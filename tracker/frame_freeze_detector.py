@@ -1,10 +1,18 @@
-"""Detect a camera that returns one byte-identical frame indefinitely."""
+"""Detect a camera that repeatedly returns the same captured frame."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import math
 import numbers
+
+import numpy as np
+
+
+_SAMPLE_ROWS = 180
+_SAMPLE_COLUMNS = 320
+_FULL_SAMPLE_THRESHOLD_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -24,49 +32,122 @@ class FrameFreezeDetectorSnapshot:
     freeze_episode_count: int
     frozen: bool
     last_frozen_age_ms: int | None
+    full_fingerprint_count: int = 0
 
 
-def _frame_signature(frame: object) -> tuple[object, ...] | None:
-    """Return a full-buffer signature for one contiguous buffer object.
+@dataclass(frozen=True)
+class _FrameFingerprint:
+    signature: tuple[object, ...]
+    exact: bool
 
-    The shape/format metadata prevents two differently shaped arrays with the
-    same byte stream from being treated as one frame. Unsupported or
-    non-contiguous objects deliberately return ``None`` so this optional safety
-    gate never changes third-party frame compatibility.
-    """
+
+def _byte_view(view: memoryview) -> memoryview:
+    return view if view.ndim == 1 and view.format == "B" else view.cast("B")
+
+
+def _frame_metadata(frame: object, view: memoryview) -> tuple[object, ...]:
+    shape = tuple(view.shape) if view.shape is not None else ()
+    strides = tuple(view.strides) if view.strides is not None else ()
+    return (
+        type(frame).__module__,
+        type(frame).__qualname__,
+        view.format,
+        int(view.itemsize),
+        shape,
+        strides,
+        int(view.nbytes),
+    )
+
+
+@lru_cache(maxsize=32)
+def _sample_indices(length: int, maximum: int) -> np.ndarray:
+    count = min(maximum, length)
+    if count == length:
+        indices = np.arange(length, dtype=np.intp)
+    else:
+        indices = np.linspace(0, length - 1, count, dtype=np.intp)
+    indices.flags.writeable = False
+    return indices
+
+
+def _sampled_frame_fingerprint(frame: object) -> _FrameFingerprint | None:
+    """Return a bounded spatial fingerprint and whether it covers every byte."""
     try:
         view = memoryview(frame)
         if not view.c_contiguous:
             return None
-        byte_view = (
-            view
-            if view.ndim == 1 and view.format == "B"
-            else view.cast("B")
+        metadata = _frame_metadata(frame, view)
+        if (
+            not isinstance(frame, np.ndarray)
+            or frame.ndim < 2
+            or view.nbytes <= _FULL_SAMPLE_THRESHOLD_BYTES
+        ):
+            digest = hashlib.blake2b(
+                _byte_view(view),
+                digest_size=16,
+            ).digest()
+            return _FrameFingerprint(
+                signature=metadata + ("full", digest),
+                exact=True,
+            )
+
+        height = int(frame.shape[0])
+        width = int(frame.shape[1])
+        if height <= 0 or width <= 0:
+            return None
+        rows = _sample_indices(height, _SAMPLE_ROWS)
+        columns = _sample_indices(width, _SAMPLE_COLUMNS)
+        sample = np.ascontiguousarray(
+            frame[rows[:, None], columns[None, :], ...]
         )
-        digest = hashlib.blake2b(byte_view, digest_size=16).digest()
-        shape = tuple(view.shape) if view.shape is not None else ()
-        strides = tuple(view.strides) if view.strides is not None else ()
-        return (
-            type(frame).__module__,
-            type(frame).__qualname__,
-            view.format,
-            int(view.itemsize),
-            shape,
-            strides,
-            int(view.nbytes),
-            digest,
+        digest = hashlib.blake2b(
+            memoryview(sample).cast("B"),
+            digest_size=16,
+        ).digest()
+        return _FrameFingerprint(
+            signature=metadata
+            + (
+                "spatial-grid",
+                int(rows.size),
+                int(columns.size),
+                int(sample.nbytes),
+                digest,
+            ),
+            exact=False,
         )
     except Exception:
         return None
 
 
-class FrameFreezeDetector:
-    """Sample exact frame identity and declare a sustained freeze.
+def _frame_signature(frame: object) -> tuple[object, ...] | None:
+    """Return the bounded signature retained for focused direct callers."""
+    fingerprint = _sampled_frame_fingerprint(frame)
+    return None if fingerprint is None else fingerprint.signature
 
-    Full-buffer hashing happens no more often than ``check_interval_ms``. Once a
-    freeze is established, frames remain frozen between checks until a sampled
-    frame proves that the buffer changed. All state is single-worker-thread
-    owned; callers may read ``snapshot`` after externally synchronizing access.
+
+def _full_frame_signature(frame: object) -> tuple[object, ...] | None:
+    """Return an exact full-buffer signature for freeze confirmation."""
+    try:
+        view = memoryview(frame)
+        if not view.c_contiguous:
+            return None
+        digest = hashlib.blake2b(
+            _byte_view(view),
+            digest_size=16,
+        ).digest()
+        return _frame_metadata(frame, view) + ("full", digest)
+    except Exception:
+        return None
+
+
+class FrameFreezeDetector:
+    """Sample frame identity cheaply, then verify a sustained freeze exactly.
+
+    Large NumPy camera frames use a deterministic 320x180 spatial grid for the
+    regular check. A full-buffer hash is captured only after two sampled frames
+    match and again when the timeout is reached. Freeze declaration therefore
+    still requires exact byte identity, while a changing high-resolution camera
+    avoids repeatedly hashing its entire frame.
     """
 
     def __init__(
@@ -90,9 +171,11 @@ class FrameFreezeDetector:
         self._freeze_timeout_ms = int(freeze_timeout_ms)
         self._last_check_s: float | None = None
         self._last_signature: tuple[object, ...] | None = None
+        self._full_baseline_signature: tuple[object, ...] | None = None
         self._identical_since_s: float | None = None
         self._frozen = False
         self._fingerprint_count = 0
+        self._full_fingerprint_count = 0
         self._freeze_episode_count = 0
         self._last_frozen_age_ms: int | None = None
 
@@ -103,6 +186,7 @@ class FrameFreezeDetector:
     def reset(self) -> None:
         self._last_check_s = None
         self._last_signature = None
+        self._full_baseline_signature = None
         self._identical_since_s = None
         self._frozen = False
         self._last_frozen_age_ms = None
@@ -140,6 +224,26 @@ class FrameFreezeDetector:
             episode_started=episode_started,
         )
 
+    def _full_signature(self, frame: object) -> tuple[object, ...] | None:
+        signature = _full_frame_signature(frame)
+        if signature is not None:
+            self._full_fingerprint_count += 1
+        return signature
+
+    def _reset_identity(
+        self,
+        signature: tuple[object, ...],
+        observed_at_s: float,
+        *,
+        full_signature: tuple[object, ...] | None = None,
+    ) -> FrameFreezeObservation:
+        self._last_signature = signature
+        self._full_baseline_signature = full_signature
+        self._identical_since_s = observed_at_s
+        self._frozen = False
+        self._last_frozen_age_ms = None
+        return FrameFreezeObservation(checked=True)
+
     def observe(
         self,
         frame: object,
@@ -168,9 +272,10 @@ class FrameFreezeDetector:
                 )
 
         self._last_check_s = now_s
-        signature = _frame_signature(frame)
-        if signature is None:
+        fingerprint = _sampled_frame_fingerprint(frame)
+        if fingerprint is None:
             self._last_signature = None
+            self._full_baseline_signature = None
             self._identical_since_s = None
             self._frozen = False
             self._last_frozen_age_ms = None
@@ -179,19 +284,71 @@ class FrameFreezeDetector:
                 supported=False,
             )
         self._fingerprint_count += 1
+        if fingerprint.exact:
+            self._full_fingerprint_count += 1
 
+        signature = fingerprint.signature
         if self._last_signature != signature:
-            self._last_signature = signature
-            self._identical_since_s = now_s
-            self._frozen = False
-            self._last_frozen_age_ms = None
-            return FrameFreezeObservation(checked=True)
+            return self._reset_identity(
+                signature,
+                now_s,
+                full_signature=signature if fingerprint.exact else None,
+            )
 
         age_ms = self._age_ms(now_s)
         if age_ms is None:
-            self._identical_since_s = now_s
-            self._frozen = False
-            return FrameFreezeObservation(checked=True)
+            return self._reset_identity(
+                signature,
+                now_s,
+                full_signature=signature if fingerprint.exact else None,
+            )
+
+        # Capture an exact baseline only after the cheap fingerprint repeats.
+        # Dynamic video normally changes the spatial grid every check and never
+        # pays this full-buffer cost.
+        if self._full_baseline_signature is None:
+            full_signature = self._full_signature(frame)
+            if full_signature is None:
+                self._last_signature = None
+                self._identical_since_s = None
+                self._frozen = False
+                return FrameFreezeObservation(
+                    checked=True,
+                    supported=False,
+                )
+            self._full_baseline_signature = full_signature
+            if age_ms >= self._freeze_timeout_ms:
+                # There is no earlier exact baseline to compare after a sparse
+                # caller jumps directly to the timeout. One later check confirms
+                # exact repetition; normal periodic capture established it much
+                # earlier on the first repeated sample.
+                return FrameFreezeObservation(checked=True)
+
+        if age_ms >= self._freeze_timeout_ms or self._frozen:
+            current_full_signature = (
+                signature
+                if fingerprint.exact
+                else self._full_signature(frame)
+            )
+            if current_full_signature is None:
+                self._last_signature = None
+                self._full_baseline_signature = None
+                self._identical_since_s = None
+                self._frozen = False
+                self._last_frozen_age_ms = None
+                return FrameFreezeObservation(
+                    checked=True,
+                    supported=False,
+                )
+            if current_full_signature != self._full_baseline_signature:
+                # The bounded grid collided while bytes elsewhere changed.
+                # Restart from the current exact frame rather than declaring a
+                # false freeze.
+                return self._reset_identity(
+                    signature,
+                    now_s,
+                    full_signature=current_full_signature,
+                )
 
         episode_started = False
         if age_ms >= self._freeze_timeout_ms and not self._frozen:
@@ -213,4 +370,5 @@ class FrameFreezeDetector:
             freeze_episode_count=self._freeze_episode_count,
             frozen=self._frozen,
             last_frozen_age_ms=self._last_frozen_age_ms,
+            full_fingerprint_count=self._full_fingerprint_count,
         )
