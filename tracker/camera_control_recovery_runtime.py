@@ -109,8 +109,9 @@ def _camera_config_from_path(
     try:
         with Path(str(config_path)).open(encoding="utf-8") as config_file:
             loaded = yaml.safe_load(config_file)
-        root = loaded if isinstance(loaded, dict) else {}
-        camera = root.get("camera", {})
+        if not isinstance(loaded, dict):
+            raise ValueError("configuration root must be a mapping")
+        camera = loaded.get("camera", {})
         if not isinstance(camera, dict):
             raise ValueError("camera configuration must be a mapping")
         return camera
