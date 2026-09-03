@@ -30,15 +30,21 @@ def parse_camera_control_lock_enabled(
 ) -> bool:
     """Return the packaged default, respecting an explicit safe opt-out.
 
-    The transactional lock and recovery boundaries are enabled when the key is
-    absent so existing configuration files gain the stabilized-camera path.
-    Invalid explicit values fail closed and disable hardware changes.
+    The transactional lock and recovery boundaries are enabled when a valid
+    camera mapping omits the key, so existing packaged configuration files gain
+    the stabilized-camera path. Malformed mappings or invalid explicit values
+    fail closed and leave automatic controls enabled.
     """
-    camera = camera_config if isinstance(camera_config, dict) else {}
-    if _CONFIG_KEY not in camera:
+    if not isinstance(camera_config, dict):
+        logger(
+            "[G3D] Invalid camera lock-controls configuration; "
+            "leaving automatic controls enabled"
+        )
+        return False
+    if _CONFIG_KEY not in camera_config:
         return DEFAULT_LOCK_CONTROLS_AFTER_WARMUP
     try:
-        return _parse_bool(camera[_CONFIG_KEY])
+        return _parse_bool(camera_config[_CONFIG_KEY])
     except (TypeError, ValueError, OverflowError):
         logger(
             "[G3D] Invalid camera lock-controls setting; "
