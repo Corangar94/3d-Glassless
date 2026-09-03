@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import importlib
+import numbers
 from typing import Callable, Mapping
 
 from tracker.backend_failover import (
@@ -17,6 +18,41 @@ from tracker.mediapipe_runtime_policy import (
 
 ImportModule = Callable[[str], object]
 LogFunction = Callable[[str], None]
+
+
+def _validated_integer(
+    value: object,
+    field_name: str,
+    *,
+    minimum: int,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        raise ValueError(f"{field_name} must be an integer")
+    parsed = int(value)
+    if parsed < minimum:
+        if minimum == 0:
+            raise ValueError(f"{field_name} cannot be negative")
+        raise ValueError(f"{field_name} must be at least {minimum}")
+    return parsed
+
+
+def _parse_integer(value: object, field_name: str) -> int:
+    """Parse an explicit base-10 integer without truncation or bool coercion."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{field_name} must be an integer")
+        try:
+            return int(text, 10)
+        except ValueError as error:
+            raise ValueError(
+                f"{field_name} must be an integer"
+            ) from error
+    raise ValueError(f"{field_name} must be an integer")
 
 
 @dataclass(frozen=True)
@@ -34,6 +70,24 @@ class ConfiguredBackendFailoverPolicy(BackendFailoverPolicy):
         repr=False,
     )
 
+    def __post_init__(self) -> None:
+        for field_name, minimum in (
+            ("retry_primary_after_ms", 0),
+            ("max_primary_retries", 0),
+            ("shadow_probe_interval_ms", 0),
+            ("shadow_probe_timeout_ms", 1),
+            ("minimum_healthy_callbacks", 1),
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _validated_integer(
+                    getattr(self, field_name),
+                    field_name,
+                    minimum=minimum,
+                ),
+            )
+
 
 def parse_backend_failover_policy(
     tracking_config: object,
@@ -43,23 +97,30 @@ def parse_backend_failover_policy(
     """Read bounded backend and MediaPipe runtime policies from one mapping."""
     tracking = tracking_config if isinstance(tracking_config, dict) else {}
     raw = tracking.get("backend_failover", {})
-    values = raw if isinstance(raw, dict) else {}
+    values = raw if isinstance(raw, dict) else None
     try:
+        if values is None:
+            raise ValueError("tracking.backend_failover must be a mapping")
         failover = BackendFailoverPolicy(
-            retry_primary_after_ms=int(
-                values.get("retry_primary_after_ms", 30_000)
+            retry_primary_after_ms=_parse_integer(
+                values.get("retry_primary_after_ms", 30_000),
+                "retry_primary_after_ms",
             ),
-            max_primary_retries=int(
-                values.get("max_primary_retries", 1)
+            max_primary_retries=_parse_integer(
+                values.get("max_primary_retries", 1),
+                "max_primary_retries",
             ),
-            shadow_probe_interval_ms=int(
-                values.get("shadow_probe_interval_ms", 100)
+            shadow_probe_interval_ms=_parse_integer(
+                values.get("shadow_probe_interval_ms", 100),
+                "shadow_probe_interval_ms",
             ),
-            shadow_probe_timeout_ms=int(
-                values.get("shadow_probe_timeout_ms", 5_000)
+            shadow_probe_timeout_ms=_parse_integer(
+                values.get("shadow_probe_timeout_ms", 5_000),
+                "shadow_probe_timeout_ms",
             ),
-            minimum_healthy_callbacks=int(
-                values.get("minimum_healthy_callbacks", 3)
+            minimum_healthy_callbacks=_parse_integer(
+                values.get("minimum_healthy_callbacks", 3),
+                "minimum_healthy_callbacks",
             ),
         )
     except (TypeError, ValueError, OverflowError):
