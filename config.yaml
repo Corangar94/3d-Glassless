@@ -11,6 +11,10 @@ camera:
     freeze_timeout_ms: 3000
     failure_backoff_ms: 20
     shutdown_timeout_ms: 1000
+  control_recovery:
+    degradation_hold_ms: 2000
+    retry_interval_ms: 5000
+    max_attempts_per_episode: 3
   reconnect:
     immediate_retries: 1
     max_failures: 8
