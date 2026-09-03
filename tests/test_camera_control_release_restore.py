@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import cv2
+import pytest
 
 from tracker.camera_control_recovery import (
     CameraControlRecovery,
@@ -11,6 +12,7 @@ from tracker.camera_control_recovery import (
 from tracker.camera_control_recovery_runtime import (
     CameraControlRecoveryTrackingLoop,
     _AutomaticControlRestoringCapture,
+    _CameraControlLockRetryObserver,
 )
 
 
@@ -31,6 +33,11 @@ class _Capture:
     def release(self) -> None:
         self.events.append(("release",))
         self.release_count += 1
+
+
+class _RaisingRetry:
+    def record_result(self, _timestamp_ms, _result):
+        raise RuntimeError("retry accounting failed")
 
 
 def _loop(*, enabled: bool = True) -> CameraControlRecoveryTrackingLoop:
@@ -112,6 +119,101 @@ def test_release_snapshot_survives_base_session_reset(monkeypatch):
     assert loop.camera_control_lock_state == {}
     wrapped.release()
 
+    assert raw.events == [
+        ("set", 1001, 1.0),
+        ("release",),
+    ]
+
+
+def test_later_failed_retry_does_not_erase_proven_lock_ownership(monkeypatch):
+    monkeypatch.setattr(cv2, "CAP_PROP_AUTOFOCUS", 1001, raising=False)
+    raw = _Capture()
+    loop = _loop()
+    wrapped = loop._wrap_restoring_capture(raw)
+    assert isinstance(wrapped, _AutomaticControlRestoringCapture)
+    loop._camera_control_recovery_capture = wrapped
+    loop._record_camera_control_lock(
+        wrapped,
+        {
+            "autofocus_locked": True,
+            "focus_preserved": True,
+            "autofocus_value": 1.0,
+            "focus_value": 42.0,
+        },
+    )
+
+    # A transient later read/write failure cannot prove that the earlier manual
+    # mode transition was undone. The release snapshot must keep the known lock.
+    loop._record_camera_control_lock(
+        wrapped,
+        {
+            "autofocus_locked": False,
+            "focus_preserved": False,
+            "autofocus_value": None,
+            "focus_value": None,
+            "errors": ("temporary control failure",),
+        },
+    )
+
+    state = loop.camera_control_lock_state
+    assert state["autofocus_locked"] is True
+    assert state["focus_preserved"] is True
+    assert state["autofocus_value"] == 1.0
+    assert state["focus_value"] == 42.0
+    assert state["errors"] == ("temporary control failure",)
+
+    wrapped.release()
+    assert raw.events == [
+        ("set", 1001, 1.0),
+        ("release",),
+    ]
+
+
+def test_successful_transactional_rollback_clears_prior_lock_ownership():
+    loop = _loop()
+    capture = object()
+    loop._camera_control_recovery_capture = capture
+    loop._record_camera_control_lock(
+        capture,
+        {
+            "autofocus_locked": True,
+            "focus_preserved": True,
+            "autofocus_value": 1.0,
+            "focus_value": 42.0,
+        },
+    )
+
+    loop._record_camera_control_lock(
+        capture,
+        {
+            "autofocus_locked": False,
+            "focus_preserved": False,
+            "autofocus_rollback": True,
+        },
+    )
+
+    assert loop.camera_control_lock_state["autofocus_locked"] is False
+
+
+def test_retry_delegate_exception_still_records_hardware_lock(monkeypatch):
+    monkeypatch.setattr(cv2, "CAP_PROP_AUTOFOCUS", 1001, raising=False)
+    raw = _Capture()
+    loop = _loop()
+    wrapped = loop._wrap_restoring_capture(raw)
+    assert isinstance(wrapped, _AutomaticControlRestoringCapture)
+    loop._camera_control_recovery_capture = wrapped
+    observer = _CameraControlLockRetryObserver(_RaisingRetry(), loop)
+    result = {
+        "autofocus_locked": True,
+        "focus_preserved": True,
+        "autofocus_value": 1.0,
+    }
+
+    with pytest.raises(RuntimeError, match="retry accounting failed"):
+        observer.record_result(1000, result)
+
+    assert loop.camera_control_lock_state == result
+    wrapped.release()
     assert raw.events == [
         ("set", 1001, 1.0),
         ("release",),
@@ -223,6 +325,10 @@ def test_runtime_source_wraps_only_enabled_releasable_captures():
         "    def _open_camera_with_recovery(",
         1,
     )[0]
+    observer = source.split(
+        "class _CameraControlLockRetryObserver:",
+        1,
+    )[1].split("class _AutomaticControlRestoringCapture:", 1)[0]
     release = source.split(
         "class _AutomaticControlRestoringCapture:",
         1,
@@ -234,3 +340,7 @@ def test_runtime_source_wraps_only_enabled_releasable_captures():
     assert release.index("_restore_automatic_controls_before_release") < (
         release.index('getattr(self._capture, "release")')
     )
+    assert "finally:" in observer
+    assert "_merge_camera_control_lock_state" in source
+    assert "autofocus_rollback" in source
+    assert "auto_exposure_rollback" in source
