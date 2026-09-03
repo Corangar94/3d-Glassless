@@ -17,10 +17,23 @@ from tracker.camera_control_recovery_runtime import (
 from tracker.pose_stability_runtime import StableLatestFrameTrackingLoop
 
 
-def test_missing_lock_setting_uses_safe_packaged_default():
+def test_missing_lock_setting_in_valid_mapping_uses_safe_packaged_default():
     assert DEFAULT_LOCK_CONTROLS_AFTER_WARMUP is True
     assert parse_camera_control_lock_enabled({}) is True
-    assert parse_camera_control_lock_enabled(None) is True
+
+
+@pytest.mark.parametrize("camera_config", [None, [], "camera", 1])
+def test_nonmapping_camera_config_fails_closed(camera_config):
+    logs: list[str] = []
+
+    enabled = parse_camera_control_lock_enabled(
+        camera_config,
+        logger=logs.append,
+    )
+
+    assert enabled is False
+    assert len(logs) == 1
+    assert "leaving automatic controls enabled" in logs[0]
 
 
 @pytest.mark.parametrize(
@@ -194,6 +207,35 @@ def test_unreadable_config_preserves_caller_default(tmp_path, monkeypatch):
     _loop, observed = _construct_runtime(
         monkeypatch,
         config_path=tmp_path / "missing.yaml",
+        lock_camera_controls=False,
+    )
+
+    assert observed["lock_camera_controls"] is False
+    assert any("using caller defaults" in line for line in logs)
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    ["[]\n", "camera: []\n", "null\n", "camera: 1\n"],
+)
+def test_malformed_yaml_shape_preserves_caller_default(
+    tmp_path,
+    monkeypatch,
+    yaml_text,
+):
+    path = tmp_path / "malformed.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+    logs: list[str] = []
+    monkeypatch.setattr(
+        camera_control_recovery_runtime,
+        "print",
+        logs.append,
+        raising=False,
+    )
+
+    _loop, observed = _construct_runtime(
+        monkeypatch,
+        config_path=path,
         lock_camera_controls=False,
     )
 
