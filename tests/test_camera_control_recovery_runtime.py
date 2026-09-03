@@ -159,16 +159,18 @@ def test_constructor_wraps_existing_quality_monitor_and_retry(monkeypatch):
         _CameraControlLockRetryObserver,
     )
     assert loop._camera_control_lock_retry.delegate is retry
+    assert loop._camera_control_lock_retry.owner is loop
 
 
-def test_constructor_does_not_double_wrap_retry_observer(monkeypatch):
-    loop = _bare_loop(CameraControlRecoveryPolicy())
+def test_constructor_does_not_double_wrap_own_retry_observer(monkeypatch):
     retry = _Retry()
-    existing = _CameraControlLockRetryObserver(retry, loop)
+    created: list[_CameraControlLockRetryObserver] = []
 
     def fake_super_init(self, *args, **kwargs):
+        observer = _CameraControlLockRetryObserver(retry, self)
+        created.append(observer)
         self._camera_quality_monitor = None
-        self._camera_control_lock_retry = existing
+        self._camera_control_lock_retry = observer
 
     monkeypatch.setattr(
         StableLatestFrameTrackingLoop,
@@ -180,7 +182,33 @@ def test_constructor_does_not_double_wrap_retry_observer(monkeypatch):
         camera_control_recovery_policy=CameraControlRecoveryPolicy()
     )
 
-    assert constructed._camera_control_lock_retry is existing
+    assert constructed._camera_control_lock_retry is created[0]
+
+
+def test_constructor_rebinds_foreign_retry_observer(monkeypatch):
+    retry = _Retry()
+    foreign_owner = _bare_loop(CameraControlRecoveryPolicy())
+    foreign = _CameraControlLockRetryObserver(retry, foreign_owner)
+
+    def fake_super_init(self, *args, **kwargs):
+        self._camera_quality_monitor = None
+        self._camera_control_lock_retry = foreign
+
+    monkeypatch.setattr(
+        StableLatestFrameTrackingLoop,
+        "__init__",
+        fake_super_init,
+    )
+
+    constructed = CameraControlRecoveryTrackingLoop(
+        camera_control_recovery_policy=CameraControlRecoveryPolicy()
+    )
+    rebound = constructed._camera_control_lock_retry
+
+    assert rebound is not foreign
+    assert isinstance(rebound, _CameraControlLockRetryObserver)
+    assert rebound.delegate is retry
+    assert rebound.owner is constructed
 
 
 def test_camera_reopen_stores_capture_and_resets_session(monkeypatch):
