@@ -3,7 +3,7 @@
 The design follows OpenCV's documented video pattern: use a cascade detector to
 establish/revalidate a face ROI, seed Shi-Tomasi corners inside that ROI, and
 track those sparse points between detections with pyramidal Lucas-Kanade optical
-flow.  Cascades remain the source of truth; optical flow only bridges the short
+flow. Cascades remain the source of truth; optical flow only bridges the short
 interval between bounded periodic re-detections.
 """
 from __future__ import annotations
@@ -18,7 +18,12 @@ import numpy as np
 
 RectLike = Sequence[int | float]
 FeatureFunction = Callable[..., np.ndarray | None]
-FlowFunction = Callable[..., tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]]
+FlowResult = tuple[
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+]
+FlowFunction = Callable[..., FlowResult]
 
 
 class Cv2FallbackTrackingError(RuntimeError):
@@ -289,6 +294,7 @@ class SparseFaceMotionTracker:
         minimum_points: int = 6,
         maximum_points: int = 40,
         maximum_flow_error: float = 35.0,
+        maximum_forward_backward_error: float = 1.5,
         maximum_motion_fraction: float = 0.35,
         maximum_scale_step: float = 0.12,
         feature_function: FeatureFunction = cv2.goodFeaturesToTrack,
@@ -298,15 +304,31 @@ class SparseFaceMotionTracker:
             raise ValueError("minimum_points must be at least three")
         if maximum_points < minimum_points:
             raise ValueError("maximum_points cannot be smaller than minimum_points")
-        if maximum_flow_error <= 0.0:
-            raise ValueError("maximum_flow_error must be positive")
-        if not (0.0 < maximum_motion_fraction <= 1.0):
+        if not math.isfinite(float(maximum_flow_error)) or maximum_flow_error <= 0.0:
+            raise ValueError("maximum_flow_error must be finite and positive")
+        if (
+            not math.isfinite(float(maximum_forward_backward_error))
+            or maximum_forward_backward_error <= 0.0
+        ):
+            raise ValueError(
+                "maximum_forward_backward_error must be finite and positive"
+            )
+        if (
+            not math.isfinite(float(maximum_motion_fraction))
+            or not (0.0 < maximum_motion_fraction <= 1.0)
+        ):
             raise ValueError("maximum_motion_fraction must be in (0, 1]")
-        if not (0.0 <= maximum_scale_step < 1.0):
+        if (
+            not math.isfinite(float(maximum_scale_step))
+            or not (0.0 <= maximum_scale_step < 1.0)
+        ):
             raise ValueError("maximum_scale_step must be in [0, 1)")
         self._minimum_points = int(minimum_points)
         self._maximum_points = int(maximum_points)
         self._maximum_flow_error = float(maximum_flow_error)
+        self._maximum_forward_backward_error = float(
+            maximum_forward_backward_error
+        )
         self._maximum_motion_fraction = float(maximum_motion_fraction)
         self._maximum_scale_step = float(maximum_scale_step)
         self._feature_function = feature_function
@@ -315,16 +337,31 @@ class SparseFaceMotionTracker:
         self._points: np.ndarray | None = None
         self._box: FaceBox | None = None
         self._eyes: EyePair | None = None
+        self._last_forward_backward_error_px: float | None = None
+        self._forward_backward_rejection_count = 0
 
     @property
     def current_box(self) -> FaceBox | None:
         return self._box
+
+    @property
+    def maximum_forward_backward_error(self) -> float:
+        return self._maximum_forward_backward_error
+
+    @property
+    def last_forward_backward_error_px(self) -> float | None:
+        return self._last_forward_backward_error_px
+
+    @property
+    def forward_backward_rejection_count(self) -> int:
+        return self._forward_backward_rejection_count
 
     def reset(self) -> None:
         self._previous_gray = None
         self._points = None
         self._box = None
         self._eyes = None
+        self._last_forward_backward_error_px = None
 
     def _features(self, gray: np.ndarray, box: FaceBox) -> np.ndarray | None:
         mask = np.zeros(gray.shape, dtype=np.uint8)
@@ -373,6 +410,7 @@ class SparseFaceMotionTracker:
         self._points = points
         self._box = clipped
         self._eyes = eyes
+        self._last_forward_backward_error_px = None
         return points is not None
 
     @staticmethod
@@ -390,22 +428,55 @@ class SparseFaceMotionTracker:
         threshold = max(2.0, median_residual * 3.0)
         return residual <= threshold
 
-    def track(self, gray: np.ndarray) -> FaceObservation | None:
-        previous_gray = self._previous_gray
-        previous_points = self._points
-        previous_box = self._box
-        if (
-            previous_gray is None
-            or previous_points is None
-            or previous_box is None
-            or gray.shape != previous_gray.shape
-        ):
+    @staticmethod
+    def _normalized_flow_result(
+        result: object,
+        expected_count: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+        if not isinstance(result, tuple) or len(result) != 3:
+            return None
+        points, status, errors = result
+        if points is None or status is None:
             return None
         try:
-            next_points, status, errors = self._flow_function(
+            normalized_points = np.asarray(
+                points,
+                dtype=np.float32,
+            ).reshape(-1, 2)
+            status_values = np.asarray(status).reshape(-1).astype(np.float64)
+            if (
+                len(normalized_points) != expected_count
+                or len(status_values) != expected_count
+            ):
+                return None
+            normalized_status = np.isfinite(status_values) & (
+                status_values != 0.0
+            )
+            normalized_errors: np.ndarray | None = None
+            if errors is not None:
+                normalized_errors = np.asarray(
+                    errors,
+                    dtype=np.float32,
+                ).reshape(-1)
+                if len(normalized_errors) != expected_count:
+                    return None
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return normalized_points, normalized_status, normalized_errors
+
+    def _calculate_flow(
+        self,
+        previous_gray: np.ndarray,
+        next_gray: np.ndarray,
+        points: np.ndarray,
+        *,
+        direction: str,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+        try:
+            result = self._flow_function(
                 previous_gray,
-                gray,
-                previous_points,
+                next_gray,
+                points,
                 None,
                 winSize=(21, 21),
                 maxLevel=3,
@@ -417,25 +488,97 @@ class SparseFaceMotionTracker:
             )
         except Exception as error:
             raise Cv2FallbackTrackingError(
-                "Lucas-Kanade optical flow failed"
+                f"Lucas-Kanade {direction} optical flow failed"
             ) from error
-        if next_points is None or status is None:
+        return self._normalized_flow_result(result, len(points))
+
+    def track(self, gray: np.ndarray) -> FaceObservation | None:
+        previous_gray = self._previous_gray
+        previous_points = self._points
+        previous_box = self._box
+        if (
+            previous_gray is None
+            or previous_points is None
+            or previous_box is None
+            or gray.shape != previous_gray.shape
+        ):
             return None
 
+        self._last_forward_backward_error_px = None
         old = np.asarray(previous_points, dtype=np.float32).reshape(-1, 2)
-        new = np.asarray(next_points, dtype=np.float32).reshape(-1, 2)
-        valid = np.asarray(status).reshape(-1).astype(bool)
+        forward = self._calculate_flow(
+            previous_gray,
+            gray,
+            previous_points,
+            direction="forward",
+        )
+        if forward is None:
+            return None
+        next_points, forward_status, forward_errors = forward
+
+        valid = forward_status.copy()
         valid &= np.all(np.isfinite(old), axis=1)
-        valid &= np.all(np.isfinite(new), axis=1)
-        if errors is not None:
-            error_values = np.asarray(errors, dtype=np.float32).reshape(-1)
-            valid &= np.isfinite(error_values)
-            valid &= error_values <= self._maximum_flow_error
-        if int(np.count_nonzero(valid)) < self._minimum_points:
+        valid &= np.all(np.isfinite(next_points), axis=1)
+        if forward_errors is not None:
+            valid &= np.isfinite(forward_errors)
+            valid &= forward_errors <= self._maximum_flow_error
+        forward_count = int(np.count_nonzero(valid))
+        if forward_count < self._minimum_points:
             return None
 
-        old_valid = old[valid]
-        new_valid = new[valid]
+        old_forward = old[valid]
+        new_forward = next_points[valid]
+        kept_forward_errors = (
+            forward_errors[valid]
+            if forward_errors is not None
+            else None
+        )
+        backward = self._calculate_flow(
+            gray,
+            previous_gray,
+            new_forward.reshape(-1, 1, 2).astype(np.float32),
+            direction="backward",
+        )
+        if backward is None:
+            self._forward_backward_rejection_count += forward_count
+            return None
+        returned_points, backward_status, backward_errors = backward
+
+        round_trip_error = np.linalg.norm(
+            returned_points - old_forward,
+            axis=1,
+        )
+        finite_round_trip = round_trip_error[np.isfinite(round_trip_error)]
+        if len(finite_round_trip):
+            self._last_forward_backward_error_px = float(
+                np.median(finite_round_trip)
+            )
+
+        consistent = backward_status.copy()
+        consistent &= np.all(np.isfinite(returned_points), axis=1)
+        consistent &= np.isfinite(round_trip_error)
+        if backward_errors is not None:
+            consistent &= np.isfinite(backward_errors)
+            consistent &= backward_errors <= self._maximum_flow_error
+        consistent &= (
+            round_trip_error <= self._maximum_forward_backward_error
+        )
+        consistent_count = int(np.count_nonzero(consistent))
+        self._forward_backward_rejection_count += (
+            forward_count - consistent_count
+        )
+        if consistent_count < self._minimum_points:
+            return None
+
+        old_valid = old_forward[consistent]
+        new_valid = new_forward[consistent]
+        round_trip_valid = round_trip_error[consistent]
+        error_valid = (
+            kept_forward_errors[consistent]
+            if kept_forward_errors is not None
+            else None
+        )
+
         inliers = self._robust_inliers(old_valid, new_valid)
         old_inliers = old_valid[inliers]
         new_inliers = new_valid[inliers]
@@ -499,13 +642,27 @@ class SparseFaceMotionTracker:
 
         valid_fraction = len(new_inliers) / max(1, len(old))
         median_error = (
-            float(np.median(np.asarray(errors).reshape(-1)[valid][inliers]))
-            if errors is not None
+            float(np.median(error_valid[inliers]))
+            if error_valid is not None
             else 0.0
+        )
+        median_round_trip_error = float(
+            np.median(round_trip_valid[inliers])
+        )
+        self._last_forward_backward_error_px = median_round_trip_error
+        forward_quality = math.exp(
+            -median_error / self._maximum_flow_error
+        )
+        consistency_quality = math.exp(
+            -median_round_trip_error
+            / (2.0 * self._maximum_forward_backward_error)
         )
         quality = min(
             1.0,
-            max(0.0, valid_fraction * math.exp(-median_error / 35.0)),
+            max(
+                0.0,
+                valid_fraction * forward_quality * consistency_quality,
+            ),
         )
         return FaceObservation(new_box, new_eyes, "flow", quality)
 
