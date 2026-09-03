@@ -44,6 +44,7 @@ hidden_imports = [
     "tracker.latest_frame_runtime",
     "tracker.pose_jump_confirmation",
     "tracker.pose_stability_runtime",
+    "tracker.camera_control_lock_policy",
     "tracker.camera_control_recovery",
     "tracker.camera_control_recovery_runtime",
     "tracker.backend_factory",
