@@ -37,6 +37,14 @@ The current lock result is retained by the runtime wrapper. A successful recover
 
 If autofocus succeeds while automatic exposure fails, only autofocus is cleared; the exposure episode retains its own retry state. Recovery never restarts the camera merely because an optional control property is unsupported.
 
+## Instance-local lock observation
+
+The base tracking loop passes every warm-up lock result to its per-loop `CameraControlLockRetry` object. The recovery runtime wraps that object with a lightweight observer that records the same result after the retry state has accepted it.
+
+This avoids replacing `tracker.main.try_lock_camera_controls` at module scope. Multiple tracking-loop instances, diagnostics, and focused tests can therefore run concurrently without borrowing or restoring one another’s camera-lock handler. The observer forwards retry state, reset calls, attempt counters, timing, and completion exactly to the original controller.
+
+A malformed direct result is normalized to a bounded diagnostic dictionary before it reaches retry accounting. Observation remains tied to the capture owned by that loop instance, and camera replacement clears the associated lock state.
+
 ## Runtime layering
 
 The normal source and frozen tracker entrypoints still select `tracker.pose_stability_runtime`. That bootstrap lazily selects `CameraControlRecoveryTrackingLoop`, which subclasses the active pose-stability and latest-frame runtime stack.

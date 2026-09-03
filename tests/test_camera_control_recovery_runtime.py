@@ -12,6 +12,7 @@ from tracker import camera_control_recovery_runtime, main as tracker_main
 from tracker.camera_control_recovery import CameraControlRecoveryPolicy
 from tracker.camera_control_recovery_runtime import (
     CameraControlRecoveryTrackingLoop,
+    _CameraControlLockRetryObserver,
     _CameraControlRecoveryQualityMonitor,
     _policy_from_config_path,
 )
@@ -28,11 +29,21 @@ class _Capture:
 
 
 class _Retry:
-    def __init__(self) -> None:
+    def __init__(self, *, complete: bool = False) -> None:
+        self.complete = complete
         self.reset_count = 0
+        self.record_calls: list[tuple[int, dict[str, object]]] = []
 
     def reset(self) -> None:
         self.reset_count += 1
+
+    def record_result(
+        self,
+        timestamp_ms: int,
+        result: dict[str, object],
+    ) -> bool:
+        self.record_calls.append((timestamp_ms, result))
+        return self.complete
 
 
 class _QualityProxy:
@@ -120,11 +131,13 @@ def test_quality_proxy_session_reset_resets_monitor_and_recovery():
     owner._reset_camera_control_recovery_session.assert_called_once_with()
 
 
-def test_constructor_wraps_existing_quality_monitor(monkeypatch):
+def test_constructor_wraps_existing_quality_monitor_and_retry(monkeypatch):
     monitor = MagicMock()
+    retry = _Retry()
 
     def fake_super_init(self, *args, **kwargs):
         self._camera_quality_monitor = monitor
+        self._camera_control_lock_retry = retry
 
     monkeypatch.setattr(
         StableLatestFrameTrackingLoop,
@@ -141,6 +154,61 @@ def test_constructor_wraps_existing_quality_monitor(monkeypatch):
         _CameraControlRecoveryQualityMonitor,
     )
     assert loop._camera_quality_monitor._monitor is monitor
+    assert isinstance(
+        loop._camera_control_lock_retry,
+        _CameraControlLockRetryObserver,
+    )
+    assert loop._camera_control_lock_retry.delegate is retry
+    assert loop._camera_control_lock_retry.owner is loop
+
+
+def test_constructor_does_not_double_wrap_own_retry_observer(monkeypatch):
+    retry = _Retry()
+    created: list[_CameraControlLockRetryObserver] = []
+
+    def fake_super_init(self, *args, **kwargs):
+        observer = _CameraControlLockRetryObserver(retry, self)
+        created.append(observer)
+        self._camera_quality_monitor = None
+        self._camera_control_lock_retry = observer
+
+    monkeypatch.setattr(
+        StableLatestFrameTrackingLoop,
+        "__init__",
+        fake_super_init,
+    )
+
+    constructed = CameraControlRecoveryTrackingLoop(
+        camera_control_recovery_policy=CameraControlRecoveryPolicy()
+    )
+
+    assert constructed._camera_control_lock_retry is created[0]
+
+
+def test_constructor_rebinds_foreign_retry_observer(monkeypatch):
+    retry = _Retry()
+    foreign_owner = _bare_loop(CameraControlRecoveryPolicy())
+    foreign = _CameraControlLockRetryObserver(retry, foreign_owner)
+
+    def fake_super_init(self, *args, **kwargs):
+        self._camera_quality_monitor = None
+        self._camera_control_lock_retry = foreign
+
+    monkeypatch.setattr(
+        StableLatestFrameTrackingLoop,
+        "__init__",
+        fake_super_init,
+    )
+
+    constructed = CameraControlRecoveryTrackingLoop(
+        camera_control_recovery_policy=CameraControlRecoveryPolicy()
+    )
+    rebound = constructed._camera_control_lock_retry
+
+    assert rebound is not foreign
+    assert isinstance(rebound, _CameraControlLockRetryObserver)
+    assert rebound.delegate is retry
+    assert rebound.owner is constructed
 
 
 def test_camera_reopen_stores_capture_and_resets_session(monkeypatch):
@@ -249,45 +317,92 @@ def test_exposure_recovery_does_not_unlock_focus(monkeypatch):
     assert loop.camera_control_lock_state["autofocus_locked"] is True
 
 
-def test_lock_interceptor_records_result_and_restores_global(monkeypatch):
+def test_retry_observer_records_result_without_rewriting_global():
     capture = object()
     loop = _bare_loop(CameraControlRecoveryPolicy())
     loop._camera_control_recovery_capture = capture
+    retry = _Retry(complete=True)
+    observer = _CameraControlLockRetryObserver(retry, loop)
+    original_global = tracker_main.try_lock_camera_controls
     expected = {
         "autofocus_locked": True,
         "focus_preserved": True,
     }
-    original = lambda _capture: expected
-    monkeypatch.setattr(tracker_main, "try_lock_camera_controls", original)
 
-    def fake_run(self, *args, **kwargs):
-        return tracker_main.try_lock_camera_controls(capture)
+    complete = observer.record_result(1234, expected)
 
-    monkeypatch.setattr(StableLatestFrameTrackingLoop, "run", fake_run)
-
-    result = loop.run()
-
-    assert result == expected
+    assert complete
+    assert retry.record_calls == [(1234, expected)]
     assert loop.camera_control_lock_state == expected
-    assert tracker_main.try_lock_camera_controls is original
+    assert tracker_main.try_lock_camera_controls is original_global
 
 
-def test_lock_interceptor_restores_global_when_tracking_raises(monkeypatch):
-    loop = _bare_loop(CameraControlRecoveryPolicy())
-    original = lambda _capture: {}
-    monkeypatch.setattr(tracker_main, "try_lock_camera_controls", original)
-    monkeypatch.setattr(
-        StableLatestFrameTrackingLoop,
-        "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("tracking failed")
-        ),
+def test_retry_observers_are_isolated_between_loop_instances():
+    first_capture = object()
+    second_capture = object()
+    first = _bare_loop(CameraControlRecoveryPolicy())
+    second = _bare_loop(CameraControlRecoveryPolicy())
+    first._camera_control_recovery_capture = first_capture
+    second._camera_control_recovery_capture = second_capture
+    first_observer = _CameraControlLockRetryObserver(_Retry(), first)
+    second_observer = _CameraControlLockRetryObserver(_Retry(), second)
+
+    first_observer.record_result(
+        1000,
+        {"autofocus_locked": True, "focus_preserved": True},
     )
 
-    with pytest.raises(RuntimeError, match="tracking failed"):
-        loop.run()
+    assert first.camera_control_lock_state["autofocus_locked"] is True
+    assert second.camera_control_lock_state == {}
 
-    assert tracker_main.try_lock_camera_controls is original
+    second_observer.record_result(
+        1001,
+        {"auto_exposure_locked": True, "exposure_preserved": True},
+    )
+
+    assert first.camera_control_lock_state.get("auto_exposure_locked") is None
+    assert second.camera_control_lock_state["auto_exposure_locked"] is True
+
+
+def test_retry_observer_normalizes_malformed_lock_result():
+    capture = object()
+    loop = _bare_loop(CameraControlRecoveryPolicy())
+    loop._camera_control_recovery_capture = capture
+    retry = _Retry()
+    observer = _CameraControlLockRetryObserver(retry, loop)
+
+    assert not observer.record_result(1000, object())
+
+    recorded = retry.record_calls[0][1]
+    assert recorded == {
+        "errors": ("camera control lock returned invalid data",)
+    }
+    assert loop.camera_control_lock_state == recorded
+
+
+def test_retry_observer_forwards_reset_and_attributes():
+    loop = _bare_loop(CameraControlRecoveryPolicy())
+    retry = _Retry(complete=True)
+    observer = _CameraControlLockRetryObserver(retry, loop)
+
+    observer.reset()
+
+    assert observer.complete is True
+    assert retry.reset_count == 1
+
+
+def test_runtime_contains_no_module_global_lock_replacement():
+    source = Path("tracker/camera_control_recovery_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    runtime_class = source.split(
+        "class CameraControlRecoveryTrackingLoop",
+        1,
+    )[1].split("\ndef main()", 1)[0]
+
+    assert "tracker_main.try_lock_camera_controls =" not in source
+    assert "def run(" not in runtime_class
+    assert "_CameraControlLockRetryObserver(retry, self)" in runtime_class
 
 
 def test_runtime_inherits_pose_stability_and_latest_frame_stack():
