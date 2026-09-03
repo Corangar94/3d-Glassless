@@ -20,6 +20,11 @@ struct Result {
     float delta_x_cm = 0.0f;
     float delta_y_cm = 0.0f;
     float delta_z_cm = 0.0f;
+    float input_xy_speed_cm_s = 0.0f;
+    float input_z_speed_cm_s = 0.0f;
+    float bounded_xy_speed_cm_s = 0.0f;
+    float bounded_z_speed_cm_s = 0.0f;
+    bool velocity_limited = false;
     bool rewound = false;
     bool applied = false;
 };
@@ -55,6 +60,16 @@ inline Vector2 ClampMagnitude(
         static_cast<float>(dx * scale),
         static_cast<float>(dy * scale),
     };
+}
+
+inline float SaturatingMagnitude(float x, float y) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return 0.0f;
+    const double magnitude = std::hypot(
+        static_cast<double>(x),
+        static_cast<double>(y));
+    return static_cast<float>(std::min(
+        magnitude,
+        static_cast<double>(std::numeric_limits<float>::max())));
 }
 
 inline uint32_t ResidualDelayMs(
@@ -122,7 +137,9 @@ inline Result Extrapolate(
     uint32_t maximum_residual_ms = 20,
     float maximum_xy_delta_cm = 2.0f,
     float maximum_z_delta_cm = 2.5f,
-    uint32_t maximum_rewind_ms = 80) {
+    uint32_t maximum_rewind_ms = 80,
+    float maximum_xy_speed_cm_s = 300.0f,
+    float maximum_z_speed_cm_s = 360.0f) {
     Result result;
     result.x = x;
     result.y = y;
@@ -134,6 +151,24 @@ inline Result Extrapolate(
         || !std::isfinite(vz_cm_s)) {
         return result;
     }
+
+    result.input_xy_speed_cm_s = SaturatingMagnitude(vx_cm_s, vy_cm_s);
+    result.input_z_speed_cm_s = std::fabs(vz_cm_s);
+    const Vector2 bounded_xy_velocity = ClampMagnitude(
+        vx_cm_s,
+        vy_cm_s,
+        maximum_xy_speed_cm_s);
+    const float bounded_z_velocity = ClampAbs(
+        vz_cm_s,
+        maximum_z_speed_cm_s);
+    result.bounded_xy_speed_cm_s = SaturatingMagnitude(
+        bounded_xy_velocity.x,
+        bounded_xy_velocity.y);
+    result.bounded_z_speed_cm_s = std::fabs(bounded_z_velocity);
+    result.velocity_limited = (
+        result.bounded_xy_speed_cm_s < result.input_xy_speed_cm_s
+        || result.bounded_z_speed_cm_s < result.input_z_speed_cm_s
+    );
 
     result.confidence_scale = PredictionConfidenceScale(confidence);
     if (result.confidence_scale <= 0.0f) return result;
@@ -153,13 +188,13 @@ inline Result Extrapolate(
     const float dt = static_cast<float>(result.signed_residual_ms) / 1000.0f;
     const float confidence_dt = dt * result.confidence_scale;
     const Vector2 xy_delta = ClampMagnitude(
-        vx_cm_s * confidence_dt,
-        vy_cm_s * confidence_dt,
+        bounded_xy_velocity.x * confidence_dt,
+        bounded_xy_velocity.y * confidence_dt,
         maximum_xy_delta_cm);
     result.delta_x_cm = xy_delta.x;
     result.delta_y_cm = xy_delta.y;
     result.delta_z_cm = ClampAbs(
-        vz_cm_s * confidence_dt,
+        bounded_z_velocity * confidence_dt,
         maximum_z_delta_cm);
     result.x += result.delta_x_cm;
     result.y += result.delta_y_cm;
