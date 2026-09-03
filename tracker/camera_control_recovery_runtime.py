@@ -18,6 +18,50 @@ from tracker.camera_control_recovery import (
 from tracker.pose_stability_runtime import StableLatestFrameTrackingLoop
 
 
+class _CameraControlLockRetryObserver:
+    """Record lock results for one loop without mutating module-global state."""
+
+    def __init__(
+        self,
+        retry: object,
+        owner: "CameraControlRecoveryTrackingLoop",
+    ) -> None:
+        self._retry = retry
+        self._owner = owner
+
+    @property
+    def delegate(self) -> object:
+        return self._retry
+
+    def record_result(
+        self,
+        timestamp_ms: int,
+        result: object,
+    ) -> bool:
+        normalized = (
+            result
+            if isinstance(result, dict)
+            else {
+                "errors": (
+                    "camera control lock returned invalid data",
+                )
+            }
+        )
+        complete = bool(
+            self._retry.record_result(timestamp_ms, normalized)
+        )
+        capture = self._owner._camera_control_recovery_capture
+        if capture is not None:
+            self._owner._record_camera_control_lock(
+                capture,
+                normalized,
+            )
+        return complete
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._retry, name)
+
+
 class _CameraControlRecoveryQualityMonitor:
     """Observe quality after the existing monitor computes its status."""
 
@@ -90,6 +134,16 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         self._camera_control_recovery_capture: object | None = None
         self._last_camera_control_recovery_result: dict[str, object] = {}
         super().__init__(*args, **kwargs)
+
+        retry = getattr(self, "_camera_control_lock_retry", None)
+        if retry is not None and not isinstance(
+            retry,
+            _CameraControlLockRetryObserver,
+        ):
+            self._camera_control_lock_retry = (
+                _CameraControlLockRetryObserver(retry, self)
+            )
+
         monitor = getattr(self, "_camera_quality_monitor", None)
         if monitor is not None:
             self._camera_quality_monitor = (
@@ -205,32 +259,6 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
             + ", ".join(recovered)
             + "; restarting quality warm-up"
         )
-
-    def run(self, *args: object, **kwargs: object) -> Any:
-        original_lock = getattr(
-            tracker_main,
-            "try_lock_camera_controls",
-            None,
-        )
-        if not callable(original_lock):
-            return super().run(*args, **kwargs)
-
-        def record_lock(capture: object) -> dict[str, object]:
-            result = original_lock(capture)
-            if not isinstance(result, dict):
-                result = {
-                    "errors": (
-                        "camera control lock returned invalid data",
-                    )
-                }
-            self._record_camera_control_lock(capture, result)
-            return result
-
-        tracker_main.try_lock_camera_controls = record_lock
-        try:
-            return super().run(*args, **kwargs)
-        finally:
-            tracker_main.try_lock_camera_controls = original_lock
 
 
 def main() -> None:
