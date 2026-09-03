@@ -1,8 +1,26 @@
 # Automatic camera-control recovery
 
-After a stable camera-quality warm-up, Glassless3D may lock autofocus and automatic exposure to reduce focus pumping and brightness hunting. The transactional lock path preserves the current manual value and rolls automatic mode back on if that value cannot be restored.
+After a stable camera-quality warm-up, Glassless3D locks autofocus and automatic exposure when the webcam backend can complete a reversible transaction. The transactional lock path preserves the current manual value and rolls automatic mode back on if that value cannot be restored.
 
 A later lighting change, moved camera, or focus disturbance can still make a previously safe manual setting unsuitable. The packaged tracker therefore monitors quality after locking and selectively restores only the automatic controller implicated by sustained degradation.
+
+## Default and opt-out
+
+The normal source and frozen tracker paths enable safe control stabilization by default:
+
+```yaml
+camera:
+  lock_controls_after_warmup: true
+```
+
+Existing configuration files that omit the key receive the same packaged default. Set it to `false` to leave autofocus and automatic exposure untouched:
+
+```yaml
+camera:
+  lock_controls_after_warmup: false
+```
+
+An invalid explicit value fails closed: Glassless3D logs the problem and leaves the automatic controls enabled. Direct library callers that do not supply a packaged configuration path retain the constructor behavior they selected explicitly.
 
 ## Recovery policy
 
@@ -49,12 +67,15 @@ A malformed direct result is normalized to a bounded diagnostic dictionary befor
 
 The normal source and frozen tracker entrypoints still select `tracker.pose_stability_runtime`. That bootstrap lazily selects `CameraControlRecoveryTrackingLoop`, which subclasses the active pose-stability and latest-frame runtime stack.
 
-Direct callers of `TrackingLoop`, `LatestFrameTrackingLoop`, or `StableLatestFrameTrackingLoop` keep their existing behavior. The recovery modules are listed explicitly in the frozen-package hidden imports.
+The recovery runtime reads the camera configuration once during construction. It enables the lock controller for an absent or true setting, disables it for an explicit false or invalid setting, and leaves direct no-config callers untouched. The lock itself still occurs only after the camera-quality admission window proves the image stable.
+
+Direct callers of `TrackingLoop`, `LatestFrameTrackingLoop`, or `StableLatestFrameTrackingLoop` keep their existing behavior. The lock-policy and recovery modules are listed explicitly in the frozen-package hidden imports.
 
 ## Diagnostics
 
 The runtime exposes:
 
+- whether camera-control locking is active;
 - the configured recovery policy;
 - the most recent transactional camera-lock state;
 - the most recent recovery result;
