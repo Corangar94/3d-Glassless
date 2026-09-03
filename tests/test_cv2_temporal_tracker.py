@@ -158,20 +158,36 @@ def _points() -> np.ndarray:
     ).reshape(-1, 1, 2)
 
 
+def _full_status(count: int) -> np.ndarray:
+    return np.ones((count, 1), dtype=np.uint8)
+
+
+def _zero_errors(count: int) -> np.ndarray:
+    return np.zeros((count, 1), dtype=np.float32)
+
+
 def test_sparse_flow_tracks_translation_scale_and_eyes():
     initial_points = _points()
+    calls = 0
 
     def features(_gray, **_kwargs):
         return initial_points.copy()
 
     def flow(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
         points = np.asarray(previous).reshape(-1, 2)
         center = np.median(points, axis=0)
-        transformed = (points - center) * 1.05 + center + np.array((3.0, -2.0))
+        translation = np.array((3.0, -2.0), dtype=np.float32)
+        if calls == 1:
+            transformed = (points - center) * 1.05 + center + translation
+        else:
+            transformed = (points - center) / 1.05 + center - translation
+        count = len(points)
         return (
             transformed.astype(np.float32).reshape(-1, 1, 2),
-            np.ones((len(points), 1), dtype=np.uint8),
-            np.zeros((len(points), 1), dtype=np.float32),
+            _full_status(count),
+            _zero_errors(count),
         )
 
     tracker = SparseFaceMotionTracker(
@@ -186,6 +202,7 @@ def test_sparse_flow_tracks_translation_scale_and_eyes():
     observation = tracker.track(gray.copy())
 
     assert observation is not None
+    assert calls == 2
     assert observation.source == "flow"
     assert observation.box.center[0] == pytest.approx(box.center[0] + 3.0)
     assert observation.box.center[1] == pytest.approx(box.center[1] - 2.0)
@@ -196,6 +213,8 @@ def test_sparse_flow_tracks_translation_scale_and_eyes():
         rel=0.02,
     )
     assert observation.quality == pytest.approx(1.0)
+    assert tracker.last_forward_backward_error_px == pytest.approx(0.0)
+    assert tracker.forward_backward_rejection_count == 0
 
 
 def test_sparse_flow_rejects_insufficient_points_and_excess_motion():
@@ -208,7 +227,7 @@ def test_sparse_flow_rejects_insufficient_points_and_excess_motion():
         count = len(previous)
         status = np.zeros((count, 1), dtype=np.uint8)
         status[:3] = 1
-        return previous.copy(), status, np.zeros((count, 1), dtype=np.float32)
+        return previous.copy(), status, _zero_errors(count)
 
     tracker = SparseFaceMotionTracker(
         feature_function=features,
@@ -218,12 +237,15 @@ def test_sparse_flow_rejects_insufficient_points_and_excess_motion():
     tracker.initialize(gray, FaceBox(25.0, 25.0, 50.0, 50.0))
     assert tracker.track(gray.copy()) is None
 
+    calls = 0
+
     def too_far(_old, _new, previous, _unused, **_kwargs):
-        moved = previous + np.array((100.0, 0.0), dtype=np.float32)
+        nonlocal calls
+        calls += 1
+        direction = 100.0 if calls == 1 else -100.0
+        moved = previous + np.array((direction, 0.0), dtype=np.float32)
         count = len(previous)
-        return moved, np.ones((count, 1), dtype=np.uint8), np.zeros(
-            (count, 1), dtype=np.float32
-        )
+        return moved, _full_status(count), _zero_errors(count)
 
     tracker = SparseFaceMotionTracker(
         feature_function=features,
@@ -231,6 +253,139 @@ def test_sparse_flow_rejects_insufficient_points_and_excess_motion():
     )
     tracker.initialize(gray, FaceBox(25.0, 25.0, 50.0, 50.0))
     assert tracker.track(gray.copy()) is None
+    assert calls == 2
+    assert tracker.forward_backward_rejection_count == 0
+
+
+def test_sparse_flow_rejects_forward_tracks_that_fail_round_trip():
+    initial_points = _points()
+    calls = 0
+
+    def features(_gray, **_kwargs):
+        return initial_points.copy()
+
+    def inconsistent_flow(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
+        points = np.asarray(previous, dtype=np.float32)
+        if calls == 1:
+            points = points + np.array((2.0, 0.0), dtype=np.float32)
+        count = len(points)
+        return points, _full_status(count), _zero_errors(count)
+
+    tracker = SparseFaceMotionTracker(
+        feature_function=features,
+        flow_function=inconsistent_flow,
+    )
+    gray = np.zeros((120, 160), dtype=np.uint8)
+    tracker.initialize(gray, FaceBox(25.0, 25.0, 50.0, 50.0))
+
+    assert tracker.track(gray.copy()) is None
+    assert calls == 2
+    assert tracker.last_forward_backward_error_px == pytest.approx(2.0)
+    assert tracker.forward_backward_rejection_count == len(initial_points)
+
+
+def test_sparse_flow_keeps_only_round_trip_consistent_points():
+    initial_points = _points()
+    calls = 0
+
+    def features(_gray, **_kwargs):
+        return initial_points.copy()
+
+    def partially_consistent_flow(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
+        count = len(previous)
+        if calls == 1:
+            moved = previous + np.array((4.0, -1.0), dtype=np.float32)
+            return moved, _full_status(count), _zero_errors(count)
+        returned = initial_points.copy()
+        returned[-2:] += np.array((3.0, 0.0), dtype=np.float32)
+        return returned, _full_status(count), _zero_errors(count)
+
+    tracker = SparseFaceMotionTracker(
+        feature_function=features,
+        flow_function=partially_consistent_flow,
+    )
+    gray = np.zeros((120, 160), dtype=np.uint8)
+    box = FaceBox(25.0, 25.0, 50.0, 50.0)
+    tracker.initialize(gray, box)
+
+    observation = tracker.track(gray.copy())
+
+    assert observation is not None
+    assert observation.box.center[0] == pytest.approx(box.center[0] + 4.0)
+    assert observation.box.center[1] == pytest.approx(box.center[1] - 1.0)
+    assert observation.quality == pytest.approx(0.75)
+    assert tracker.last_forward_backward_error_px == pytest.approx(0.0)
+    assert tracker.forward_backward_rejection_count == 2
+
+
+def test_sparse_flow_round_trip_error_reduces_quality_before_rejection():
+    initial_points = _points()
+    calls = 0
+
+    def features(_gray, **_kwargs):
+        return initial_points.copy()
+
+    def noisy_inverse(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
+        count = len(previous)
+        if calls == 1:
+            moved = previous + np.array((1.0, 0.0), dtype=np.float32)
+            return moved, _full_status(count), _zero_errors(count)
+        returned = initial_points + np.array((0.75, 0.0), dtype=np.float32)
+        return returned, _full_status(count), _zero_errors(count)
+
+    tracker = SparseFaceMotionTracker(
+        feature_function=features,
+        flow_function=noisy_inverse,
+    )
+    gray = np.zeros((120, 160), dtype=np.uint8)
+    tracker.initialize(gray, FaceBox(25.0, 25.0, 50.0, 50.0))
+
+    observation = tracker.track(gray.copy())
+
+    assert observation is not None
+    assert observation.quality == pytest.approx(np.exp(-0.25), rel=1e-4)
+    assert tracker.last_forward_backward_error_px == pytest.approx(0.75)
+    assert tracker.forward_backward_rejection_count == 0
+
+
+def test_sparse_flow_malformed_backward_output_fails_closed():
+    initial_points = _points()
+    calls = 0
+
+    def features(_gray, **_kwargs):
+        return initial_points.copy()
+
+    def malformed_backward(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
+        count = len(previous)
+        if calls == 1:
+            return (
+                previous.copy(),
+                _full_status(count),
+                _zero_errors(count),
+            )
+        return (
+            previous[:-1].copy(),
+            _full_status(count - 1),
+            _zero_errors(count - 1),
+        )
+
+    tracker = SparseFaceMotionTracker(
+        feature_function=features,
+        flow_function=malformed_backward,
+    )
+    gray = np.zeros((120, 160), dtype=np.uint8)
+    tracker.initialize(gray, FaceBox(25.0, 25.0, 50.0, 50.0))
+
+    assert tracker.track(gray.copy()) is None
+    assert tracker.forward_backward_rejection_count == len(initial_points)
 
 
 def test_sparse_flow_contains_feature_and_flow_backend_errors():
@@ -254,8 +409,45 @@ def test_sparse_flow_contains_feature_and_flow_backend_errors():
         flow_function=broken_flow,
     )
     tracker.initialize(gray, FaceBox(20.0, 20.0, 50.0, 50.0))
-    with pytest.raises(Cv2FallbackTrackingError, match="optical flow failed"):
+    with pytest.raises(Cv2FallbackTrackingError, match="forward optical flow failed"):
         tracker.track(gray.copy())
+
+
+def test_sparse_flow_contains_backward_flow_backend_error():
+    calls = 0
+
+    def features(_gray, **_kwargs):
+        return _points()
+
+    def broken_backward(_old, _new, previous, _unused, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("backward flow failure")
+        count = len(previous)
+        return previous.copy(), _full_status(count), _zero_errors(count)
+
+    tracker = SparseFaceMotionTracker(
+        feature_function=features,
+        flow_function=broken_backward,
+    )
+    gray = np.zeros((120, 160), dtype=np.uint8)
+    tracker.initialize(gray, FaceBox(20.0, 20.0, 50.0, 50.0))
+
+    with pytest.raises(Cv2FallbackTrackingError, match="backward optical flow failed"):
+        tracker.track(gray.copy())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.0, -1.0, float("nan"), float("inf")],
+)
+def test_sparse_flow_requires_finite_positive_round_trip_limit(value):
+    with pytest.raises(
+        ValueError,
+        match="maximum_forward_backward_error",
+    ):
+        SparseFaceMotionTracker(maximum_forward_backward_error=value)
 
 
 def test_real_opencv_flow_tracks_a_synthetic_face_patch():
@@ -275,3 +467,5 @@ def test_real_opencv_flow_tracks_a_synthetic_face_patch():
     assert observation.box.center[0] == pytest.approx(box.center[0] + 4.0, abs=1.0)
     assert observation.box.center[1] == pytest.approx(box.center[1] + 3.0, abs=1.0)
     assert observation.quality > 0.5
+    assert tracker.last_forward_backward_error_px is not None
+    assert tracker.last_forward_backward_error_px < 0.5
