@@ -169,7 +169,11 @@ class FaceTracker:
     ) -> tuple[np.ndarray, float]:
         height, width = frame_bgr.shape[:2]
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        scale = min(1.0, self._detection_width_px / max(1, width))
+        longest_edge = max(width, height)
+        scale = min(
+            1.0,
+            self._detection_width_px / max(1, longest_edge),
+        )
         if scale < 1.0:
             gray = cv2.resize(
                 gray,
