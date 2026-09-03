@@ -197,17 +197,33 @@ class CameraQualityMonitor:
                 problems=("no camera frames measured",),
                 stable_for_lock=False,
             )
-        brightness_values = [sample.brightness for sample in self._samples]
-        sharpness_values = [sample.sharpness for sample in self._samples]
+
+        # Image metrics are intentionally sampled less often than camera
+        # cadence. Carried values attached to intermediate frame samples are
+        # diagnostics, not independent observations, and must not receive extra
+        # statistical weight merely because more frames arrived before the next
+        # analysis event.
+        analyzed_samples = [
+            sample for sample in self._samples if sample.analyzed
+        ]
+        analysis_samples_in_window = len(analyzed_samples)
+        image_samples = (
+            analyzed_samples
+            if analyzed_samples
+            else [self._samples[-1]]
+        )
+        brightness_values = [
+            sample.brightness for sample in image_samples
+        ]
+        sharpness_values = [
+            sample.sharpness for sample in image_samples
+        ]
         intervals = [
             sample.frame_interval_ms
             for sample in self._samples
             if sample.frame_interval_ms is not None
             and sample.frame_interval_ms > 0.0
         ]
-        analysis_samples_in_window = sum(
-            1 for sample in self._samples if sample.analyzed
-        )
         brightness = float(statistics.median(brightness_values))
         brightness_jitter = (
             float(statistics.pstdev(brightness_values))
@@ -218,10 +234,14 @@ class CameraQualityMonitor:
         interval = float(statistics.median(intervals)) if intervals else 0.0
         fps = 1000.0 / interval if interval > 0.0 else None
         dark_fraction = float(
-            statistics.median(sample.dark_fraction for sample in self._samples)
+            statistics.median(
+                sample.dark_fraction for sample in image_samples
+            )
         )
         clipped_fraction = float(
-            statistics.median(sample.clipped_fraction for sample in self._samples)
+            statistics.median(
+                sample.clipped_fraction for sample in image_samples
+            )
         )
         problems: list[str] = []
         if brightness < self._brightness_range[0] or dark_fraction > 0.35:
