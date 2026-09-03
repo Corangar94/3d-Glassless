@@ -15,6 +15,11 @@ import struct
 import threading
 
 from tracker.pose import FilteredPose, monotonic_ms
+from tracker.prediction_lead import (
+    PredictionLeadEncoding,
+    encode_prediction_lead,
+    sanitize_prediction_lead,
+)
 from tracker.sequence_mapping import (
     DEFAULT_SEQUENCE_ATTACH_ATTEMPTS,
     next_sequence_write_markers,
@@ -28,7 +33,6 @@ POSE_V2_FORMAT = "<IIffffffffffIIII"
 POSE_V2_SIZE = struct.calcsize(POSE_V2_FORMAT)
 POSE_V2_SEQ_SIZE = 4
 _UINT32_MASK = 0xFFFF_FFFF
-_MAX_ENCODED_PREDICTION_LEAD_MS = 1000
 
 _PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
@@ -67,15 +71,19 @@ class PosePacketV2:
     prediction_lead_ms: int = 0
 
 
+def _prediction_lead_encoding(
+    pose: FilteredPose,
+    publish_timestamp_ms: int,
+) -> PredictionLeadEncoding:
+    return encode_prediction_lead(
+        pose.prediction_target_timestamp_ms,
+        publish_timestamp_ms,
+    )
+
+
 def _prediction_lead_ms(pose: FilteredPose, publish_timestamp_ms: int) -> int:
-    """Encode only a small forward producer horizon into the old reserved word."""
-    target = int(pose.prediction_target_timestamp_ms) & _UINT32_MASK
-    if target == 0:
-        return 0
-    lead = (target - int(publish_timestamp_ms)) & _UINT32_MASK
-    if lead > _MAX_ENCODED_PREDICTION_LEAD_MS:
-        return 0
-    return lead
+    """Retain the historical value-only helper for focused direct callers."""
+    return _prediction_lead_encoding(pose, publish_timestamp_ms).value_ms
 
 
 class PoseStateWriter:
@@ -144,13 +152,18 @@ class PoseStateWriter:
             )
             if not all(math.isfinite(float(value)) for value in values):
                 raise ValueError("pose packet contains non-finite values")
-            # The old reserved uint32 now carries producer prediction lead.
-            # Mark that semantic explicitly so a newer overlay can remain safe when
-            # paired with an older V2 writer that still leaves the word at zero.
-            flags = (
-                (PoseFlags.VALID if valid else PoseFlags(0))
-                | PoseFlags.PREDICTION_LEAD_VALID
+
+            publish_timestamp_ms = int(
+                pose.publish_timestamp_ms or monotonic_ms()
+            ) & _UINT32_MASK
+            prediction_lead = _prediction_lead_encoding(
+                pose,
+                publish_timestamp_ms,
             )
+
+            flags = PoseFlags.VALID if valid else PoseFlags(0)
+            if prediction_lead.valid:
+                flags |= PoseFlags.PREDICTION_LEAD_VALID
             if pose.predicted:
                 flags |= PoseFlags.PREDICTED
             if any(
@@ -158,13 +171,7 @@ class PoseStateWriter:
                 for value in (pose.yaw_deg, pose.pitch_deg, pose.roll_deg)
             ):
                 flags |= PoseFlags.ORIENTATION_VALID
-            publish_timestamp_ms = int(
-                pose.publish_timestamp_ms or monotonic_ms()
-            ) & _UINT32_MASK
-            prediction_lead_ms = _prediction_lead_ms(
-                pose,
-                publish_timestamp_ms,
-            )
+
             data = struct.pack(
                 POSE_V2_FORMAT,
                 POSE_V2_MAGIC,
@@ -173,7 +180,7 @@ class PoseStateWriter:
                 int(pose.capture_timestamp_ms) & _UINT32_MASK,
                 publish_timestamp_ms,
                 int(flags),
-                prediction_lead_ms,
+                prediction_lead.value_ms,
             )
             sequence = (
                 ctypes.c_uint32.from_address(self._seq_view)
@@ -294,9 +301,17 @@ class PoseStateReader:
         values = unpacked[2:12]
         if not all(math.isfinite(float(value)) for value in values):
             return None
-        prediction_lead_ms = int(unpacked[15])
-        if prediction_lead_ms > _MAX_ENCODED_PREDICTION_LEAD_MS:
-            prediction_lead_ms = 0
+
+        flags = PoseFlags(unpacked[14])
+        prediction_lead = sanitize_prediction_lead(
+            unpacked[15],
+            bool(flags & PoseFlags.PREDICTION_LEAD_VALID),
+        )
+        if not prediction_lead.valid:
+            flags = PoseFlags(
+                int(flags) & ~int(PoseFlags.PREDICTION_LEAD_VALID)
+            )
+
         return PosePacketV2(
             x_cm=values[0],
             y_cm=values[1],
@@ -310,8 +325,8 @@ class PoseStateReader:
             confidence=values[9],
             capture_timestamp_ms=unpacked[12],
             publish_timestamp_ms=unpacked[13],
-            flags=PoseFlags(unpacked[14]),
-            prediction_lead_ms=prediction_lead_ms,
+            flags=flags,
+            prediction_lead_ms=prediction_lead.value_ms,
         )
 
     def close(self) -> None:
