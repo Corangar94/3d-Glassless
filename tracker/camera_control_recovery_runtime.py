@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any
 
 import yaml
@@ -13,6 +14,7 @@ from tracker.camera_control_lock_policy import (
 from tracker.camera_control_recovery import (
     CameraControlRecovery,
     CameraControlRecoveryPolicy,
+    CameraControlRecoveryRequest,
     CameraControlRecoverySnapshot,
     apply_camera_control_recovery,
     parse_camera_control_recovery_policy,
@@ -67,6 +69,61 @@ class _CameraControlLockRetryObserver:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._retry, name)
+
+
+class _AutomaticControlRestoringCapture:
+    """Restore this capture's locked automatic modes before releasing it."""
+
+    __g3d_camera_control_restoring_capture__ = True
+
+    def __init__(
+        self,
+        capture: object,
+        owner: "CameraControlRecoveryTrackingLoop",
+    ) -> None:
+        self._capture = capture
+        self._owner = owner
+        self._lock_state: dict[str, object] = {}
+        self._release_lock = threading.Lock()
+        self._released = False
+
+    @property
+    def delegate(self) -> object:
+        return self._capture
+
+    @property
+    def released(self) -> bool:
+        with self._release_lock:
+            return self._released
+
+    def record_lock_state(self, state: dict[str, object]) -> None:
+        with self._release_lock:
+            if not self._released:
+                self._lock_state = dict(state)
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+            lock_state = dict(self._lock_state)
+        try:
+            self._owner._restore_automatic_controls_before_release(
+                self,
+                lock_state,
+            )
+        finally:
+            release = getattr(self._capture, "release")
+            release()
+
+    def __enter__(self) -> "_AutomaticControlRestoringCapture":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._capture, name)
 
 
 class _CameraControlRecoveryQualityMonitor:
@@ -211,6 +268,19 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
         self._camera_control_lock_state = {}
         self._last_camera_control_recovery_result = {}
 
+    def _wrap_restoring_capture(self, capture: object | None) -> object | None:
+        if (
+            capture is None
+            or not bool(getattr(self, "_lock_camera_controls", False))
+            or not callable(getattr(capture, "release", None))
+        ):
+            return capture
+        if isinstance(capture, _AutomaticControlRestoringCapture):
+            if capture._owner is self:
+                return capture
+            capture = capture.delegate
+        return _AutomaticControlRestoringCapture(capture, self)
+
     def _open_camera_with_recovery(
         self,
         camera_index: int,
@@ -227,18 +297,88 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
             camera_fps,
             backend_start_index=backend_start_index,
         )
-        self._camera_control_recovery_capture = capture
+        wrapped = self._wrap_restoring_capture(capture)
+        self._camera_control_recovery_capture = wrapped
         self._reset_camera_control_recovery_session()
-        return capture, backend_index
+        return wrapped, backend_index
 
     def _record_camera_control_lock(
         self,
         capture: object,
         result: dict[str, object],
     ) -> None:
+        if capture is not self._camera_control_recovery_capture:
+            return
+        self._camera_control_lock_state = dict(result)
+        self._camera_control_recovery.reset_episodes()
+        if isinstance(capture, _AutomaticControlRestoringCapture):
+            capture.record_lock_state(self._camera_control_lock_state)
+
+    def _synchronize_capture_lock_state(self) -> None:
+        capture = self._camera_control_recovery_capture
+        if isinstance(capture, _AutomaticControlRestoringCapture):
+            capture.record_lock_state(self._camera_control_lock_state)
+
+    def _restore_automatic_controls_before_release(
+        self,
+        capture: object,
+        lock_state: dict[str, object],
+    ) -> None:
+        request = CameraControlRecoveryRequest(
+            autofocus=bool(lock_state.get("autofocus_locked", False)),
+            auto_exposure=bool(
+                lock_state.get("auto_exposure_locked", False)
+            ),
+            reasons=("camera release",),
+        )
+        if not request.requested:
+            return
+        try:
+            result = try_restore_automatic_camera_controls(
+                capture,
+                request,
+                lock_state,
+            )
+        except Exception as error:
+            result = {
+                "autofocus_requested": request.autofocus,
+                "auto_exposure_requested": request.auto_exposure,
+                "autofocus_reenabled": False,
+                "auto_exposure_reenabled": False,
+                "errors": (
+                    "camera release control restoration failed: "
+                    f"{type(error).__name__}",
+                ),
+            }
+
+        restored: list[str] = []
+        if bool(result.get("autofocus_reenabled", False)):
+            restored.append("autofocus")
+        if bool(result.get("auto_exposure_reenabled", False)):
+            restored.append("auto exposure")
+
         if capture is self._camera_control_recovery_capture:
-            self._camera_control_lock_state = dict(result)
-            self._camera_control_recovery.reset_episodes()
+            self._last_camera_control_recovery_result = dict(result)
+            self._camera_control_lock_state = apply_camera_control_recovery(
+                lock_state,
+                result,
+            )
+        if restored:
+            print(
+                "[G3D] Restored "
+                + ", ".join(restored)
+                + " before camera release"
+            )
+        failed = request.autofocus and "autofocus" not in restored
+        failed = failed or (
+            request.auto_exposure and "auto exposure" not in restored
+        )
+        if failed:
+            errors = result.get("errors", ())
+            print(
+                "[G3D] Camera automatic-control restoration incomplete "
+                f"before release: {errors}"
+            )
 
     def _observe_camera_control_quality(
         self,
@@ -282,6 +422,7 @@ class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):
             self._camera_control_lock_state,
             result,
         )
+        self._synchronize_capture_lock_state()
         if not recovered:
             return
 
