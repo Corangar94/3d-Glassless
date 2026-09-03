@@ -58,6 +58,15 @@ int main() {
     require(result.signed_residual_ms == 10, "signed forward residual mismatch");
     require(result.residual_ms == 10, "residual magnitude mismatch");
     require(Near(result.confidence_scale, 1.0f), "full-confidence gain mismatch");
+    require(!result.velocity_limited, "ordinary velocity should remain unbounded");
+    require(
+        Near(result.input_xy_speed_cm_s, std::hypot(100.0f, -50.0f)),
+        "input XY speed diagnostic mismatch");
+    require(
+        Near(result.bounded_xy_speed_cm_s, result.input_xy_speed_cm_s),
+        "ordinary XY velocity was changed");
+    require(Near(result.input_z_speed_cm_s, 25.0f), "input Z speed mismatch");
+    require(Near(result.bounded_z_speed_cm_s, 25.0f), "ordinary Z velocity changed");
     require(Near(result.x, 2.0f), "x extrapolation mismatch");
     require(Near(result.y, 1.5f), "y extrapolation mismatch");
     require(Near(result.z, 60.25f), "z extrapolation mismatch");
@@ -82,12 +91,60 @@ int main() {
     require(Near(confidence_scaled.confidence_scale, 0.5f), "mid-confidence gain mismatch");
     require(Near(confidence_scaled.delta_x_cm, 0.5f), "confidence did not attenuate delta");
 
+    // A displacement-only cap lets a huge one-frame velocity spike hit the full
+    // 2 cm limit even when render time is just 1 ms from the producer target.
+    // The physical speed boundary keeps that first correction proportional.
+    auto spike = Extrapolate(
+        0.0f, 0.0f, 60.0f,
+        5000.0f, 0.0f, 5000.0f,
+        1, 0, 0.9f, true);
+    require(spike.applied, "bounded spike should still produce a correction");
+    require(spike.velocity_limited, "velocity spike was not reported as limited");
+    require(Near(spike.input_xy_speed_cm_s, 5000.0f), "spike input XY speed mismatch");
+    require(Near(spike.input_z_speed_cm_s, 5000.0f), "spike input Z speed mismatch");
+    require(Near(spike.bounded_xy_speed_cm_s, 300.0f), "default XY speed cap mismatch");
+    require(Near(spike.bounded_z_speed_cm_s, 360.0f), "default Z speed cap mismatch");
+    require(Near(spike.delta_x_cm, 0.30f), "1 ms XY spike correction is too large");
+    require(Near(spike.delta_y_cm, 0.0f), "1 ms spike changed Y direction");
+    require(Near(spike.delta_z_cm, 0.36f), "1 ms Z spike correction is too large");
+
+    auto confidence_limited_spike = Extrapolate(
+        0.0f, 0.0f, 60.0f,
+        5000.0f, 0.0f, 5000.0f,
+        1, 0, 0.45f, true);
+    require(
+        Near(confidence_limited_spike.confidence_scale, 0.5f),
+        "limited spike confidence scale mismatch");
+    require(
+        Near(confidence_limited_spike.delta_x_cm, 0.15f),
+        "confidence must attenuate the bounded XY velocity");
+    require(
+        Near(confidence_limited_spike.delta_z_cm, 0.18f),
+        "confidence must attenuate the bounded Z velocity");
+
+    auto custom_speed_limits = Extrapolate(
+        0.0f, 0.0f, 60.0f,
+        400.0f, 300.0f, 500.0f,
+        10, 0, 0.9f, true,
+        20, 10.0f, 10.0f, 80, 100.0f, 120.0f);
+    require(custom_speed_limits.velocity_limited, "custom speed caps were not applied");
+    require(
+        Near(custom_speed_limits.bounded_xy_speed_cm_s, 100.0f),
+        "custom XY speed cap mismatch");
+    require(
+        Near(custom_speed_limits.bounded_z_speed_cm_s, 120.0f),
+        "custom Z speed cap mismatch");
+    require(Near(custom_speed_limits.delta_x_cm, 0.8f), "custom X correction mismatch");
+    require(Near(custom_speed_limits.delta_y_cm, 0.6f), "custom Y correction mismatch");
+    require(Near(custom_speed_limits.delta_z_cm, 1.2f), "custom Z correction mismatch");
+
     auto capped = Extrapolate(
         0.0f, 0.0f, 60.0f,
         1000.0f, -1000.0f, 1000.0f,
         40, 0, 0.9f, true);
     require(capped.signed_residual_ms == 20, "maximum forward time not enforced");
     require(capped.residual_ms == 20, "maximum residual magnitude not enforced");
+    require(capped.velocity_limited, "large capped motion should limit velocity");
     require(
         Near(std::hypot(capped.delta_x_cm, capped.delta_y_cm), 2.0f),
         "combined XY delta cap not enforced");
@@ -158,6 +215,19 @@ int main() {
     require(Near(invalid_limit.delta_x_cm, 0.0f), "NaN XY cap must fail closed");
     require(Near(invalid_limit.delta_y_cm, 0.0f), "NaN XY cap must fail closed");
     require(Near(invalid_limit.delta_z_cm, 0.0f), "NaN Z cap must fail closed");
+
+    auto invalid_speed_limit = Extrapolate(
+        1.0f, 2.0f, 60.0f,
+        100.0f, 100.0f, 100.0f,
+        12, 0, 0.9f, true,
+        20, 2.0f, 2.5f, 80,
+        std::numeric_limits<float>::quiet_NaN(),
+        std::numeric_limits<float>::infinity());
+    require(invalid_speed_limit.applied, "invalid speed caps should fail closed safely");
+    require(invalid_speed_limit.velocity_limited, "invalid speed caps must report limiting");
+    require(Near(invalid_speed_limit.delta_x_cm, 0.0f), "NaN XY speed cap must stop X");
+    require(Near(invalid_speed_limit.delta_y_cm, 0.0f), "NaN XY speed cap must stop Y");
+    require(Near(invalid_speed_limit.delta_z_cm, 0.0f), "infinite Z speed cap must stop Z");
 
     auto invalid = Extrapolate(
         1.0f, 2.0f, 60.0f,
