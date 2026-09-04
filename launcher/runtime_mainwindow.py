@@ -83,8 +83,39 @@ class MainWindow(_BaseMainWindow):
         self._tracker_backend_tooltip = tooltip
         self._render_tracker_tile()
 
+    def _reset_auto_tuner_on_tracking_boundary(
+        self,
+        previous_status: object,
+        current_status: object,
+    ) -> bool:
+        """Start a fresh auto-tuning episode when tracking starts or stops."""
+        previous = str(previous_status or "").strip().lower()
+        current = str(current_status or "").strip().lower()
+        if previous == current or "tracking" not in {previous, current}:
+            return False
+        tuner = getattr(self, "_auto_tuner", None)
+        reset = getattr(tuner, "reset", None)
+        if not callable(reset):
+            return False
+        reset()
+        if hasattr(self, "_last_auto_tune_write_s"):
+            # Let the first accepted pose of a new episode publish its stable
+            # distance/smoothing values immediately instead of inheriting the
+            # previous episode's write-throttle deadline.
+            self._last_auto_tune_write_s = 0.0
+        label = getattr(self, "_auto_tune_status", None)
+        set_text = getattr(label, "setText", None)
+        if current == "tracking" and callable(set_text):
+            set_text("Auto tuning is calibrating this tracking episode")
+        return True
+
     def _on_status(self, status: str) -> None:
+        previous_status = getattr(self, "_tracking_status", None)
         super()._on_status(status)
+        self._reset_auto_tuner_on_tracking_boundary(
+            previous_status,
+            status,
+        )
         if status in {"stopped", "error"}:
             self._clear_tracker_backend_tile()
         elif self._tracker_is_running():
