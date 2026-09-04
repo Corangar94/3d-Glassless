@@ -1,9 +1,9 @@
 """Apply live shared-settings smoothing to the producer pose filter."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import math
-from collections.abc import Mapping
 import numbers
 import time
 from typing import Callable, Protocol
@@ -167,14 +167,20 @@ class LiveFilterTuningController:
 
     def _poll_time(self, now_s: object | None) -> float | None:
         if now_s is not None:
-            return self._finite_time(now_s)
+            parsed = self._finite_time(now_s)
+            if parsed is None:
+                self._last_error = "live smoothing received an invalid clock"
+            return parsed
         try:
-            return self._finite_time(self._clock())
+            parsed = self._finite_time(self._clock())
         except Exception as error:
             self._last_error = (
                 f"live smoothing clock failed: {type(error).__name__}"
             )
             return None
+        if parsed is None:
+            self._last_error = "live smoothing received an invalid clock"
+        return parsed
 
     def poll(self, now_s: object | None = None) -> bool:
         """Apply one admitted change and return whether the target changed."""
@@ -185,8 +191,6 @@ class LiveFilterTuningController:
         timestamp_s = self._poll_time(now_s)
         if timestamp_s is None:
             self._clock_error_count += 1
-            if not self._last_error:
-                self._last_error = "live smoothing received an invalid clock"
             return False
 
         if (
