@@ -72,6 +72,7 @@ hidden_imports = [
     "tracker.pose_shared_memory",
     "tracker.prediction_lead",
     "tracker.pose_step_limiter",
+    "launcher.auto_tune_timeline",
     "launcher.runtime_mainwindow",
     "launcher.tracker_backend_diagnostics",
     "launcher.camera_calibration_process",
