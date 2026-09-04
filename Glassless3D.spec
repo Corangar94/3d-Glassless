@@ -75,6 +75,7 @@ hidden_imports = [
     "tracker.prediction_lead",
     "tracker.pose_step_limiter",
     "tracker.shared_settings",
+    "launcher.auto_tune_publication",
     "launcher.auto_tune_timeline",
     "launcher.runtime_mainwindow",
     "launcher.tracker_backend_diagnostics",
