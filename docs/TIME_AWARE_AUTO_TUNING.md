@@ -46,6 +46,18 @@ Repeated identical status notifications and transitions that stay entirely outsi
 
 Direct legacy callers without the timestamped signal continue using local callback time. The runtime reinstalls its timestamp adapter if the operator toggles automatic tuning and the base window creates a new tuner instance.
 
+## Applying the tuned outputs
+
+The launcher writes the tuned values through the existing versioned `G3D_Settings` mapping.
+
+- `deadzone_mm` is consumed by the native overlay's soft hysteretic dead zone.
+- `smoothing_alpha` is polled by the packaged tracker and applied to `AdaptivePoseFilter.set_measurement_noise()` before the next accepted measurement.
+- `head_dist_cm` remains available to the launcher/settings contract as the smoothed viewing-distance estimate; the render path already uses the live filtered Z position for physical eye distance.
+
+The smoothing bridge polls at most every 100 ms and ignores changes within `0.001` of the last successfully applied value. It therefore follows the launcher's 250 ms auto-tune updates without reading shared memory on every camera frame or repeatedly applying numerical noise.
+
+The native overlay does not add a second smoothing pass. `G3D_PoseV2` remains filtered once at the producer, followed only by bounded render-time prediction. See [Live producer-filter smoothing](LIVE_FILTER_TUNING.md).
+
 ## Input and outlier safety
 
 Non-finite coordinates or timestamps, booleans used as measurements, and negative timestamps are rejected without poisoning the long-lived EMA state. Before entering the speed EMA, instantaneous three-dimensional speed is capped at 300 cm/s. The output was already fully responsive above 20 cm/s, so the cap does not delay deliberate motion; it only bounds how long one pathological sample can keep the tuner in its responsive state.
@@ -60,4 +72,4 @@ The established tuning ranges are unchanged:
 - at or above 20 cm/s: smoothing `0.06` and dead zone `0.5 mm`;
 - between those speeds: linear blending of those output values.
 
-Only the temporal source, estimation, and failure behavior changed.
+The temporal source, estimation, failure behavior, and producer-filter application are now explicit end to end.
