@@ -57,10 +57,18 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
         config_path = kwargs.get("config_path")
         self._live_filter_tuning: LiveFilterTuningController | None = None
         self._live_filter_settings_reader: object | None = None
+        self._live_filter_tuning_last_snapshot: (
+            LiveFilterTuningSnapshot | None
+        ) = None
+        self._live_filter_tuning_last_policy: (
+            LiveFilterTuningPolicy | None
+        ) = None
         super().__init__(*args, **kwargs)
 
         target = getattr(self, "_smoother", None)
         if not callable(getattr(target, "set_measurement_noise", None)):
+            if live_filter_settings_reader is not _DEFAULT_SETTINGS_READER:
+                _close_reader(live_filter_settings_reader)
             return
 
         reader = live_filter_settings_reader
@@ -76,13 +84,15 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
         if reader is None:
             return
 
+        policy = live_filter_tuning_policy or LiveFilterTuningPolicy()
         self._live_filter_settings_reader = reader
         try:
             self._live_filter_tuning = LiveFilterTuningController(
                 reader,
                 target,
-                live_filter_tuning_policy or LiveFilterTuningPolicy(),
+                policy,
             )
+            self._live_filter_tuning_last_policy = policy
         except Exception as error:
             _close_reader(reader)
             self._live_filter_settings_reader = None
@@ -94,13 +104,21 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
     @property
     def live_filter_tuning_policy(self) -> LiveFilterTuningPolicy | None:
         controller = self._live_filter_tuning
-        return None if controller is None else controller.policy
+        return (
+            controller.policy
+            if controller is not None
+            else self._live_filter_tuning_last_policy
+        )
 
     def live_filter_tuning_snapshot(
         self,
     ) -> LiveFilterTuningSnapshot | None:
         controller = self._live_filter_tuning
-        return None if controller is None else controller.snapshot()
+        return (
+            controller.snapshot()
+            if controller is not None
+            else self._live_filter_tuning_last_snapshot
+        )
 
     def _poll_live_filter_tuning(self) -> bool:
         controller = self._live_filter_tuning
@@ -125,6 +143,7 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
         self._live_filter_settings_reader = None
         if controller is not None:
             controller.close()
+            self._live_filter_tuning_last_snapshot = controller.snapshot()
         elif reader is not None:
             _close_reader(reader)
 
