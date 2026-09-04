@@ -78,6 +78,7 @@ hidden_imports = [
     "launcher.auto_tune_publication",
     "launcher.auto_tune_timeline",
     "launcher.status_emission",
+    "launcher.tracker_poll_admission",
     "launcher.runtime_mainwindow",
     "launcher.tracker_backend_diagnostics",
     "launcher.camera_calibration_process",
