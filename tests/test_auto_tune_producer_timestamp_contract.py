@@ -8,10 +8,14 @@ def _source(path: str) -> str:
 def test_tracker_process_emits_status_before_legacy_and_timestamped_pose():
     source = _source("launcher/tracker_process.py")
     poll = source.split("    def _poll(self) -> None:", 1)[1]
+    fresh = poll.split("        if ts != self._last_ts:", 1)[1].split(
+        "        else:\n            stale_ms",
+        1,
+    )[0]
 
-    status = poll.index("self.status_changed.emit(")
-    legacy = poll.index("self.position_updated.emit(")
-    sampled = poll.index("self.position_sampled.emit(")
+    status = fresh.index("self.status_changed.emit(")
+    legacy = fresh.index("self.position_updated.emit(")
+    sampled = fresh.index("self.position_sampled.emit(")
 
     assert status < legacy < sampled
     assert "position_updated = Signal(float, float, float)" in source
@@ -31,7 +35,9 @@ def test_runtime_replaces_only_its_legacy_pose_connection():
     )
 
     assert disconnect < connect
+    assert "if disconnected is False:" in binding
     assert "connect_legacy(self._on_position)" in binding
+    assert binding.count("try:") >= 3
     assert "return False" in binding
 
 
@@ -83,9 +89,10 @@ def test_tracking_boundaries_reset_both_tuner_and_producer_clock():
         1,
     )[1].split("    def _on_status(", 1)[0]
 
-    assert "reset_timeline()" in boundary
-    assert "reset()" in boundary
-    assert "self._last_auto_tune_write_s = 0.0" in boundary
+    timeline_reset = boundary.index("reset_timeline()")
+    tuner_reset = boundary.index("reset()", timeline_reset + 1)
+    write_reset = boundary.index("self._last_auto_tune_write_s = 0.0")
+    assert timeline_reset < tuner_reset < write_reset
 
 
 def test_frozen_package_includes_producer_timeline():
