@@ -4,7 +4,7 @@ The launcher adapts overlay smoothing and dead-zone values from the filtered vie
 
 ## Producer-time sampling
 
-The tracker child publishes each legacy `G3D` pose with a wrap-safe uint32 producer timestamp. `TrackerProcess` now exposes that timestamp through a new four-value `position_sampled` signal while retaining the historical three-value `position_updated` signal for compatibility.
+The tracker child publishes each legacy `G3D` pose with a wrap-safe uint32 producer timestamp. `TrackerProcess` exposes that timestamp through a four-value `position_sampled` signal while retaining the historical three-value `position_updated` signal for compatibility.
 
 The active runtime window disconnects its legacy pose slot only after the timestamped signal is available. It expands producer timestamps across the uint32 Windows-uptime rollover and passes those seconds into `TrackingAutoTuner`. Duplicate, backward, malformed, or out-of-range producer timestamps drop the corresponding launcher pose instead of being relabeled with the current Qt callback time.
 
@@ -13,9 +13,47 @@ This prevents UI scheduling from changing measured motion. A 33 ms movement is s
 Two clocks remain intentionally separate:
 
 - **producer pose time** drives velocity and elapsed-time EMA updates;
-- **launcher monotonic time** enforces the existing 250 ms shared-settings write throttle.
+- **launcher monotonic time** controls shared-settings publication.
 
 Queued samples therefore preserve their physical timing but cannot create a burst of settings writes when the UI resumes.
+
+## Bounded shared-settings publication
+
+The base window retains its established 250 ms auto-tune write-attempt throttle. The active runtime adds a second boundary around only the shared-memory write reached from a live auto-tune pose update.
+
+A candidate is published on the next allowed attempt when at least one value differs from the last actually published auto-tune baseline by:
+
+- viewer distance: **0.25 cm**;
+- smoothing value: **0.005**;
+- dead zone: **0.10 mm**.
+
+Smaller drift is coalesced rather than incrementing the `G3D_Settings` version four times per second. Candidates are always compared with the last published baseline, not the immediately preceding candidate, so several tiny changes accumulate and publish as soon as their total reaches a threshold.
+
+A changed candidate that remains below every threshold is forced through after **2 seconds** since the last successful publication. This bounds convergence when the tuner settles gradually. An exactly unchanged candidate is not forced periodically, avoiding version churn during a perfectly stable pose.
+
+The 250 ms attempt throttle remains authoritative for responsiveness: a meaningful change publishes at the next attempt, never through a faster parallel path. A suppressed attempt still consumes that throttle interval, so a delayed UI callback cannot create a burst of writes.
+
+## Manual-write isolation
+
+The coalescing writer is armed only for the synchronous base `_on_position` call while automatic tuning is enabled and tracking is active. All other settings writes remain immediate, including:
+
+- manual sliders and spin boxes;
+- comfort presets;
+- screen or head-distance calibration;
+- display-backend and depth-mode changes; and
+- any write from another thread.
+
+Each successful non-auto-tune write also becomes the new publication baseline. Automatic tuning therefore compares against the settings the overlay most recently received rather than an obsolete pre-edit value.
+
+Arming is thread-local and nest-safe. A manual write on another thread cannot be suppressed merely because the UI thread is processing an auto-tune pose.
+
+## Publication failure behavior
+
+A malformed candidate or invalid launcher clock fails open and is offered to the established `SharedSettingsWriter` rather than silently dropped. The invalid value can still be rejected by that writer's normal finite/range validation. A corrupt candidate or clock never becomes a comparison baseline, so the next valid candidate publishes immediately.
+
+The publication baseline and counters advance only after the delegated shared-memory write succeeds. A write exception therefore remains visible to the caller and cannot make an uncommitted value appear published.
+
+The runtime exposes a snapshot with published, suppressed, forced, fail-open, external-seed, and reset counts together with the last published values and decision reason.
 
 ## Frame-rate invariance
 
@@ -38,13 +76,13 @@ This conversion is applied independently to:
 
 A producer-sample gap of 500 ms or more starts a new tuning episode. The first post-gap pose becomes the new position and distance anchor with zero measured speed. It is not compared with the last pose from a stopped, stalled, or reconnected tracker session.
 
-The active launcher also resets both the tuner and the producer timestamp expander on every real transition into or out of `tracking`. This covers short `tracking → hold/paused → tracking` round trips that complete before the 500 ms gap threshold and lets a restarted child begin from a lower uint32 uptime value safely.
+The active launcher also resets the tuner, producer timestamp expander, publication baseline, and base write-throttle deadline on every real transition into or out of `tracking`. This covers short `tracking → hold/paused → tracking` round trips that complete before the 500 ms gap threshold and lets a restarted child begin from a lower uint32 uptime value safely.
 
-The previous episode’s write-throttle timestamp is cleared at the same boundary, allowing the first accepted pose of the new episode to publish stable distance and smoothing values immediately.
+The first accepted pose of a new episode can therefore publish stable distance and smoothing values immediately. Toggling automatic tuning also resets the producer timeline and publication baseline, and reinstalls either runtime adapter if the base window replaced its tuner.
 
-Repeated identical status notifications and transitions that stay entirely outside `tracking` do not reset the tuner. During launcher construction, the status boundary remains compatible with an absent or legacy tuner object.
+Repeated identical status notifications and transitions that stay entirely outside `tracking` do not reset the tuner. During launcher construction, the status boundary remains compatible with absent or legacy tuner/writer objects.
 
-Direct legacy callers without the timestamped signal continue using local callback time. The runtime reinstalls its timestamp adapter if the operator toggles automatic tuning and the base window creates a new tuner instance.
+Direct legacy callers without the timestamped signal continue using local callback time. Direct base-window users without the runtime publication wrapper retain the historical write behavior.
 
 ## Input and outlier safety
 
@@ -60,4 +98,4 @@ The established tuning ranges are unchanged:
 - at or above 20 cm/s: smoothing `0.06` and dead zone `0.5 mm`;
 - between those speeds: linear blending of those output values.
 
-Only the temporal source, estimation, and failure behavior changed.
+Only the temporal source, estimation, publication, and failure behavior changed.
