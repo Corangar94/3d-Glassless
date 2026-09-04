@@ -121,7 +121,13 @@ class MainWindow(_BaseMainWindow):
             connect_sampled(self._on_timestamped_position)
         except (RuntimeError, TypeError):
             if callable(connect_legacy):
-                connect_legacy(self._on_position)
+                try:
+                    connect_legacy(self._on_position)
+                except (RuntimeError, TypeError):
+                    # A dynamically patched/legacy signal may reject both
+                    # operations. Leave startup alive; the tracker process and
+                    # overlay continue even if launcher pose telemetry is absent.
+                    pass
             return False
         return True
 
