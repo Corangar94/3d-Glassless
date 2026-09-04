@@ -30,7 +30,7 @@ from tracker.shared_memory import SharedMemoryReader, TrackingStateReader
 _POLL_MS = 50           # 20 Hz UI refresh
 _STALE_MS = 800         # no SHM update for this long -> emit "paused"
 _STALE_RESTART_MS = 2500
-_INIT_TIMEOUT_S = 45.0  # current child hasn't published after this long -> "error"
+_INIT_TIMEOUT_S = 45.0  # current child hasn't exposed a usable pose -> "error"
 
 
 def _project_root() -> Path:
@@ -74,6 +74,7 @@ class TrackerProcess(QObject):
         self._last_ts: Optional[int] = None
         self._last_ts_time: float = 0.0
         self._start_time: float = 0.0
+        self._session_pose_published = False
         self._status_emission = StatusEmissionGate()
         self._poll_admission = TrackerPollAdmission(
             TrackerPollAdmissionPolicy(maximum_pose_age_ms=_STALE_MS)
@@ -163,6 +164,7 @@ class TrackerProcess(QObject):
         self._last_ts = None
         self._start_time = launch_started_s
         self._last_ts_time = launch_started_s
+        self._session_pose_published = False
         self._poll_admission.reset_session(
             wire_timestamp_ms(launch_started_s)
         )
@@ -275,10 +277,11 @@ class TrackerProcess(QObject):
 
     def _handle_no_fresh_pose(self, now: float) -> None:
         """Apply startup or post-publication timeout semantics as appropriate."""
-        if self._last_ts is None:
-            # Retained old mappings are equivalent to no mapping during startup.
-            # Give the current child the full model/camera initialization budget
-            # instead of restarting it after the shorter live-stream timeout.
+        if not self._session_pose_published:
+            # Retained old mappings and a current child's unresolved initial
+            # neutral pose are equivalent to no usable pose during startup. Give
+            # model/camera initialization the full budget instead of applying the
+            # shorter active-stream restart threshold.
             if now - self._start_time > _INIT_TIMEOUT_S:
                 self._desired_running = False
                 self._retire_current_process()
@@ -362,5 +365,6 @@ class TrackerProcess(QObject):
 
         # Status must already be established or deliberately preserved before
         # either position signal. MainWindow uses it to admit live auto-tuning.
+        self._session_pose_published = True
         self.position_updated.emit(x, y, z)
         self.position_sampled.emit(x, y, z, accepted_timestamp_ms)
