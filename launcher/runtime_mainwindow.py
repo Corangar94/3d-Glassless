@@ -109,11 +109,13 @@ class MainWindow(_BaseMainWindow):
         if not callable(connect_sampled) or not callable(disconnect_legacy):
             return False
         try:
-            disconnect_legacy(self._on_position)
+            disconnected = disconnect_legacy(self._on_position)
         except (RuntimeError, TypeError):
             # Keep the already-connected legacy path rather than risk duplicate
             # position handling when an unfamiliar signal implementation refuses
             # selective disconnection.
+            return False
+        if disconnected is False:
             return False
         try:
             connect_sampled(self._on_timestamped_position)
