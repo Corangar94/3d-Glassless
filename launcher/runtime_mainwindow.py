@@ -1,14 +1,65 @@
 """Operator-facing MainWindow enhancements backed by runtime diagnostics."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
+from launcher.auto_tune_timeline import AutoTuneSampleTimeline
 from launcher.mainwindow import MainWindow as _BaseMainWindow, _STATUS_TEXT
 from launcher.tracker_backend_diagnostics import (
     read_tracker_backend_status,
     tracker_backend_tile_text,
 )
 from tracker.backend_status_shared_memory import TrackerBackendStatus
+
+
+_NO_TIMESTAMP = object()
+
+
+class _TimestampedAutoTuner:
+    """Substitute one producer timestamp while preserving base-window logic."""
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+        self._pending_timestamp_s: object = _NO_TIMESTAMP
+
+    @property
+    def delegate(self) -> object:
+        return self._delegate
+
+    def arm(self, timestamp_s: float) -> None:
+        self._pending_timestamp_s = float(timestamp_s)
+
+    def disarm(self) -> None:
+        self._pending_timestamp_s = _NO_TIMESTAMP
+
+    def update(
+        self,
+        x_cm: float,
+        y_cm: float,
+        z_cm: float,
+        fallback_timestamp_s: float,
+    ) -> Any:
+        pending = self._pending_timestamp_s
+        # One pose consumes one override even when the delegate raises.
+        self._pending_timestamp_s = _NO_TIMESTAMP
+        timestamp_s = (
+            fallback_timestamp_s
+            if pending is _NO_TIMESTAMP
+            else float(pending)
+        )
+        return self._delegate.update(
+            x_cm,
+            y_cm,
+            z_cm,
+            timestamp_s,
+        )
+
+    def reset(self) -> Any:
+        self.disarm()
+        return self._delegate.reset()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
 
 
 class MainWindow(_BaseMainWindow):
@@ -26,7 +77,9 @@ class MainWindow(_BaseMainWindow):
         self._tracker_backend_status_fresh = False
         self._tracker_backend_label = ""
         self._tracker_backend_tooltip = ""
+        self._auto_tune_sample_timeline = AutoTuneSampleTimeline()
         super().__init__(config=config, config_path=config_path, parent=parent)
+        self._install_timestamped_auto_tuner()
 
     @staticmethod
     def _plain_tracker_status(status: str) -> str:
@@ -36,6 +89,93 @@ class MainWindow(_BaseMainWindow):
             .replace("⟳ ", "")
             .replace("✕ ", "")
         )
+
+    def _install_timestamped_auto_tuner(self) -> bool:
+        tuner = getattr(self, "_auto_tuner", None)
+        if isinstance(tuner, _TimestampedAutoTuner):
+            return True
+        if not callable(getattr(tuner, "update", None)):
+            return False
+        self._auto_tuner = _TimestampedAutoTuner(tuner)
+        return True
+
+    def _bind_timestamped_pose_signal(self, tracker: object) -> bool:
+        """Prefer producer-timestamped samples without duplicating pose updates."""
+        sampled = getattr(tracker, "position_sampled", None)
+        connect_sampled = getattr(sampled, "connect", None)
+        legacy = getattr(tracker, "position_updated", None)
+        disconnect_legacy = getattr(legacy, "disconnect", None)
+        connect_legacy = getattr(legacy, "connect", None)
+        if not callable(connect_sampled) or not callable(disconnect_legacy):
+            return False
+        try:
+            disconnected = disconnect_legacy(self._on_position)
+        except (RuntimeError, TypeError):
+            # Keep the already-connected legacy path rather than risk duplicate
+            # position handling when an unfamiliar signal implementation refuses
+            # selective disconnection.
+            return False
+        if disconnected is False:
+            return False
+        try:
+            connect_sampled(self._on_timestamped_position)
+        except (RuntimeError, TypeError):
+            if callable(connect_legacy):
+                try:
+                    connect_legacy(self._on_position)
+                except (RuntimeError, TypeError):
+                    # A dynamically patched/legacy signal may reject both
+                    # operations. Leave startup alive; the tracker process and
+                    # overlay continue even if launcher pose telemetry is absent.
+                    pass
+            return False
+        return True
+
+    def _start_tracking(self, *, recovery: bool = False) -> None:
+        super()._start_tracking(recovery=recovery)
+        tracker = getattr(self, "_thread", None)
+        if tracker is not None:
+            self._bind_timestamped_pose_signal(tracker)
+
+    def _on_timestamped_position(
+        self,
+        x_cm: float,
+        y_cm: float,
+        z_cm: float,
+        publish_timestamp_ms: object,
+    ) -> None:
+        """Feed the tuner producer time while retaining local write throttling."""
+        sample_time_s = self._auto_tune_sample_timeline.accept(
+            publish_timestamp_ms
+        )
+        if sample_time_s is None:
+            # Never turn a duplicate/backward/malformed producer sample into new
+            # motion by assigning it the current Qt callback time.
+            return
+
+        tuner = getattr(self, "_auto_tuner", None)
+        arm = getattr(tuner, "arm", None)
+        disarm = getattr(tuner, "disarm", None)
+        should_arm = bool(
+            self._auto_tune_enabled
+            and self._tracking_status == "tracking"
+            and callable(arm)
+        )
+        if should_arm:
+            arm(sample_time_s)
+        try:
+            # The base slot keeps UI updates, settings replacement, and its local
+            # monotonic 250 ms write throttle in one established code path. The
+            # adapter substitutes only the timestamp passed to the tuner.
+            super()._on_position(x_cm, y_cm, z_cm)
+        finally:
+            if should_arm and callable(disarm):
+                disarm()
+
+    def _on_auto_tune_toggle(self, checked: bool) -> None:
+        super()._on_auto_tune_toggle(checked)
+        self._auto_tune_sample_timeline.reset()
+        self._install_timestamped_auto_tuner()
 
     def _render_tracker_tile(self) -> None:
         tile = getattr(self, "_tracker_tile", None)
@@ -93,6 +233,10 @@ class MainWindow(_BaseMainWindow):
         current = str(current_status or "").strip().lower()
         if previous == current or "tracking" not in {previous, current}:
             return False
+        timeline = getattr(self, "_auto_tune_sample_timeline", None)
+        reset_timeline = getattr(timeline, "reset", None)
+        if callable(reset_timeline):
+            reset_timeline()
         tuner = getattr(self, "_auto_tuner", None)
         reset = getattr(tuner, "reset", None)
         if not callable(reset):

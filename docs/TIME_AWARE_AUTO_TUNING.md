@@ -2,11 +2,26 @@
 
 The launcher adapts overlay smoothing and dead-zone values from the filtered viewer position it receives while tracking. Low measured speed favors stability; deliberate motion favors responsiveness.
 
+## Producer-time sampling
+
+The tracker child publishes each legacy `G3D` pose with a wrap-safe uint32 producer timestamp. `TrackerProcess` now exposes that timestamp through a new four-value `position_sampled` signal while retaining the historical three-value `position_updated` signal for compatibility.
+
+The active runtime window disconnects its legacy pose slot only after the timestamped signal is available. It expands producer timestamps across the uint32 Windows-uptime rollover and passes those seconds into `TrackingAutoTuner`. Duplicate, backward, malformed, or out-of-range producer timestamps drop the corresponding launcher pose instead of being relabeled with the current Qt callback time.
+
+This prevents UI scheduling from changing measured motion. A 33 ms movement is still a 33 ms movement when the event loop delivers it early, late, or after a temporary stall. The first sample after a tracking boundary starts a new arbitrary producer-time epoch; only elapsed time is relevant to the tuner.
+
+Two clocks remain intentionally separate:
+
+- **producer pose time** drives velocity and elapsed-time EMA updates;
+- **launcher monotonic time** enforces the existing 250 ms shared-settings write throttle.
+
+Queued samples therefore preserve their physical timing but cannot create a burst of settings writes when the UI resumes.
+
 ## Frame-rate invariance
 
 The original tuner applied fixed exponential-moving-average coefficients once per callback. That made its time response depend on callback rate: a 60 Hz stream applied four times as many updates per second as a 15 Hz stream, so the same physical movement became more responsive—and potentially noisier—on the faster path.
 
-The tuner now converts the established 30 Hz coefficients into an elapsed-time coefficient:
+The tuner converts the established 30 Hz coefficients into an elapsed-time coefficient:
 
 ```text
 adjusted_alpha = 1 - (1 - nominal_alpha) ** (elapsed_seconds * 30)
@@ -21,19 +36,21 @@ This conversion is applied independently to:
 
 ## Tracking episode boundaries
 
-A callback gap of 500 ms or more starts a new tuning episode. The first post-gap pose becomes the new position and distance anchor with zero measured speed. It is not compared with the last pose from a stopped, stalled, or reconnected tracker session.
+A producer-sample gap of 500 ms or more starts a new tuning episode. The first post-gap pose becomes the new position and distance anchor with zero measured speed. It is not compared with the last pose from a stopped, stalled, or reconnected tracker session.
 
-The active launcher also resets the tuner on every real transition into or out of `tracking`. This covers short `tracking → hold/paused → tracking` round trips that complete before the 500 ms gap threshold. The previous episode’s write-throttle timestamp is cleared at the same boundary, allowing the first accepted pose of the new episode to publish stable distance and smoothing values immediately.
+The active launcher also resets both the tuner and the producer timestamp expander on every real transition into or out of `tracking`. This covers short `tracking → hold/paused → tracking` round trips that complete before the 500 ms gap threshold and lets a restarted child begin from a lower uint32 uptime value safely.
+
+The previous episode’s write-throttle timestamp is cleared at the same boundary, allowing the first accepted pose of the new episode to publish stable distance and smoothing values immediately.
 
 Repeated identical status notifications and transitions that stay entirely outside `tracking` do not reset the tuner. During launcher construction, the status boundary remains compatible with an absent or legacy tuner object.
 
-Duplicate and backward sample timestamps are ignored without changing state. This prevents an out-of-order callback from creating a synthetic high-speed movement.
+Direct legacy callers without the timestamped signal continue using local callback time. The runtime reinstalls its timestamp adapter if the operator toggles automatic tuning and the base window creates a new tuner instance.
 
 ## Input and outlier safety
 
 Non-finite coordinates or timestamps, booleans used as measurements, and negative timestamps are rejected without poisoning the long-lived EMA state. Before entering the speed EMA, instantaneous three-dimensional speed is capped at 300 cm/s. The output was already fully responsive above 20 cm/s, so the cap does not delay deliberate motion; it only bounds how long one pathological sample can keep the tuner in its responsive state.
 
-The tuner exposes rejected-sample and long-gap episode-reset counters for focused diagnostics. An explicit `reset()` is also available to clear position, speed, and distance history when an owner has a stronger session boundary.
+The tuner exposes rejected-sample and long-gap episode-reset counters. The producer timeline separately reports accepted, rejected, and reset counts together with its latest wire and expanded timestamps for focused diagnostics.
 
 ## Existing output behavior
 
@@ -43,4 +60,4 @@ The established tuning ranges are unchanged:
 - at or above 20 cm/s: smoothing `0.06` and dead zone `0.5 mm`;
 - between those speeds: linear blending of those output values.
 
-Only the temporal estimation and failure behavior changed.
+Only the temporal source, estimation, and failure behavior changed.
