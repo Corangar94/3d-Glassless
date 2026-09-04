@@ -125,6 +125,19 @@ def test_missing_default_mapping_preserves_static_smoothing(monkeypatch):
     assert loop.live_filter_tuning_snapshot() is None
 
 
+def test_explicit_reader_is_closed_when_smoother_cannot_be_tuned(monkeypatch):
+    reader = _Reader()
+
+    loop = _construct(
+        monkeypatch,
+        smoother=object(),
+        reader=reader,
+    )
+
+    assert reader.close_count == 1
+    assert loop.live_filter_tuning_snapshot() is None
+
+
 def test_update_filter_polls_before_parent_filter_update(monkeypatch):
     reader = _Reader([SimpleNamespace(smoothing_alpha=0.28)])
     smoother = _Smoother()
@@ -183,7 +196,7 @@ def test_unexpected_controller_exception_cannot_stop_pose_filter(monkeypatch):
     assert loop._update_filter(object()) == "filtered"
 
 
-def test_run_closes_reader_after_normal_return(monkeypatch):
+def test_run_closes_reader_after_normal_return_and_retains_snapshot(monkeypatch):
     reader = _Reader()
     loop = _construct(monkeypatch, reader=reader)
     monkeypatch.setattr(
@@ -194,7 +207,10 @@ def test_run_closes_reader_after_normal_return(monkeypatch):
 
     assert loop.run() == "done"
     assert reader.close_count == 1
-    assert loop.live_filter_tuning_snapshot() is None
+    snapshot = loop.live_filter_tuning_snapshot()
+    assert snapshot is not None
+    assert snapshot.closed
+    assert loop.live_filter_tuning_policy == LiveFilterTuningPolicy()
 
 
 def test_run_closes_reader_when_tracking_raises(monkeypatch):
@@ -213,6 +229,8 @@ def test_run_closes_reader_when_tracking_raises(monkeypatch):
 
     assert reader.close_count == 1
     assert loop._live_filter_settings_reader is None
+    snapshot = loop.live_filter_tuning_snapshot()
+    assert snapshot is not None and snapshot.closed
 
 
 def test_runtime_inherits_camera_recovery_and_full_stability_stack():
