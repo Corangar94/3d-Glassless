@@ -35,6 +35,8 @@ import threading
 
 STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
+SMOOTHING_ALPHA_INDEX = 11
+SMOOTHING_ALPHA_OFFSET = struct.calcsize("<fffffIfffff")
 VERSION_INDEX = 15
 VERSION_OFFSET = struct.calcsize("<fffffIfffffffII")
 _VERSION_SIZE = struct.calcsize("<I")
@@ -246,6 +248,40 @@ class SharedSettingsReader:
             _k32.CloseHandle(self._handle)
             self._handle = None
 
+    def read_smoothing_alpha(self) -> tuple[int, float] | None:
+        """Read only ``(version, smoothing_alpha)`` under the existing seqlock.
+
+        This projection is for the packaged live-filter poller. It avoids two
+        88-byte copies, a complete struct unpack, and ``OverlaySettings``
+        construction when only the producer Kalman noise is needed.
+        """
+        self._try_attach()
+        view = self._view
+        if view is None:
+            return None
+        try:
+            for _ in range(4):
+                first_version = ctypes.c_uint32.from_address(
+                    view + VERSION_OFFSET
+                ).value
+                if first_version & 1:
+                    continue
+                smoothing_alpha = ctypes.c_float.from_address(
+                    view + SMOOTHING_ALPHA_OFFSET
+                ).value
+                second_version = ctypes.c_uint32.from_address(
+                    view + VERSION_OFFSET
+                ).value
+                if (
+                    first_version == second_version
+                    and not (second_version & 1)
+                ):
+                    return second_version, float(smoothing_alpha)
+            return None
+        except (OSError, ValueError):
+            self._view = None  # stale view; force re-attach next call
+            return None
+
     def read(self) -> OverlaySettings | None:
         """Return current settings snapshot, or None if writer not running."""
         self._try_attach()
@@ -273,7 +309,7 @@ class SharedSettingsReader:
                     break
             if f is None:
                 return None
-        except OSError:
+        except (OSError, ValueError):
             self._view = None  # stale view; force re-attach next call
             return None
         return OverlaySettings(

@@ -9,6 +9,9 @@ import time
 from typing import Callable, Protocol
 
 
+_UINT32_MAX = 0xFFFF_FFFF
+
+
 class SettingsReaderLike(Protocol):
     def read(self) -> object | None:
         ...
@@ -62,6 +65,8 @@ class LiveFilterTuningPolicy:
 
 @dataclass(frozen=True)
 class LiveFilterTuningSnapshot:
+    # Preserve the original public positional field order. New diagnostics are
+    # appended with defaults so older direct construction remains compatible.
     poll_count: int
     skipped_poll_count: int
     unavailable_count: int
@@ -77,18 +82,33 @@ class LiveFilterTuningSnapshot:
     last_poll_s: float | None
     closed: bool
     last_error: str
+    version_fast_path_count: int = 0
+    unchanged_version_count: int = 0
+    invalid_version_sample_count: int = 0
+    last_seen_settings_version: int | None = None
+
+
+@dataclass(frozen=True)
+class _VersionedMeasurementNoise:
+    version: int
+    value: float
 
 
 _MISSING = object()
+_INVALID = object()
 
 
 class LiveFilterTuningController:
     """Poll ``G3D_Settings`` and tune one filter without disrupting tracking.
 
-    The controller is deliberately independent from the Windows shared-memory
-    implementation. Runtime code injects a reader, while pure tests can provide
-    a small in-memory object. Any optional reader or setter failure leaves the
-    filter on its last valid measurement-noise value.
+    Readers may additionally provide ``read_smoothing_alpha()`` returning
+    ``(committed_version, smoothing_alpha)``. That fast path reads only the
+    seqlock marker and one float, so an unchanged settings version avoids two
+    full-struct copies, unpacking, validation, and dataclass construction.
+
+    The controller remains independent from the Windows shared-memory
+    implementation. Any optional reader or setter failure leaves the filter on
+    its last valid measurement-noise value.
     """
 
     def __init__(
@@ -112,6 +132,7 @@ class LiveFilterTuningController:
         self._policy = policy
         self._clock = clock
         self._last_poll_s: float | None = None
+        self._last_seen_settings_version: int | None = None
         self._last_applied_measurement_noise: float | None = None
         self._poll_count = 0
         self._skipped_poll_count = 0
@@ -124,6 +145,9 @@ class LiveFilterTuningController:
         self._clock_error_count = 0
         self._clock_reset_count = 0
         self._close_error_count = 0
+        self._version_fast_path_count = 0
+        self._unchanged_version_count = 0
+        self._invalid_version_sample_count = 0
         self._closed = False
         self._last_error = ""
 
@@ -146,8 +170,7 @@ class LiveFilterTuningController:
             return settings.get("smoothing_alpha", _MISSING)
         return getattr(settings, "smoothing_alpha", _MISSING)
 
-    def _measurement_noise(self, settings: object) -> float | None:
-        raw = self._settings_value(settings)
+    def _measurement_noise_value(self, raw: object) -> float | None:
         if (
             raw is _MISSING
             or isinstance(raw, bool)
@@ -165,6 +188,39 @@ class LiveFilterTuningController:
             return None
         return value
 
+    def _measurement_noise(self, settings: object) -> float | None:
+        return self._measurement_noise_value(
+            self._settings_value(settings)
+        )
+
+    @staticmethod
+    def _versioned_measurement_noise(
+        sample: object,
+    ) -> _VersionedMeasurementNoise | None:
+        if not isinstance(sample, (tuple, list)) or len(sample) != 2:
+            return None
+        version, value = sample
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, numbers.Integral)
+        ):
+            return None
+        parsed_version = int(version)
+        if (
+            not 0 <= parsed_version <= _UINT32_MAX
+            or parsed_version & 1
+            or isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+        ):
+            return None
+        parsed_value = float(value)
+        if not math.isfinite(parsed_value):
+            return None
+        return _VersionedMeasurementNoise(
+            version=parsed_version,
+            value=parsed_value,
+        )
+
     def _poll_time(self, now_s: object | None) -> float | None:
         if now_s is not None:
             parsed = self._finite_time(now_s)
@@ -181,6 +237,35 @@ class LiveFilterTuningController:
         if parsed is None:
             self._last_error = "live smoothing received an invalid clock"
         return parsed
+
+    def _read_measurement_noise(
+        self,
+    ) -> tuple[float | None, int | None, object]:
+        fast_read = getattr(self._reader, "read_smoothing_alpha", None)
+        if callable(fast_read):
+            self._version_fast_path_count += 1
+            sample = fast_read()
+            if sample is None:
+                return None, None, None
+            parsed = self._versioned_measurement_noise(sample)
+            if parsed is None:
+                self._invalid_version_sample_count += 1
+                return None, None, _INVALID
+            if parsed.version == self._last_seen_settings_version:
+                self._unchanged_version_count += 1
+                return None, parsed.version, _MISSING
+            value = self._measurement_noise_value(parsed.value)
+            if value is None:
+                return None, parsed.version, _INVALID
+            return value, parsed.version, parsed
+
+        settings = self._reader.read()
+        if settings is None:
+            return None, None, None
+        value = self._measurement_noise(settings)
+        if value is None:
+            return None, None, _INVALID
+        return value, None, settings
 
     def poll(self, now_s: object | None = None) -> bool:
         """Apply one admitted change and return whether the target changed."""
@@ -215,7 +300,9 @@ class LiveFilterTuningController:
         self._last_poll_s = timestamp_s
         self._poll_count += 1
         try:
-            settings = self._reader.read()
+            measurement_noise, version, source = (
+                self._read_measurement_noise()
+            )
         except Exception as error:
             self._read_error_count += 1
             self._last_error = (
@@ -224,14 +311,20 @@ class LiveFilterTuningController:
             )
             return False
 
-        if settings is None:
+        if source is None:
             self._unavailable_count += 1
             self._last_error = ""
             return False
-
-        measurement_noise = self._measurement_noise(settings)
-        if measurement_noise is None:
+        if source is _MISSING:
+            self._last_error = ""
+            return False
+        if source is _INVALID or measurement_noise is None:
             self._invalid_value_count += 1
+            # A stable committed version cannot change in place. Remember an
+            # invalid version so the same bad value is not revalidated at 10 Hz;
+            # a writer update gets a new even version and is checked normally.
+            if version is not None:
+                self._last_seen_settings_version = version
             self._last_error = "live smoothing value is invalid or out of range"
             return False
 
@@ -241,6 +334,8 @@ class LiveFilterTuningController:
             and abs(measurement_noise - previous)
             <= self._policy.change_epsilon
         ):
+            if version is not None:
+                self._last_seen_settings_version = version
             self._unchanged_count += 1
             self._last_error = ""
             return False
@@ -253,9 +348,13 @@ class LiveFilterTuningController:
                 "live smoothing filter update failed: "
                 f"{type(error).__name__}"
             )
+            # Do not commit the version. The same settings snapshot can retry at
+            # the next bounded poll after a transient target failure.
             return False
 
         self._last_applied_measurement_noise = measurement_noise
+        if version is not None:
+            self._last_seen_settings_version = version
         self._applied_count += 1
         self._last_error = ""
         return True
@@ -298,4 +397,12 @@ class LiveFilterTuningController:
             last_poll_s=self._last_poll_s,
             closed=self._closed,
             last_error=self._last_error,
+            version_fast_path_count=self._version_fast_path_count,
+            unchanged_version_count=self._unchanged_version_count,
+            invalid_version_sample_count=(
+                self._invalid_version_sample_count
+            ),
+            last_seen_settings_version=(
+                self._last_seen_settings_version
+            ),
         )
