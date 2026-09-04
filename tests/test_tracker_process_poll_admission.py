@@ -19,9 +19,10 @@ def test_launch_boundary_is_captured_before_child_creation():
     launch_time = launch.index("launch_started_s = time.monotonic()")
     popen = launch.index("subprocess.Popen(")
     readers = launch.index('SharedMemoryReader("G3D")')
+    reset_flag = launch.index("self._session_pose_published = False")
     reset = launch.index("self._poll_admission.reset_session(")
 
-    assert launch_time < popen < readers < reset
+    assert launch_time < popen < readers < reset_flag < reset
     assert "wire_timestamp_ms(launch_started_s)" in launch
     assert "self._start_time = launch_started_s" in launch
 
@@ -30,7 +31,7 @@ def test_startup_timeout_is_distinct_from_live_stale_restart():
     source = _source("launcher/tracker_process.py")
     handler = _method(source, "_handle_no_fresh_pose", "_poll")
 
-    startup = handler.index("if self._last_ts is None:")
+    startup = handler.index("if not self._session_pose_published:")
     init_timeout = handler.index("_INIT_TIMEOUT_S")
     startup_return = handler.index("return")
     live_stale = handler.index("stale_ms =")
@@ -39,6 +40,7 @@ def test_startup_timeout_is_distinct_from_live_stale_restart():
 
     assert startup < init_timeout < startup_return < live_stale
     assert live_stale < restart < paused
+    assert "unresolved initial" in handler
 
 
 def test_pose_admission_precedes_state_read_and_every_signal():
@@ -51,11 +53,13 @@ def test_pose_admission_precedes_state_read_and_every_signal():
     status = poll.index("self._emit_status(state_decision.status)")
     timestamp = poll.index("self._last_ts = accepted_timestamp_ms")
     publish_gate = poll.index("if not state_decision.publish_pose:")
+    usable = poll.index("self._session_pose_published = True")
     legacy_pose = poll.index("self.position_updated.emit(")
     sampled_pose = poll.index("self.position_sampled.emit(")
 
     assert pose_admission < state_read < state_resolution < status
-    assert status < timestamp < publish_gate < legacy_pose < sampled_pose
+    assert status < timestamp < publish_gate < usable
+    assert usable < legacy_pose < sampled_pose
 
 
 def test_rejected_or_absent_pose_uses_one_timeout_boundary():
@@ -71,15 +75,16 @@ def test_rejected_or_absent_pose_uses_one_timeout_boundary():
     assert "return" in rejected
 
 
-def test_incoherent_startup_pose_is_consumed_before_publish_decision():
+def test_incoherent_startup_pose_is_consumed_but_not_marked_usable():
     source = _source("launcher/tracker_process.py")
     poll = source.split("    def _poll(self)", 1)[1]
 
     timestamp = poll.index("self._last_ts = accepted_timestamp_ms")
     timestamp_clock = poll.index("self._last_ts_time = now")
     publish_gate = poll.index("if not state_decision.publish_pose:")
+    usable = poll.index("self._session_pose_published = True")
 
-    assert timestamp < timestamp_clock < publish_gate
+    assert timestamp < timestamp_clock < publish_gate < usable
     assert "initial neutral frame" in poll
 
 
@@ -121,5 +126,6 @@ def test_documentation_records_session_correlation_and_timeout_contracts():
     assert "strictly later than that launch boundary" in docs
     assert "trails the pose by no more than 100 ms" in docs
     assert "consumed but not emitted" in docs
+    assert "first usable pose is exposed" in docs
     assert "full 45-second" in docs
     assert "approximately 49.7-day" in docs
