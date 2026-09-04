@@ -19,12 +19,18 @@ from launcher.status_emission import (
     StatusEmissionGate,
     StatusEmissionSnapshot,
 )
+from launcher.tracker_poll_admission import (
+    TrackerPollAdmission,
+    TrackerPollAdmissionPolicy,
+    TrackerPollAdmissionSnapshot,
+    wire_timestamp_ms,
+)
 from tracker.shared_memory import SharedMemoryReader, TrackingStateReader
 
 _POLL_MS = 50           # 20 Hz UI refresh
 _STALE_MS = 800         # no SHM update for this long -> emit "paused"
 _STALE_RESTART_MS = 2500
-_INIT_TIMEOUT_S = 45.0  # subprocess hasn't written SHM after this long → "error"
+_INIT_TIMEOUT_S = 45.0  # current child hasn't published after this long -> "error"
 
 
 def _project_root() -> Path:
@@ -69,6 +75,9 @@ class TrackerProcess(QObject):
         self._last_ts_time: float = 0.0
         self._start_time: float = 0.0
         self._status_emission = StatusEmissionGate()
+        self._poll_admission = TrackerPollAdmission(
+            TrackerPollAdmissionPolicy(maximum_pose_age_ms=_STALE_MS)
+        )
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll)
@@ -88,6 +97,10 @@ class TrackerProcess(QObject):
     def status_emission_snapshot(self) -> StatusEmissionSnapshot:
         """Return transition counters for launcher diagnostics and tests."""
         return self._status_emission.snapshot()
+
+    def poll_admission_snapshot(self) -> TrackerPollAdmissionSnapshot:
+        """Return current-session pose/state admission diagnostics."""
+        return self._poll_admission.snapshot()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -132,6 +145,10 @@ class TrackerProcess(QObject):
         ]
 
     def _launch_process(self) -> bool:
+        # Capture the shared uptime boundary before Popen. A child can publish as
+        # soon as it starts, and any retained mapping older than this boundary
+        # belongs to a previous tracker session.
+        launch_started_s = time.monotonic()
         try:
             proc = subprocess.Popen(
                 self._tracker_command(),
@@ -144,8 +161,11 @@ class TrackerProcess(QObject):
         self._shm = SharedMemoryReader("G3D")
         self._state_shm = TrackingStateReader("G3D_State")
         self._last_ts = None
-        self._start_time = time.monotonic()
-        self._last_ts_time = self._start_time
+        self._start_time = launch_started_s
+        self._last_ts_time = launch_started_s
+        self._poll_admission.reset_session(
+            wire_timestamp_ms(launch_started_s)
+        )
         return True
 
     def isRunning(self) -> bool:
@@ -253,8 +273,26 @@ class TrackerProcess(QObject):
 
     # ── Polling ───────────────────────────────────────────────────────────────
 
+    def _handle_no_fresh_pose(self, now: float) -> None:
+        """Apply startup or post-publication timeout semantics as appropriate."""
+        if self._last_ts is None:
+            # Retained old mappings are equivalent to no mapping during startup.
+            # Give the current child the full model/camera initialization budget
+            # instead of restarting it after the shorter live-stream timeout.
+            if now - self._start_time > _INIT_TIMEOUT_S:
+                self._desired_running = False
+                self._retire_current_process()
+                self._emit_status("error")
+            return
+
+        stale_ms = (now - self._last_ts_time) * 1000.0
+        if stale_ms > self._stale_restart_ms:
+            self._restart_after_stale()
+        elif stale_ms > _STALE_MS:
+            self._emit_status("paused")
+
     def _poll(self) -> None:
-        """Called every _POLL_MS ms; reads SHM and emits signals."""
+        """Called every _POLL_MS ms; reads and correlates pose/state SHM."""
         proc = self._proc
         if proc is None or self._shm is None:
             return
@@ -273,37 +311,56 @@ class TrackerProcess(QObject):
         now = time.monotonic()
 
         if data is None:
-            # SHM not yet created — subprocess still starting
-            if now - self._start_time > _INIT_TIMEOUT_S:
-                self._desired_running = False
-                self._retire_current_process()
-                self._emit_status("error")
+            self._handle_no_fresh_pose(now)
             return
 
         x, y, z, ts = data
+        if ts == self._last_ts:
+            self._handle_no_fresh_pose(now)
+            return
 
-        if ts != self._last_ts:
+        pose_decision = self._poll_admission.evaluate_pose(
+            ts,
+            wire_timestamp_ms(now),
+        )
+        if not pose_decision.accepted:
+            self._handle_no_fresh_pose(now)
+            return
+
+        try:
             state_data = (
                 self._state_shm.read()
                 if self._state_shm is not None
                 else None
             )
-            self._emit_status(
-                state_data[0] if state_data is not None else "tracking"
-            )
-            # Commit freshness only after the leading status signal succeeds. A
-            # transient signal failure can therefore retry the same pose rather
-            # than silently converting it into a stale sample.
-            self._last_ts = ts
-            self._last_ts_time = now
-            # Status must lead the corresponding pose. MainWindow uses the
-            # current status to decide whether a pose may feed auto-tuning;
-            # emitting a paused fallback first would contaminate calibration.
-            self.position_updated.emit(x, y, z)
-            self.position_sampled.emit(x, y, z, int(ts))
-        else:
-            stale_ms = (now - self._last_ts_time) * 1000
-            if stale_ms > self._stale_restart_ms:
-                self._restart_after_stale()
-            elif stale_ms > _STALE_MS:
-                self._emit_status("paused")
+        except Exception:
+            # Shared-memory readers normally fail closed themselves. Keep the Qt
+            # polling timer alive if an injected or platform reader still raises.
+            state_data = None
+
+        current_status = self._status_emission.snapshot().last_status
+        state_decision = self._poll_admission.resolve_state(
+            pose_decision.timestamp_ms,
+            state_data,
+            current_status=current_status,
+            session_elapsed_ms=max(
+                0.0,
+                (now - self._start_time) * 1000.0,
+            ),
+        )
+        if state_decision.status is not None:
+            self._emit_status(state_decision.status)
+
+        # A current-session pose that is waiting for state correlation is still
+        # consumed so an initial neutral frame cannot be retried and later
+        # relabeled as tracking by the legacy grace fallback.
+        accepted_timestamp_ms = int(pose_decision.timestamp_ms)
+        self._last_ts = accepted_timestamp_ms
+        self._last_ts_time = now
+        if not state_decision.publish_pose:
+            return
+
+        # Status must already be established or deliberately preserved before
+        # either position signal. MainWindow uses it to admit live auto-tuning.
+        self.position_updated.emit(x, y, z)
+        self.position_sampled.emit(x, y, z, accepted_timestamp_ms)
