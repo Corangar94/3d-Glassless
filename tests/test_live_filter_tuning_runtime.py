@@ -42,6 +42,14 @@ class _Smoother:
         self.measurement_noise_values.append(value)
 
 
+class _BrokenController:
+    def close(self) -> None:
+        raise OSError("close failed")
+
+    def snapshot(self):
+        raise RuntimeError("snapshot failed")
+
+
 def _construct(
     monkeypatch,
     *,
@@ -138,6 +146,56 @@ def test_explicit_reader_is_closed_when_smoother_cannot_be_tuned(monkeypatch):
     assert loop.live_filter_tuning_snapshot() is None
 
 
+def test_explicit_reader_is_closed_when_parent_construction_fails(monkeypatch):
+    reader = _Reader()
+    monkeypatch.setattr(
+        CameraControlRecoveryTrackingLoop,
+        "__init__",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("parent construction failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="parent construction failed"):
+        LiveFilterTuningTrackingLoop(
+            live_filter_settings_reader=reader,
+        )
+
+    assert reader.close_count == 1
+
+
+def test_controller_initialization_failure_closes_reader_and_retains_policy(
+    monkeypatch,
+):
+    reader = _Reader()
+    policy = LiveFilterTuningPolicy(poll_interval_s=0.25)
+    logs: list[str] = []
+    monkeypatch.setattr(
+        live_filter_tuning_runtime,
+        "LiveFilterTuningController",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("controller construction failed")
+        ),
+    )
+    monkeypatch.setattr(
+        live_filter_tuning_runtime,
+        "print",
+        logs.append,
+        raising=False,
+    )
+
+    loop = _construct(
+        monkeypatch,
+        reader=reader,
+        policy=policy,
+    )
+
+    assert reader.close_count == 1
+    assert loop.live_filter_tuning_policy == policy
+    assert loop.live_filter_tuning_snapshot() is None
+    assert any("RuntimeError" in line for line in logs)
+
+
 def test_update_filter_polls_before_parent_filter_update(monkeypatch):
     reader = _Reader([SimpleNamespace(smoothing_alpha=0.28)])
     smoother = _Smoother()
@@ -231,6 +289,50 @@ def test_run_closes_reader_when_tracking_raises(monkeypatch):
     assert loop._live_filter_settings_reader is None
     snapshot = loop.live_filter_tuning_snapshot()
     assert snapshot is not None and snapshot.closed
+
+
+def test_broken_optional_cleanup_does_not_mask_normal_tracker_return(
+    monkeypatch,
+):
+    loop = LiveFilterTuningTrackingLoop.__new__(
+        LiveFilterTuningTrackingLoop
+    )
+    loop._live_filter_tuning = _BrokenController()
+    loop._live_filter_settings_reader = None
+    loop._live_filter_tuning_last_snapshot = None
+    loop._live_filter_tuning_last_policy = None
+    monkeypatch.setattr(
+        CameraControlRecoveryTrackingLoop,
+        "run",
+        lambda *_args, **_kwargs: "done",
+    )
+
+    assert loop.run() == "done"
+    assert loop._live_filter_tuning is None
+
+
+def test_broken_optional_cleanup_does_not_mask_tracking_exception(
+    monkeypatch,
+):
+    loop = LiveFilterTuningTrackingLoop.__new__(
+        LiveFilterTuningTrackingLoop
+    )
+    loop._live_filter_tuning = _BrokenController()
+    loop._live_filter_settings_reader = None
+    loop._live_filter_tuning_last_snapshot = None
+    loop._live_filter_tuning_last_policy = None
+    monkeypatch.setattr(
+        CameraControlRecoveryTrackingLoop,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("tracking failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="tracking failed"):
+        loop.run()
+
+    assert loop._live_filter_tuning is None
 
 
 def test_runtime_inherits_camera_recovery_and_full_stability_stack():
