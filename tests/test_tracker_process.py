@@ -136,7 +136,7 @@ def test_tracker_process_uses_face_validity_state_not_pose_timestamp(qapp):
     assert [s[0] for s in _spy_list(spy)] == ["paused"]
 
 
-def test_tracker_process_emits_validity_before_corresponding_pose(qapp):
+def test_tracker_process_emits_validity_before_both_pose_signals(qapp):
     tracker = TrackerProcess(config_path="config.yaml")
     proc = MagicMock()
     proc.poll.return_value = None
@@ -151,7 +151,12 @@ def test_tracker_process_emits_validity_before_corresponding_pose(qapp):
     events: list[tuple[str, object]] = []
     tracker.status_changed.connect(lambda status: events.append(("status", status)))
     tracker.position_updated.connect(
-        lambda x, y, z: events.append(("pose", (x, y, z)))
+        lambda x, y, z: events.append(("legacy_pose", (x, y, z)))
+    )
+    tracker.position_sampled.connect(
+        lambda x, y, z, timestamp_ms: events.append(
+            ("sampled_pose", (x, y, z, timestamp_ms))
+        )
     )
 
     with patch("launcher.tracker_process.time.monotonic", return_value=1.1):
@@ -159,8 +164,50 @@ def test_tracker_process_emits_validity_before_corresponding_pose(qapp):
 
     assert events == [
         ("status", "paused"),
-        ("pose", (0.0, 0.0, 60.0)),
+        ("legacy_pose", (0.0, 0.0, 60.0)),
+        ("sampled_pose", (0.0, 0.0, 60.0, 11)),
     ]
+
+
+def test_timestamped_signal_preserves_full_uint32_range(qapp):
+    tracker = TrackerProcess(config_path="config.yaml")
+    proc = MagicMock()
+    proc.poll.return_value = None
+    pose_reader = MagicMock()
+    timestamp_ms = 0xFFFF_FFF0
+    pose_reader.read.return_value = (1.0, -2.0, 70.0, timestamp_ms)
+    tracker._proc = proc
+    tracker._shm = pose_reader
+    tracker._start_time = tracker._last_ts_time = 1.0
+    sampled = QSignalSpy(tracker.position_sampled)
+    legacy = QSignalSpy(tracker.position_updated)
+
+    with patch("launcher.tracker_process.time.monotonic", return_value=1.1):
+        tracker._poll()
+
+    assert _spy_list(legacy) == [[1.0, -2.0, 70.0]]
+    assert _spy_list(sampled) == [[1.0, -2.0, 70.0, timestamp_ms]]
+
+
+def test_unchanged_timestamp_emits_neither_pose_signal(qapp):
+    tracker = TrackerProcess(config_path="config.yaml")
+    proc = MagicMock()
+    proc.poll.return_value = None
+    reader = MagicMock()
+    reader.read.return_value = (1.0, 2.0, 60.0, 10)
+    tracker._proc = proc
+    tracker._shm = reader
+    tracker._last_ts = 10
+    tracker._last_ts_time = 1.0
+    tracker._start_time = 1.0
+    sampled = QSignalSpy(tracker.position_sampled)
+    legacy = QSignalSpy(tracker.position_updated)
+
+    with patch("launcher.tracker_process.time.monotonic", return_value=1.1):
+        tracker._poll()
+
+    assert sampled.count() == 0
+    assert legacy.count() == 0
 
 
 def test_stop_during_retirement_prevents_pending_restart(qapp):
