@@ -15,7 +15,7 @@ Named mappings can outlive the tracker child that created them while another pro
 
 Strictly later is intentional. A retained pre-launch mapping can share the same millisecond as process launch; the current child will produce another frame, while accepting equality could expose the prior session.
 
-A rejected pre-session mapping is treated like an absent mapping. While no current-session pose has been consumed, the child receives the full 45-second model/camera initialization budget. Retained data therefore cannot cause the shorter 2.5-second live-stream restart loop.
+A rejected pre-session mapping is treated like an absent mapping. Until a current-session pose has both usable state and permission to reach the launcher signals, the child receives the full 45-second model/camera initialization budget. Retained data and the child writer's unresolved initial neutral pose therefore cannot cause the shorter 2.5-second live-stream restart loop.
 
 All comparisons use unsigned forward deltas and remain correct across the approximately 49.7-day uint32 millisecond rollover.
 
@@ -36,6 +36,7 @@ pose session/freshness admission
 → state timestamp correlation
 → status transition publication
 → pose timestamp commit
+→ mark current session usable
 → position_updated
 → position_sampled
 ```
@@ -44,7 +45,7 @@ Status therefore remains established before a pose can feed live auto-tuning.
 
 ## Startup and compatibility behavior
 
-Before any tracking/hold/paused status has been established, a current-session pose with missing or incoherent state is consumed but not emitted. This prevents the child writer's initial neutral pose from being retried and later relabeled as tracking.
+Before any tracking/hold/paused status has been established, a current-session pose with missing or incoherent state is consumed but not emitted. This prevents the child writer's initial neutral pose from being retried and later relabeled as tracking. Consuming that timestamp does not end initialization; only a pose that is actually permitted to reach the launcher signals activates the shorter live-stream timeout.
 
 Once a live status is established, a transient state/pose race preserves that prior status and allows the fresh pose through. This handles the short interval where state for frame N+1 can be visible while pose still represents frame N.
 
@@ -54,11 +55,11 @@ For an older tracker child that never publishes `G3D_State`, the launcher waits 
 
 The launcher distinguishes startup from a stalled active stream:
 
-- before the first current-session pose is consumed: 45-second initialization timeout;
-- after a current-session pose is consumed: paused after 800 ms without a new pose;
+- before the first usable pose is exposed: 45-second initialization timeout;
+- after a usable pose is exposed: paused after 800 ms without a new pose;
 - active stream restart after the configured 2.5-second stale interval.
 
-Missing mappings, retained mappings, rejected timestamps, and duplicate timestamps all pass through the same timeout boundary.
+Missing mappings, retained mappings, rejected timestamps, unresolved startup poses, and duplicate timestamps all pass through the same timeout boundary selected for the current lifecycle phase.
 
 ## Diagnostics
 
