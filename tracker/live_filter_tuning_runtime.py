@@ -63,7 +63,14 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
         self._live_filter_tuning_last_policy: (
             LiveFilterTuningPolicy | None
         ) = None
-        super().__init__(*args, **kwargs)
+        try:
+            super().__init__(*args, **kwargs)
+        except Exception:
+            # An explicitly injected reader is owned by this runtime boundary.
+            # Do not leak it when a lower tracking layer fails to construct.
+            if live_filter_settings_reader is not _DEFAULT_SETTINGS_READER:
+                _close_reader(live_filter_settings_reader)
+            raise
 
         target = getattr(self, "_smoother", None)
         if not callable(getattr(target, "set_measurement_noise", None)):
@@ -85,6 +92,7 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
             return
 
         policy = live_filter_tuning_policy or LiveFilterTuningPolicy()
+        self._live_filter_tuning_last_policy = policy
         self._live_filter_settings_reader = reader
         try:
             self._live_filter_tuning = LiveFilterTuningController(
@@ -92,7 +100,6 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
                 target,
                 policy,
             )
-            self._live_filter_tuning_last_policy = policy
         except Exception as error:
             _close_reader(reader)
             self._live_filter_settings_reader = None
@@ -142,8 +149,18 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
         reader = self._live_filter_settings_reader
         self._live_filter_settings_reader = None
         if controller is not None:
-            controller.close()
-            self._live_filter_tuning_last_snapshot = controller.snapshot()
+            try:
+                controller.close()
+            except Exception:
+                # Optional cleanup must never mask a successful tracker return or
+                # the original exception that caused the tracking loop to exit.
+                pass
+            try:
+                self._live_filter_tuning_last_snapshot = (
+                    controller.snapshot()
+                )
+            except Exception:
+                pass
         elif reader is not None:
             _close_reader(reader)
 
