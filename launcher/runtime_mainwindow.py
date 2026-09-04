@@ -1,8 +1,13 @@
 """Operator-facing MainWindow enhancements backed by runtime diagnostics."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Optional
 
+from launcher.auto_tune_publication import (
+    AutoTunePublicationSnapshot,
+    AutoTunePublicationWriter,
+)
 from launcher.auto_tune_timeline import AutoTuneSampleTimeline
 from launcher.mainwindow import MainWindow as _BaseMainWindow, _STATUS_TEXT
 from launcher.tracker_backend_diagnostics import (
@@ -78,8 +83,10 @@ class MainWindow(_BaseMainWindow):
         self._tracker_backend_label = ""
         self._tracker_backend_tooltip = ""
         self._auto_tune_sample_timeline = AutoTuneSampleTimeline()
+        self._auto_tune_publication_writer: AutoTunePublicationWriter | None = None
         super().__init__(config=config, config_path=config_path, parent=parent)
         self._install_timestamped_auto_tuner()
+        self._install_auto_tune_publication_writer()
 
     @staticmethod
     def _plain_tracker_status(status: str) -> str:
@@ -98,6 +105,62 @@ class MainWindow(_BaseMainWindow):
             return False
         self._auto_tuner = _TimestampedAutoTuner(tuner)
         return True
+
+    def _install_auto_tune_publication_writer(self) -> bool:
+        writer = getattr(self, "_settings_writer", None)
+        if isinstance(writer, AutoTunePublicationWriter):
+            self._auto_tune_publication_writer = writer
+            return True
+        if not callable(getattr(writer, "write", None)):
+            return False
+        publication = AutoTunePublicationWriter(writer)
+        self._settings_writer = publication
+        self._auto_tune_publication_writer = publication
+        settings = getattr(self, "_settings", None)
+        if settings is not None:
+            # Base initialization already published this snapshot before the
+            # wrapper was installed, so align the coalescing baseline with it.
+            publication.seed(settings)
+        return True
+
+    def auto_tune_publication_snapshot(
+        self,
+    ) -> AutoTunePublicationSnapshot | None:
+        writer = getattr(self, "_auto_tune_publication_writer", None)
+        snapshot = getattr(writer, "publication_snapshot", None)
+        return snapshot() if callable(snapshot) else None
+
+    def _reset_auto_tune_publication(self) -> None:
+        writer = getattr(self, "_auto_tune_publication_writer", None)
+        reset = getattr(writer, "reset_publication", None)
+        if callable(reset):
+            reset()
+
+    def _auto_tune_publication_context(self):
+        writer = getattr(self, "_auto_tune_publication_writer", None)
+        arm = getattr(writer, "auto_tune_write", None)
+        if (
+            self._auto_tune_enabled
+            and self._tracking_status == "tracking"
+            and callable(arm)
+        ):
+            return arm()
+        return nullcontext()
+
+    def _dispatch_position_with_publication_gate(
+        self,
+        x_cm: float,
+        y_cm: float,
+        z_cm: float,
+    ) -> None:
+        # The base slot keeps its established 250 ms attempt throttle. Only the
+        # shared-settings write reached from that slot is marked as auto-tune.
+        with self._auto_tune_publication_context():
+            super()._on_position(x_cm, y_cm, z_cm)
+
+    def _on_position(self, x: float, y: float, z: float) -> None:
+        """Retain the legacy signal path with auto-tune write coalescing."""
+        self._dispatch_position_with_publication_gate(x, y, z)
 
     def _bind_timestamped_pose_signal(self, tracker: object) -> bool:
         """Prefer producer-timestamped samples without duplicating pose updates."""
@@ -164,10 +227,13 @@ class MainWindow(_BaseMainWindow):
         if should_arm:
             arm(sample_time_s)
         try:
-            # The base slot keeps UI updates, settings replacement, and its local
-            # monotonic 250 ms write throttle in one established code path. The
-            # adapter substitutes only the timestamp passed to the tuner.
-            super()._on_position(x_cm, y_cm, z_cm)
+            # Producer time changes only the tuner's motion estimate. The
+            # publication gate and the base 250 ms throttle use launcher time.
+            self._dispatch_position_with_publication_gate(
+                x_cm,
+                y_cm,
+                z_cm,
+            )
         finally:
             if should_arm and callable(disarm):
                 disarm()
@@ -176,6 +242,8 @@ class MainWindow(_BaseMainWindow):
         super()._on_auto_tune_toggle(checked)
         self._auto_tune_sample_timeline.reset()
         self._install_timestamped_auto_tuner()
+        self._install_auto_tune_publication_writer()
+        self._reset_auto_tune_publication()
 
     def _render_tracker_tile(self) -> None:
         tile = getattr(self, "_tracker_tile", None)
@@ -237,6 +305,7 @@ class MainWindow(_BaseMainWindow):
         reset_timeline = getattr(timeline, "reset", None)
         if callable(reset_timeline):
             reset_timeline()
+        self._reset_auto_tune_publication()
         tuner = getattr(self, "_auto_tuner", None)
         reset = getattr(tuner, "reset", None)
         if not callable(reset):
