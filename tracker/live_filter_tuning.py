@@ -65,6 +65,8 @@ class LiveFilterTuningPolicy:
 
 @dataclass(frozen=True)
 class LiveFilterTuningSnapshot:
+    # Preserve the original public positional field order. New diagnostics are
+    # appended with defaults so older direct construction remains compatible.
     poll_count: int
     skipped_poll_count: int
     unavailable_count: int
@@ -76,14 +78,14 @@ class LiveFilterTuningSnapshot:
     clock_error_count: int
     clock_reset_count: int
     close_error_count: int
-    version_fast_path_count: int
-    unchanged_version_count: int
-    invalid_version_sample_count: int
-    last_seen_settings_version: int | None
     last_applied_measurement_noise: float | None
     last_poll_s: float | None
     closed: bool
     last_error: str
+    version_fast_path_count: int = 0
+    unchanged_version_count: int = 0
+    invalid_version_sample_count: int = 0
+    last_seen_settings_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -389,6 +391,12 @@ class LiveFilterTuningController:
             clock_error_count=self._clock_error_count,
             clock_reset_count=self._clock_reset_count,
             close_error_count=self._close_error_count,
+            last_applied_measurement_noise=(
+                self._last_applied_measurement_noise
+            ),
+            last_poll_s=self._last_poll_s,
+            closed=self._closed,
+            last_error=self._last_error,
             version_fast_path_count=self._version_fast_path_count,
             unchanged_version_count=self._unchanged_version_count,
             invalid_version_sample_count=(
@@ -397,10 +405,4 @@ class LiveFilterTuningController:
             last_seen_settings_version=(
                 self._last_seen_settings_version
             ),
-            last_applied_measurement_noise=(
-                self._last_applied_measurement_noise
-            ),
-            last_poll_s=self._last_poll_s,
-            closed=self._closed,
-            last_error=self._last_error,
         )
