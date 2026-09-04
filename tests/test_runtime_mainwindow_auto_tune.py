@@ -166,18 +166,11 @@ def test_timestamp_adapter_substitutes_one_producer_time_then_falls_back():
     assert adapter.update(1.0, 2.0, 60.0, 999.0) == "producer"
     assert adapter.update(2.0, 2.0, 60.0, 1000.0) == "fallback"
 
-    assert delegate.update.call_args_list[0].args == (
-        1.0,
-        2.0,
-        60.0,
-        pytest.approx(10.033),
-    )
-    assert delegate.update.call_args_list[1].args == (
-        2.0,
-        2.0,
-        60.0,
-        1000.0,
-    )
+    first_args = delegate.update.call_args_list[0].args
+    second_args = delegate.update.call_args_list[1].args
+    assert first_args[:3] == (1.0, 2.0, 60.0)
+    assert first_args[3] == pytest.approx(10.033)
+    assert second_args == (2.0, 2.0, 60.0, 1000.0)
 
 
 def test_timestamp_adapter_reset_clears_armed_sample():
@@ -224,7 +217,7 @@ def test_duplicate_or_backward_producer_time_drops_whole_pose(monkeypatch):
     monkeypatch.setattr(
         runtime_mainwindow._BaseMainWindow,
         "_on_position",
-        base_slot,
+        lambda owner, x, y, z: base_slot(owner, x, y, z),
     )
 
     window._on_timestamped_position(0.0, 0.0, 60.0, 1000)
@@ -273,6 +266,16 @@ def test_failed_selective_disconnect_keeps_legacy_fallback():
 
     assert not window._bind_timestamped_pose_signal(tracker)
     assert tracker.position_updated.connections == []
+    assert tracker.position_sampled.connections == []
+
+
+def test_false_disconnect_result_keeps_legacy_fallback():
+    window = _window(status="tracking")
+    tracker = _Tracker()
+    tracker.position_updated.connect(window._on_position)
+    tracker.position_updated.disconnect = MagicMock(return_value=False)
+
+    assert not window._bind_timestamped_pose_signal(tracker)
     assert tracker.position_sampled.connections == []
 
 
