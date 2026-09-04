@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from launcher import runtime_mainwindow
+from launcher.auto_tune import TrackingAutoTuner
 from launcher.auto_tune_timeline import AutoTuneSampleTimeline
 from launcher.runtime_mainwindow import (
     MainWindow,
@@ -185,6 +186,27 @@ def test_timestamp_adapter_reset_clears_armed_sample():
     delegate.update.assert_called_once_with(1.0, 2.0, 60.0, 77.0)
 
 
+def test_producer_cadence_prevents_false_ui_gap_episode_reset():
+    producer_tuner = TrackingAutoTuner()
+    producer_adapter = _TimestampedAutoTuner(producer_tuner)
+    producer_adapter.arm(1.000)
+    first = producer_adapter.update(0.0, 0.0, 60.0, 100.0)
+    producer_adapter.arm(1.033)
+    second = producer_adapter.update(1.0, 0.0, 60.0, 999.0)
+
+    assert producer_tuner.episode_reset_count == 0
+    assert second.speed_cm_s > 0.0
+    assert second.smoothing_alpha < first.smoothing_alpha
+
+    # The same positions retimed at delayed Qt receipt would look like a long
+    # gap, reset the episode, and erase the measured motion.
+    receipt_tuner = TrackingAutoTuner()
+    receipt_tuner.update(0.0, 0.0, 60.0, 100.0)
+    receipt_result = receipt_tuner.update(1.0, 0.0, 60.0, 999.0)
+    assert receipt_tuner.episode_reset_count == 1
+    assert receipt_result.speed_cm_s == pytest.approx(0.0)
+
+
 def test_timestamped_slot_uses_producer_time_not_qt_fallback(monkeypatch):
     window = _window(status="tracking")
     window._auto_tune_enabled = True
@@ -277,6 +299,33 @@ def test_false_disconnect_result_keeps_legacy_fallback():
 
     assert not window._bind_timestamped_pose_signal(tracker)
     assert tracker.position_sampled.connections == []
+
+
+def test_sampled_connect_failure_restores_legacy_connection():
+    window = _window(status="tracking")
+    tracker = _Tracker()
+    tracker.position_updated.connect(window._on_position)
+    tracker.position_sampled.connect = MagicMock(
+        side_effect=RuntimeError("sampled signal unavailable")
+    )
+
+    assert not window._bind_timestamped_pose_signal(tracker)
+    assert tracker.position_updated.connections == [window._on_position]
+
+
+def test_failed_sampled_and_legacy_reconnect_does_not_break_startup():
+    window = _window(status="tracking")
+    tracker = _Tracker()
+    tracker.position_updated.connect(window._on_position)
+    tracker.position_sampled.connect = MagicMock(
+        side_effect=RuntimeError("sampled signal unavailable")
+    )
+    tracker.position_updated.connect = MagicMock(
+        side_effect=RuntimeError("legacy reconnect unavailable")
+    )
+
+    assert not window._bind_timestamped_pose_signal(tracker)
+    assert tracker.position_updated.connections == []
 
 
 def test_start_tracking_binds_timestamped_signal_after_base_start(monkeypatch):
