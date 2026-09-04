@@ -23,7 +23,11 @@ This conversion is applied independently to:
 
 A callback gap of 500 ms or more starts a new tuning episode. The first post-gap pose becomes the new position and distance anchor with zero measured speed. It is not compared with the last pose from a stopped, stalled, or reconnected tracker session.
 
-Duplicate and backward timestamps are ignored without changing state. This prevents an out-of-order callback from creating a synthetic high-speed movement.
+The active launcher also resets the tuner on every real transition into or out of `tracking`. This covers short `tracking → hold/paused → tracking` round trips that complete before the 500 ms gap threshold. The previous episode’s write-throttle timestamp is cleared at the same boundary, allowing the first accepted pose of the new episode to publish stable distance and smoothing values immediately.
+
+Repeated identical status notifications and transitions that stay entirely outside `tracking` do not reset the tuner. During launcher construction, the status boundary remains compatible with an absent or legacy tuner object.
+
+Duplicate and backward sample timestamps are ignored without changing state. This prevents an out-of-order callback from creating a synthetic high-speed movement.
 
 ## Input and outlier safety
 
