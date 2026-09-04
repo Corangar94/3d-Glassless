@@ -30,11 +30,17 @@ def _project_root() -> Path:
 class TrackerProcess(QObject):
     """Spawns 'python -m tracker' and exposes the same signals as TrackerThread.
 
+    ``position_updated`` remains the historical three-value signal. New launcher
+    consumers can use ``position_sampled`` to retain the producer's wrap-safe
+    shared-memory publish timestamp instead of retiming motion at Qt receipt.
+
     frame_ready is declared for API compatibility but never emits — camera
     preview is not available in subprocess mode.
     """
 
     position_updated = Signal(float, float, float)  # x_cm, y_cm, z_cm
+    # ``object`` preserves the full uint32 range; Qt ``int`` is signed 32-bit.
+    position_sampled = Signal(float, float, float, object)  # + publish timestamp ms
     frame_ready = Signal(bytes)                      # API-compat only; never fires
     status_changed = Signal(str)  # "initializing"|"tracking"|"paused"|"error"
     stopped = Signal()
@@ -258,10 +264,11 @@ class TrackerProcess(QObject):
             self._last_ts_time = now
             state_data = self._state_shm.read() if self._state_shm is not None else None
             self.status_changed.emit(state_data[0] if state_data is not None else "tracking")
-            # Status must lead the corresponding pose.  MainWindow uses the
+            # Status must lead the corresponding pose. MainWindow uses the
             # current status to decide whether a pose may feed auto-tuning;
             # emitting a paused fallback first would contaminate calibration.
             self.position_updated.emit(x, y, z)
+            self.position_sampled.emit(x, y, z, int(ts))
         else:
             stale_ms = (now - self._last_ts_time) * 1000
             if stale_ms > self._stale_restart_ms:
