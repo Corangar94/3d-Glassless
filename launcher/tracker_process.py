@@ -15,6 +15,10 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from launcher.status_emission import (
+    StatusEmissionGate,
+    StatusEmissionSnapshot,
+)
 from tracker.shared_memory import SharedMemoryReader, TrackingStateReader
 
 _POLL_MS = 50           # 20 Hz UI refresh
@@ -42,7 +46,7 @@ class TrackerProcess(QObject):
     # ``object`` preserves the full uint32 range; Qt ``int`` is signed 32-bit.
     position_sampled = Signal(float, float, float, object)  # + publish timestamp ms
     frame_ready = Signal(bytes)                      # API-compat only; never fires
-    status_changed = Signal(str)  # "initializing"|"tracking"|"paused"|"error"
+    status_changed = Signal(str)  # initializing|tracking|hold|paused|restarting|error
     stopped = Signal()
     _termination_finished = Signal(object, bool)
 
@@ -64,6 +68,7 @@ class TrackerProcess(QObject):
         self._last_ts: Optional[int] = None
         self._last_ts_time: float = 0.0
         self._start_time: float = 0.0
+        self._status_emission = StatusEmissionGate()
         self._timer = QTimer(self)
         self._timer.setInterval(_POLL_MS)
         self._timer.timeout.connect(self._poll)
@@ -71,25 +76,43 @@ class TrackerProcess(QObject):
         self._retiring_proc: Optional[subprocess.Popen[bytes]] = None
         self._desired_running = False
 
+    def _emit_status(self, status: object, *, force: bool = False) -> bool:
+        """Publish one state transition and suppress exact consecutive repeats."""
+        decision = self._status_emission.emit(
+            status,
+            self.status_changed.emit,
+            force=force,
+        )
+        return decision.emitted
+
+    def status_emission_snapshot(self) -> StatusEmissionSnapshot:
+        """Return transition counters for launcher diagnostics and tests."""
+        return self._status_emission.snapshot()
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> bool:
         """Launch the tracker subprocess and begin polling shared memory."""
+        was_desired_running = self._desired_running
         self._desired_running = True
         self._restart_count = 0
         if self.isRunning():
             return True
+        if not was_desired_running:
+            # A user-visible new start must emit its initial state even when the
+            # previous lifecycle ended on the same status text.
+            self._status_emission.reset()
         if self._retiring_proc is not None:
-            self.status_changed.emit("initializing")
+            self._emit_status("initializing")
             return True
 
         if not self._launch_process():
             self._desired_running = False
-            self.status_changed.emit("error")
+            self._emit_status("error")
             return False
 
         self._timer.start()
-        self.status_changed.emit("initializing")
+        self._emit_status("initializing")
         return True
 
     def _tracker_command(self) -> list[str]:
@@ -209,10 +232,10 @@ class TrackerProcess(QObject):
     def _launch_after_retirement(self) -> None:
         if self._launch_process():
             self._timer.start()
-            self.status_changed.emit("initializing")
+            self._emit_status("initializing")
         else:
             self._desired_running = False
-            self.status_changed.emit("error")
+            self._emit_status("error")
             self.stopped.emit()
 
     def _restart_after_stale(self) -> None:
@@ -220,12 +243,12 @@ class TrackerProcess(QObject):
         if self._restart_count >= self._max_restarts:
             self._desired_running = False
             self._retire_current_process()
-            self.status_changed.emit("error")
+            self._emit_status("error")
             return
 
         self._restart_count += 1
         self._desired_running = True
-        self.status_changed.emit("restarting")
+        self._emit_status("restarting")
         self._retire_current_process()
 
     # ── Polling ───────────────────────────────────────────────────────────────
@@ -242,7 +265,7 @@ class TrackerProcess(QObject):
             self._desired_running = False
             self._proc = None
             self._close_readers()
-            self.status_changed.emit("error")
+            self._emit_status("error")
             self.stopped.emit()
             return
 
@@ -254,16 +277,25 @@ class TrackerProcess(QObject):
             if now - self._start_time > _INIT_TIMEOUT_S:
                 self._desired_running = False
                 self._retire_current_process()
-                self.status_changed.emit("error")
+                self._emit_status("error")
             return
 
         x, y, z, ts = data
 
         if ts != self._last_ts:
+            state_data = (
+                self._state_shm.read()
+                if self._state_shm is not None
+                else None
+            )
+            self._emit_status(
+                state_data[0] if state_data is not None else "tracking"
+            )
+            # Commit freshness only after the leading status signal succeeds. A
+            # transient signal failure can therefore retry the same pose rather
+            # than silently converting it into a stale sample.
             self._last_ts = ts
             self._last_ts_time = now
-            state_data = self._state_shm.read() if self._state_shm is not None else None
-            self.status_changed.emit(state_data[0] if state_data is not None else "tracking")
             # Status must lead the corresponding pose. MainWindow uses the
             # current status to decide whether a pose may feed auto-tuning;
             # emitting a paused fallback first would contaminate calibration.
@@ -274,4 +306,4 @@ class TrackerProcess(QObject):
             if stale_ms > self._stale_restart_ms:
                 self._restart_after_stale()
             elif stale_ms > _STALE_MS:
-                self.status_changed.emit("paused")
+                self._emit_status("paused")

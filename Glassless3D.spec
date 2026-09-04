@@ -77,6 +77,7 @@ hidden_imports = [
     "tracker.shared_settings",
     "launcher.auto_tune_publication",
     "launcher.auto_tune_timeline",
+    "launcher.status_emission",
     "launcher.runtime_mainwindow",
     "launcher.tracker_backend_diagnostics",
     "launcher.camera_calibration_process",
