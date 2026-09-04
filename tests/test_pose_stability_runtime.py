@@ -196,9 +196,9 @@ def test_missing_measurement_admission_boundary_fails_closed(monkeypatch):
         StableLatestFrameTrackingLoop()
 
 
-def test_runtime_main_selects_full_recovery_loop_during_bootstrap(monkeypatch):
-    from tracker.camera_control_recovery_runtime import (
-        CameraControlRecoveryTrackingLoop,
+def test_runtime_main_selects_complete_live_tuning_stack(monkeypatch):
+    from tracker.live_filter_tuning_runtime import (
+        LiveFilterTuningTrackingLoop,
     )
 
     original = tracker_main.TrackingLoop
@@ -211,7 +211,7 @@ def test_runtime_main_selects_full_recovery_loop_during_bootstrap(monkeypatch):
 
     pose_stability_runtime.main()
 
-    assert observed == [CameraControlRecoveryTrackingLoop]
+    assert observed == [LiveFilterTuningTrackingLoop]
     assert tracker_main.TrackingLoop is original
 
 
