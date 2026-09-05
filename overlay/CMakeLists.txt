@@ -59,17 +59,72 @@ if(NOT EXISTS "${DML_DIR}/lib/DirectML.dll")
         "Run: python scripts/bootstrap.py")
 endif()
 
-add_executable(Glassless3DOverlay WIN32 overlay.cpp depth_infer.cpp capture_recovery.cpp)
+# overlay.cpp is intentionally kept as the readable monolithic Windows source.
+# Configure one build copy with the centralized depth-mode policy. Each anchor
+# is required: if the source changes, configuration fails instead of silently
+# losing automatic mode again.
+function(g3d_replace_overlay_required variable needle replacement description)
+    set(before "${${variable}}")
+    string(REPLACE "${needle}" "${replacement}" after "${before}")
+    if(after STREQUAL before)
+        message(FATAL_ERROR
+            "Could not configure overlay depth mode: ${description}")
+    endif()
+    set(${variable} "${after}" PARENT_SCOPE)
+endfunction()
 
-# Only overlay.cpp owns g_depth/g_capTex/g_hasFrame. Enable the visibility
-# guard there without leaking its ShowWindow wrapper into depth_infer.cpp.
-set_source_files_properties(overlay.cpp PROPERTIES
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp"
+)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp" G3D_OVERLAY_SOURCE_TEXT)
+
+g3d_replace_overlay_required(
+    G3D_OVERLAY_SOURCE_TEXT
+    "#include \"capture_recovery.h\"\n#include \"depth_infer.h\""
+    "#include \"capture_recovery.h\"\n#include \"depth_mode_policy.h\"\n#include \"depth_infer.h\""
+    "depth-mode policy include anchor changed"
+)
+g3d_replace_overlay_required(
+    G3D_OVERLAY_SOURCE_TEXT
+    "uint32_t dm = 1;"
+    "uint32_t dm = g3d::depth_mode::DefaultRequestedMode();"
+    "default requested mode anchor changed"
+)
+g3d_replace_overlay_required(
+    G3D_OVERLAY_SOURCE_TEXT
+    "dm = s.depthMode <= 2 ? s.depthMode : 1;"
+    "dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);"
+    "shared settings mode normalization anchor changed"
+)
+g3d_replace_overlay_required(
+    G3D_OVERLAY_SOURCE_TEXT
+    "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast"
+    "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast, 3=auto"
+    "shared settings depth mode comment anchor changed"
+)
+
+set(G3D_CONFIGURED_OVERLAY_SOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/overlay.configured.cpp"
+)
+file(WRITE "${G3D_CONFIGURED_OVERLAY_SOURCE}" "${G3D_OVERLAY_SOURCE_TEXT}")
+
+add_executable(Glassless3DOverlay WIN32
+    "${G3D_CONFIGURED_OVERLAY_SOURCE}"
+    depth_infer.cpp
+    capture_recovery.cpp
+)
+
+# Only the configured overlay source owns g_depth/g_capTex/g_hasFrame. Enable
+# the visibility guard there without leaking its ShowWindow wrapper into
+# depth_infer.cpp.
+set_source_files_properties("${G3D_CONFIGURED_OVERLAY_SOURCE}" PROPERTIES
     COMPILE_DEFINITIONS G3D_OVERLAY_SHOWWINDOW_GUARD
 )
 
 target_compile_definitions(Glassless3DOverlay PRIVATE UNICODE _UNICODE)
 
 target_include_directories(Glassless3DOverlay PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     "${ORT_DIR}/include"
     "${DML_DIR}/include"
 )
