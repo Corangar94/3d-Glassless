@@ -12,10 +12,10 @@ UINT32_MAX = 0xFFFF_FFFF
 def finite_float(value: object, field_name: str) -> float:
     """Return one finite real value without coercing bools or text."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
-        raise ValueError(f"{field_name} must be a finite real number")
+        raise ValueError(f"{field_name} must be a finite float")
     parsed = float(value)
     if not math.isfinite(parsed):
-        raise ValueError(f"{field_name} must be a finite real number")
+        raise ValueError(f"{field_name} must be a finite float")
     return parsed
 
 
