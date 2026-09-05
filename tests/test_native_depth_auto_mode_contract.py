@@ -61,7 +61,7 @@ def test_policy_header_injection_does_not_depend_on_source_line_endings():
     )[1].split("g3d_replace_overlay_once(", 1)[0]
 
     assert "Prepending the small policy header" in setup
-    assert "#include \\"depth_mode_policy.h\\"" in setup
+    assert '#include \\"depth_mode_policy.h\\"' in setup
     assert "capture_recovery.h" not in setup
     assert "depth_infer.h" not in setup
 
