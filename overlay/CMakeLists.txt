@@ -61,15 +61,25 @@ endif()
 
 # overlay.cpp is intentionally kept as the readable monolithic Windows source.
 # Configure one build copy with the centralized depth-mode policy. Each anchor
-# is required: if the source changes, configuration fails instead of silently
-# losing automatic mode again.
-function(g3d_replace_overlay_required variable needle replacement description)
+# must occur exactly once: if the source changes, configuration fails instead of
+# silently losing automatic mode or rewriting an unintended expression.
+function(g3d_replace_overlay_once variable needle replacement description)
     set(before "${${variable}}")
-    string(REPLACE "${needle}" "${replacement}" after "${before}")
-    if(after STREQUAL before)
+    string(LENGTH "${before}" before_length)
+    string(LENGTH "${needle}" needle_length)
+    if(needle_length EQUAL 0)
         message(FATAL_ERROR
-            "Could not configure overlay depth mode: ${description}")
+            "Could not configure overlay depth mode: empty ${description}")
     endif()
+    string(REPLACE "${needle}" "" without_needle "${before}")
+    string(LENGTH "${without_needle}" without_length)
+    math(EXPR match_count
+        "(${before_length} - ${without_length}) / ${needle_length}")
+    if(NOT match_count EQUAL 1)
+        message(FATAL_ERROR
+            "Could not configure overlay depth mode: expected one ${description}, found ${match_count}")
+    endif()
+    string(REPLACE "${needle}" "${replacement}" after "${before}")
     set(${variable} "${after}" PARENT_SCOPE)
 endfunction()
 
@@ -78,29 +88,29 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 )
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp" G3D_OVERLAY_SOURCE_TEXT)
 
-g3d_replace_overlay_required(
-    G3D_OVERLAY_SOURCE_TEXT
-    "#include \"capture_recovery.h\"\n#include \"depth_infer.h\""
-    "#include \"capture_recovery.h\"\n#include \"depth_mode_policy.h\"\n#include \"depth_infer.h\""
-    "depth-mode policy include anchor changed"
+# Prepending the small policy header avoids a line-ending-sensitive multi-line
+# include anchor. cstdint is the only transitive include, so WIN32_LEAN_AND_MEAN
+# still precedes windows.h in the original source body.
+set(G3D_OVERLAY_SOURCE_TEXT
+    "#include \"depth_mode_policy.h\"\n${G3D_OVERLAY_SOURCE_TEXT}"
 )
-g3d_replace_overlay_required(
+g3d_replace_overlay_once(
     G3D_OVERLAY_SOURCE_TEXT
     "uint32_t dm = 1;"
     "uint32_t dm = g3d::depth_mode::DefaultRequestedMode();"
-    "default requested mode anchor changed"
+    "default requested mode anchor"
 )
-g3d_replace_overlay_required(
+g3d_replace_overlay_once(
     G3D_OVERLAY_SOURCE_TEXT
     "dm = s.depthMode <= 2 ? s.depthMode : 1;"
     "dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);"
-    "shared settings mode normalization anchor changed"
+    "shared settings mode normalization anchor"
 )
-g3d_replace_overlay_required(
+g3d_replace_overlay_once(
     G3D_OVERLAY_SOURCE_TEXT
     "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast"
     "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast, 3=auto"
-    "shared settings depth mode comment anchor changed"
+    "shared settings depth mode comment anchor"
 )
 
 set(G3D_CONFIGURED_OVERLAY_SOURCE
