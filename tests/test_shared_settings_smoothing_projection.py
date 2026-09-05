@@ -50,7 +50,7 @@ def test_projection_and_full_reader_share_same_version_marker():
     assert projection.count("VERSION_OFFSET") == 2
     assert "struct.unpack_from(" in full_read
     assert "VERSION_OFFSET" in full_read
-    assert "f[11]" in full_read
+    assert "fields[11]" in full_read
 
 
 def test_live_controller_prefers_projection_and_preserves_full_reader_fallback():
