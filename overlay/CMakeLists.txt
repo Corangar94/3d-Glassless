@@ -60,9 +60,9 @@ if(NOT EXISTS "${DML_DIR}/lib/DirectML.dll")
 endif()
 
 # overlay.cpp is intentionally kept as the readable monolithic Windows source.
-# Configure one build copy with the centralized depth-mode policy. Each anchor
-# must occur exactly once: if the source changes, configuration fails instead of
-# silently losing automatic mode or rewriting an unintended expression.
+# Configure one build copy with the centralized depth-mode policy. Each code
+# anchor must occur exactly once: if the source changes, configuration fails
+# instead of silently losing automatic mode or rewriting another expression.
 function(g3d_replace_overlay_once variable needle replacement description)
     set(before "${${variable}}")
     string(LENGTH "${before}" before_length)
@@ -105,12 +105,6 @@ g3d_replace_overlay_once(
     "dm = s.depthMode <= 2 ? s.depthMode : 1;"
     "dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);"
     "shared settings mode normalization anchor"
-)
-g3d_replace_overlay_once(
-    G3D_OVERLAY_SOURCE_TEXT
-    "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast"
-    "uint32_t  depthMode;      // 0=quality, 1=balanced, 2=fast, 3=auto"
-    "shared settings depth mode comment anchor"
 )
 
 set(G3D_CONFIGURED_OVERLAY_SOURCE
