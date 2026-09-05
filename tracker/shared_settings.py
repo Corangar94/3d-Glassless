@@ -27,11 +27,13 @@ Layout (88 bytes, little-endian):
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
 import math
 import struct
 import threading
+from typing import Iterator
 
 STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
@@ -48,11 +50,19 @@ _PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
 _FILE_MAP_READ = 0x0004
 _INVALID_HANDLE = ctypes.c_void_p(-1)
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_ABANDONED = 0x00000080
+_WAIT_TIMEOUT = 0x00000102
+_WAIT_FAILED = 0xFFFFFFFF
+_WRITE_MUTEX_TIMEOUT_MS = 1000
 
 _k32 = ctypes.windll.kernel32
 _k32.CreateFileMappingW.restype = ctypes.c_void_p
 _k32.OpenFileMappingW.restype = ctypes.c_void_p
 _k32.MapViewOfFile.restype = ctypes.c_void_p
+_k32.CreateMutexW.restype = ctypes.c_void_p
+_k32.WaitForSingleObject.restype = ctypes.c_ulong
+_k32.ReleaseMutex.restype = ctypes.c_int
 _k32.UnmapViewOfFile.argtypes = [ctypes.c_void_p]
 _k32.CloseHandle.argtypes = [ctypes.c_void_p]
 
@@ -115,6 +125,23 @@ def _settings_versions(current_version: int) -> tuple[int, int]:
     return writing_version & _UINT32_MAX, committed_version
 
 
+def _normalized_committed_version(marker: int) -> int:
+    """Return an even base after a clean commit or abandoned odd write."""
+    value = int(marker) & _UINT32_MAX
+    if value & 1:
+        return (value + 1) & 0xFFFF_FFFE
+    return value
+
+
+def _mapping_version(view: int) -> int:
+    return ctypes.c_uint32.from_address(view + VERSION_OFFSET).value
+
+
+def _mapping_has_payload(view: int) -> bool:
+    raw = (ctypes.c_ubyte * STRUCT_SIZE).from_address(view)
+    return any(raw)
+
+
 def _pack_settings(s: OverlaySettings, committed_version: int) -> bytes:
     """Validate and pack a complete even-version snapshot before publication."""
     return struct.pack(
@@ -144,13 +171,51 @@ def _pack_settings(s: OverlaySettings, committed_version: int) -> bytes:
     )
 
 
+@contextmanager
+def _acquired_write_mutex(
+    handle: int,
+    name: str,
+) -> Iterator[None]:
+    result = int(
+        _k32.WaitForSingleObject(handle, _WRITE_MUTEX_TIMEOUT_MS)
+    )
+    if result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+        if result == _WAIT_TIMEOUT:
+            raise TimeoutError(
+                f"timed out coordinating shared-settings writer {name!r}"
+            )
+        if result == _WAIT_FAILED:
+            raise ctypes.WinError(ctypes.get_last_error())
+        raise OSError(
+            f"unexpected shared-settings mutex result 0x{result:08x}"
+        )
+    try:
+        yield
+    except BaseException:
+        # Preserve the publication/validation exception. Release failure is less
+        # actionable and must not replace the original cause.
+        _k32.ReleaseMutex(handle)
+        raise
+    else:
+        if not _k32.ReleaseMutex(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
 class SharedSettingsWriter:
-    """Creates and owns the G3D_Settings shared memory segment."""
+    """Creates or joins the coordinated G3D_Settings writer channel.
+
+    All updated writers serialize publication through a named kernel mutex and
+    derive the next version from the mapping itself. A newly attached writer
+    therefore preserves an existing committed snapshot instead of resetting it
+    to defaults, and multiple writer processes cannot interleave body slices or
+    reuse the same even version.
+    """
 
     def __init__(self, name: str = SHM_NAME) -> None:
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None
+        self._mutex_handle: int | None = None
         self._version: int = 0
         self._write_lock = threading.Lock()
 
@@ -163,50 +228,111 @@ class SharedSettingsWriter:
             self._handle, _FILE_MAP_ALL_ACCESS, 0, 0, STRUCT_SIZE,
         )
         if self._view is None:
-            err = ctypes.get_last_error()
+            error = ctypes.get_last_error()
             _k32.CloseHandle(self._handle)
             self._handle = None
-            raise ctypes.WinError(err)
+            raise ctypes.WinError(error)
+        self._mutex_handle = _k32.CreateMutexW(
+            None,
+            False,
+            f"{name}_WriteMutex",
+        )
+        if self._mutex_handle is None:
+            error = ctypes.get_last_error()
+            self.close()
+            raise ctypes.WinError(error)
 
-        self.write(OverlaySettings())
+        try:
+            with self._process_write_guard():
+                self._initialize_mapping_locked(self._view)
+        except BaseException:
+            self.close()
+            raise
 
-    def write(self, s: OverlaySettings) -> None:
+    @contextmanager
+    def _process_write_guard(self) -> Iterator[None]:
+        handle = getattr(self, "_mutex_handle", None)
+        if handle is None:
+            # Focused direct tests and historical subclasses that build a bare
+            # writer keep the original in-process locking behavior.
+            yield
+            return
+        with _acquired_write_mutex(handle, self._name):
+            yield
+
+    def _publish_locked(
+        self,
+        settings: OverlaySettings,
+        base_version: int,
+    ) -> None:
+        view = self._view
+        if view is None:
+            raise RuntimeError("write() called after close()")
+        writing_version, committed_version = _settings_versions(
+            base_version
+        )
+        # Build the complete snapshot before marking the mapping odd. A bad
+        # UI/config value can therefore raise without making the last valid
+        # settings unreadable.
+        data = _pack_settings(settings, committed_version)
+        writing_marker = struct.pack("<I", writing_version)
+        committed_marker = data[VERSION_OFFSET:_VERSION_END]
+
+        # The version lives in the middle of the ABI. Copying the complete
+        # even-version struct in one memmove could expose that even marker
+        # before the trailing stereo/panel/tracking fields were installed.
+        # Keep the marker odd while both body slices are copied, then commit
+        # the even version in the final aligned four-byte store.
+        ctypes.memmove(
+            view + VERSION_OFFSET,
+            writing_marker,
+            _VERSION_SIZE,
+        )
+        ctypes.memmove(view, data[:VERSION_OFFSET], VERSION_OFFSET)
+        ctypes.memmove(
+            view + _VERSION_END,
+            data[_VERSION_END:],
+            STRUCT_SIZE - _VERSION_END,
+        )
+        ctypes.memmove(
+            view + VERSION_OFFSET,
+            committed_marker,
+            _VERSION_SIZE,
+        )
+        self._version = committed_version
+
+    def _initialize_mapping_locked(self, view: int) -> None:
+        marker = _mapping_version(view)
+        if not (marker & 1) and (marker != 0 or _mapping_has_payload(view)):
+            # Existing committed channel, including the legitimate uint32
+            # rollover snapshot at version zero. Do not inject defaults between
+            # a surviving reader and the caller's first real write.
+            self._version = marker
+            return
+
+        # A zero-filled new mapping or an abandoned odd transaction has no
+        # reliable committed payload. Publish one complete default snapshot so
+        # readers never accept zeroed physical settings as a valid state.
+        self._publish_locked(
+            OverlaySettings(),
+            _normalized_committed_version(marker),
+        )
+
+    def write(self, settings: OverlaySettings) -> None:
         with self._write_lock:
             view = self._view
             if view is None:
                 raise RuntimeError("write() called after close()")
-            writing_version, committed_version = _settings_versions(
-                self._version
-            )
-            # Build the complete snapshot before marking the mapping odd. A bad
-            # UI/config value can therefore raise without making the last valid
-            # settings unreadable.
-            data = _pack_settings(s, committed_version)
-            writing_marker = struct.pack("<I", writing_version)
-            committed_marker = data[VERSION_OFFSET:_VERSION_END]
-
-            # The version lives in the middle of the ABI. Copying the complete
-            # even-version struct in one memmove could expose that even marker
-            # before the trailing stereo/panel/tracking fields were installed.
-            # Keep the marker odd while both body slices are copied, then commit
-            # the even version in the final aligned four-byte store.
-            ctypes.memmove(
-                view + VERSION_OFFSET,
-                writing_marker,
-                _VERSION_SIZE,
-            )
-            ctypes.memmove(view, data[:VERSION_OFFSET], VERSION_OFFSET)
-            ctypes.memmove(
-                view + _VERSION_END,
-                data[_VERSION_END:],
-                STRUCT_SIZE - _VERSION_END,
-            )
-            ctypes.memmove(
-                view + VERSION_OFFSET,
-                committed_marker,
-                _VERSION_SIZE,
-            )
-            self._version = committed_version
+            with self._process_write_guard():
+                # Coordinated writers use the mapping as the source of truth.
+                # Bare historical/test writers retain their local version.
+                if getattr(self, "_mutex_handle", None) is None:
+                    base_version = self._version
+                else:
+                    base_version = _normalized_committed_version(
+                        _mapping_version(view)
+                    )
+                self._publish_locked(settings, base_version)
 
     def close(self) -> None:
         with self._write_lock:
@@ -216,6 +342,9 @@ class SharedSettingsWriter:
             if self._handle is not None:
                 _k32.CloseHandle(self._handle)
                 self._handle = None
+            if self._mutex_handle is not None:
+                _k32.CloseHandle(self._mutex_handle)
+                self._mutex_handle = None
 
     def __enter__(self) -> "SharedSettingsWriter":
         return self
@@ -233,18 +362,32 @@ class SharedSettingsReader:
         self._view: int | None = None
         self._try_attach()
 
+    def _detach(self) -> None:
+        view = self._view
+        handle = self._handle
+        self._view = None
+        self._handle = None
+        if view is not None:
+            _k32.UnmapViewOfFile(view)
+        if handle is not None:
+            _k32.CloseHandle(handle)
+
     def _try_attach(self) -> None:
         if self._view is not None:
             return
         if self._handle is None:
-            self._handle = _k32.OpenFileMappingW(_FILE_MAP_READ, False, self._name)
+            self._handle = _k32.OpenFileMappingW(
+                _FILE_MAP_READ,
+                False,
+                self._name,
+            )
             if self._handle is None:
                 return  # writer not running yet
         self._view = _k32.MapViewOfFile(
             self._handle, _FILE_MAP_READ, 0, 0, STRUCT_SIZE,
         )
         if self._view is None:
-            # Map failed; close handle so next call retries cleanly
+            # Map failed; close handle so next call retries cleanly.
             _k32.CloseHandle(self._handle)
             self._handle = None
 
@@ -279,7 +422,7 @@ class SharedSettingsReader:
                     return second_version, float(smoothing_alpha)
             return None
         except (OSError, ValueError):
-            self._view = None  # stale view; force re-attach next call
+            self._detach()
             return None
 
     def read(self) -> OverlaySettings | None:
@@ -289,7 +432,7 @@ class SharedSettingsReader:
             return None
         try:
             raw = (ctypes.c_char * STRUCT_SIZE).from_address(self._view)
-            f = None
+            fields = None
             for _ in range(4):
                 first = bytes(raw)
                 first_version = struct.unpack_from(
@@ -305,39 +448,34 @@ class SharedSettingsReader:
                     first_version == second_version
                     and not (second_version & 1)
                 ):
-                    f = struct.unpack(STRUCT_FORMAT, second)
+                    fields = struct.unpack(STRUCT_FORMAT, second)
                     break
-            if f is None:
+            if fields is None:
                 return None
         except (OSError, ValueError):
-            self._view = None  # stale view; force re-attach next call
+            self._detach()
             return None
         return OverlaySettings(
-            strength_x=f[0], strength_y=f[1],
-            virtual_depth_cm=f[2],
-            screen_w_cm=f[3], screen_h_cm=f[4],
-            depth_curve=f[5],
-            depth_gamma=f[6], focus_radius=f[7],
-            head_dist_cm=f[8], camera_fov_deg=f[9],
-            ipd_mm=f[10], smoothing_alpha=f[11],
-            deadzone_mm=f[12],
-            display_backend=f[13],
-            depth_mode=f[14],
-            stereo_layout=f[16],
-            eye_order=f[17],
-            panel_width_px=f[18],
-            panel_height_px=f[19],
-            focus_plane_cm=f[20],
-            tracking_mode=f[21],
+            strength_x=fields[0], strength_y=fields[1],
+            virtual_depth_cm=fields[2],
+            screen_w_cm=fields[3], screen_h_cm=fields[4],
+            depth_curve=fields[5],
+            depth_gamma=fields[6], focus_radius=fields[7],
+            head_dist_cm=fields[8], camera_fov_deg=fields[9],
+            ipd_mm=fields[10], smoothing_alpha=fields[11],
+            deadzone_mm=fields[12],
+            display_backend=fields[13],
+            depth_mode=fields[14],
+            stereo_layout=fields[16],
+            eye_order=fields[17],
+            panel_width_px=fields[18],
+            panel_height_px=fields[19],
+            focus_plane_cm=fields[20],
+            tracking_mode=fields[21],
         )
 
     def close(self) -> None:
-        if self._view is not None:
-            _k32.UnmapViewOfFile(self._view)
-            self._view = None
-        if self._handle is not None:
-            _k32.CloseHandle(self._handle)
-            self._handle = None
+        self._detach()
 
     def __enter__(self) -> "SharedSettingsReader":
         return self
