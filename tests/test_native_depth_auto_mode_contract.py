@@ -45,7 +45,7 @@ def test_overlay_build_fails_if_any_mode_anchor_disappears():
     assert "if(after STREQUAL before)" in helper
     assert "message(FATAL_ERROR" in helper
     assert "PARENT_SCOPE" in helper
-    assert cmake.count("g3d_replace_overlay_required(") == 5
+    assert cmake.count("g3d_replace_overlay_required(") == 4
 
 
 def test_inferencer_accepts_auto_and_resolves_it_at_run_time():
