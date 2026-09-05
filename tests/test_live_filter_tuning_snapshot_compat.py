@@ -30,3 +30,5 @@ def test_original_positional_snapshot_constructor_remains_compatible():
     assert snapshot.unchanged_version_count == 0
     assert snapshot.invalid_version_sample_count == 0
     assert snapshot.last_seen_settings_version is None
+    assert snapshot.version_value_collision_count == 0
+    assert snapshot.last_seen_settings_value is None

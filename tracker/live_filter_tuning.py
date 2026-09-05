@@ -86,6 +86,8 @@ class LiveFilterTuningSnapshot:
     unchanged_version_count: int = 0
     invalid_version_sample_count: int = 0
     last_seen_settings_version: int | None = None
+    version_value_collision_count: int = 0
+    last_seen_settings_value: float | None = None
 
 
 @dataclass(frozen=True)
@@ -103,8 +105,12 @@ class LiveFilterTuningController:
 
     Readers may additionally provide ``read_smoothing_alpha()`` returning
     ``(committed_version, smoothing_alpha)``. That fast path reads only the
-    seqlock marker and one float, so an unchanged settings version avoids two
+    seqlock marker and one float, so an unchanged version/value pair avoids two
     full-struct copies, unpacking, validation, and dataclass construction.
+
+    A changed scalar carrying a reused even version is admitted defensively.
+    Updated writers coordinate versions across processes, but this also recovers
+    from a legacy writer restart or another producer that reused its counter.
 
     The controller remains independent from the Windows shared-memory
     implementation. Any optional reader or setter failure leaves the filter on
@@ -133,6 +139,7 @@ class LiveFilterTuningController:
         self._clock = clock
         self._last_poll_s: float | None = None
         self._last_seen_settings_version: int | None = None
+        self._last_seen_settings_value: float | None = None
         self._last_applied_measurement_noise: float | None = None
         self._poll_count = 0
         self._skipped_poll_count = 0
@@ -148,6 +155,7 @@ class LiveFilterTuningController:
         self._version_fast_path_count = 0
         self._unchanged_version_count = 0
         self._invalid_version_sample_count = 0
+        self._version_value_collision_count = 0
         self._closed = False
         self._last_error = ""
 
@@ -221,6 +229,20 @@ class LiveFilterTuningController:
             value=parsed_value,
         )
 
+    def _commit_version_sample(
+        self,
+        version: int | None,
+        source: object,
+    ) -> None:
+        if version is None:
+            return
+        self._last_seen_settings_version = version
+        self._last_seen_settings_value = (
+            source.value
+            if isinstance(source, _VersionedMeasurementNoise)
+            else None
+        )
+
     def _poll_time(self, now_s: object | None) -> float | None:
         if now_s is not None:
             parsed = self._finite_time(now_s)
@@ -252,11 +274,17 @@ class LiveFilterTuningController:
                 self._invalid_version_sample_count += 1
                 return None, None, _INVALID
             if parsed.version == self._last_seen_settings_version:
-                self._unchanged_version_count += 1
-                return None, parsed.version, _MISSING
+                if (
+                    self._last_seen_settings_value is not None
+                    and parsed.value == self._last_seen_settings_value
+                ):
+                    self._unchanged_version_count += 1
+                    return None, parsed.version, _MISSING
+                if self._last_seen_settings_value is not None:
+                    self._version_value_collision_count += 1
             value = self._measurement_noise_value(parsed.value)
             if value is None:
-                return None, parsed.version, _INVALID
+                return None, parsed.version, parsed
             return value, parsed.version, parsed
 
         settings = self._reader.read()
@@ -320,11 +348,10 @@ class LiveFilterTuningController:
             return False
         if source is _INVALID or measurement_noise is None:
             self._invalid_value_count += 1
-            # A stable committed version cannot change in place. Remember an
-            # invalid version so the same bad value is not revalidated at 10 Hz;
-            # a writer update gets a new even version and is checked normally.
-            if version is not None:
-                self._last_seen_settings_version = version
+            # Remember the exact stable version/value pair. A legacy writer that
+            # reuses the version with a different scalar is checked again rather
+            # than leaving the filter pinned to the prior session.
+            self._commit_version_sample(version, source)
             self._last_error = "live smoothing value is invalid or out of range"
             return False
 
@@ -334,8 +361,7 @@ class LiveFilterTuningController:
             and abs(measurement_noise - previous)
             <= self._policy.change_epsilon
         ):
-            if version is not None:
-                self._last_seen_settings_version = version
+            self._commit_version_sample(version, source)
             self._unchanged_count += 1
             self._last_error = ""
             return False
@@ -348,13 +374,12 @@ class LiveFilterTuningController:
                 "live smoothing filter update failed: "
                 f"{type(error).__name__}"
             )
-            # Do not commit the version. The same settings snapshot can retry at
-            # the next bounded poll after a transient target failure.
+            # Do not commit the version/value pair. The same settings snapshot
+            # can retry at the next bounded poll after a transient target failure.
             return False
 
         self._last_applied_measurement_noise = measurement_noise
-        if version is not None:
-            self._last_seen_settings_version = version
+        self._commit_version_sample(version, source)
         self._applied_count += 1
         self._last_error = ""
         return True
@@ -405,4 +430,8 @@ class LiveFilterTuningController:
             last_seen_settings_version=(
                 self._last_seen_settings_version
             ),
+            version_value_collision_count=(
+                self._version_value_collision_count
+            ),
+            last_seen_settings_value=self._last_seen_settings_value,
         )

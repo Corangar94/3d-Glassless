@@ -66,11 +66,12 @@ def test_first_versioned_value_applies_without_full_settings_read():
     snapshot = controller.snapshot()
     assert snapshot.version_fast_path_count == 1
     assert snapshot.last_seen_settings_version == 2
+    assert snapshot.last_seen_settings_value == pytest.approx(0.28)
 
 
-def test_unchanged_version_skips_value_processing_and_target_update():
+def test_unchanged_version_and_value_skip_target_update():
     _reader, target, controller = _controller(
-        [(2, 0.28), (2, 0.99)]
+        [(2, 0.28), (2, 0.28)]
     )
 
     assert controller.poll(1.0)
@@ -79,12 +80,29 @@ def test_unchanged_version_skips_value_processing_and_target_update():
     assert target.values == [0.28]
     snapshot = controller.snapshot()
     assert snapshot.unchanged_version_count == 1
+    assert snapshot.version_value_collision_count == 0
     assert snapshot.unchanged_count == 0
 
 
-def test_new_version_with_same_value_commits_version_without_reapplying():
+def test_reused_version_with_changed_value_is_admitted_defensively():
     _reader, target, controller = _controller(
-        [(2, 0.28), (4, 0.28), (4, 0.99)]
+        [(2, 0.28), (2, 0.44)]
+    )
+
+    assert controller.poll(1.0)
+    assert controller.poll(2.0)
+
+    assert target.values == pytest.approx([0.28, 0.44])
+    snapshot = controller.snapshot()
+    assert snapshot.last_seen_settings_version == 2
+    assert snapshot.last_seen_settings_value == pytest.approx(0.44)
+    assert snapshot.version_value_collision_count == 1
+    assert snapshot.unchanged_version_count == 0
+
+
+def test_new_version_with_same_value_commits_pair_without_reapplying():
+    _reader, target, controller = _controller(
+        [(2, 0.28), (4, 0.28), (4, 0.28)]
     )
 
     assert controller.poll(1.0)
@@ -94,24 +112,28 @@ def test_new_version_with_same_value_commits_version_without_reapplying():
     assert target.values == [0.28]
     snapshot = controller.snapshot()
     assert snapshot.last_seen_settings_version == 4
+    assert snapshot.last_seen_settings_value == pytest.approx(0.28)
     assert snapshot.unchanged_count == 1
     assert snapshot.unchanged_version_count == 1
 
 
-def test_sub_epsilon_value_commits_version_then_skips_that_version():
+def test_sub_epsilon_value_commits_pair_but_changed_reused_version_recovers():
     _reader, target, controller = _controller(
         [(2, 0.20), (4, 0.2009), (4, 0.40)]
     )
 
     assert controller.poll(1.0)
     assert not controller.poll(2.0)
-    assert not controller.poll(3.0)
+    assert controller.poll(3.0)
 
-    assert target.values == pytest.approx([0.20])
-    assert controller.snapshot().last_seen_settings_version == 4
+    assert target.values == pytest.approx([0.20, 0.40])
+    snapshot = controller.snapshot()
+    assert snapshot.last_seen_settings_version == 4
+    assert snapshot.last_seen_settings_value == pytest.approx(0.40)
+    assert snapshot.version_value_collision_count == 1
 
 
-def test_target_failure_does_not_commit_version_so_snapshot_can_retry():
+def test_target_failure_does_not_commit_pair_so_snapshot_can_retry():
     target = _Target()
     target.error = RuntimeError("temporary filter failure")
     _reader, target, controller = _controller(
@@ -120,12 +142,17 @@ def test_target_failure_does_not_commit_version_so_snapshot_can_retry():
     )
 
     assert not controller.poll(1.0)
-    assert controller.snapshot().last_seen_settings_version is None
+    failed = controller.snapshot()
+    assert failed.last_seen_settings_version is None
+    assert failed.last_seen_settings_value is None
 
     target.error = None
     assert controller.poll(2.0)
     assert target.values == [0.20]
-    assert controller.snapshot().last_seen_settings_version == 2
+    snapshot = controller.snapshot()
+    assert snapshot.last_seen_settings_version == 2
+    assert snapshot.last_seen_settings_value == pytest.approx(0.20)
+    assert snapshot.version_value_collision_count == 0
 
 
 @pytest.mark.parametrize(
@@ -154,19 +181,35 @@ def test_malformed_or_odd_versioned_sample_fails_closed(sample):
     assert snapshot.invalid_version_sample_count == 1
     assert snapshot.invalid_value_count == 1
     assert snapshot.last_seen_settings_version is None
+    assert snapshot.last_seen_settings_value is None
 
 
-def test_out_of_range_value_marks_stable_version_seen_once():
+def test_out_of_range_value_marks_stable_pair_seen_once():
     _reader, target, controller = _controller([(2, 1.5), (2, 1.5)])
 
     assert not controller.poll(1.0)
-    assert controller.snapshot().last_seen_settings_version == 2
+    first = controller.snapshot()
+    assert first.last_seen_settings_version == 2
+    assert first.last_seen_settings_value == pytest.approx(1.5)
     assert not controller.poll(2.0)
 
     snapshot = controller.snapshot()
     assert snapshot.invalid_value_count == 1
     assert snapshot.unchanged_version_count == 1
     assert target.values == []
+
+
+def test_changed_value_under_reused_invalid_version_is_revalidated():
+    _reader, target, controller = _controller([(2, 1.5), (2, 0.30)])
+
+    assert not controller.poll(1.0)
+    assert controller.poll(2.0)
+
+    assert target.values == pytest.approx([0.30])
+    snapshot = controller.snapshot()
+    assert snapshot.invalid_value_count == 1
+    assert snapshot.version_value_collision_count == 1
+    assert snapshot.last_seen_settings_value == pytest.approx(0.30)
 
 
 def test_unavailable_and_read_exception_keep_existing_failure_behavior():
