@@ -177,7 +177,10 @@ def test_concurrent_writers_publish_unique_monotonic_even_versions(
                 )
             )
             with committed_lock:
-                committed.append(_mapping_version(view))
+                # The writer-local version belongs to this completed call. A
+                # mapping read after releasing the process mutex could already
+                # observe another writer's later commit and make the test race.
+                committed.append(writer._version)
 
     threads = [
         threading.Thread(target=write_many, args=(first, 1.0)),
