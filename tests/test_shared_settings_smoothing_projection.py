@@ -66,29 +66,48 @@ def test_live_controller_prefers_projection_and_preserves_full_reader_fallback()
 
     assert projection < callable_gate < full_read
     assert "parsed.version == self._last_seen_settings_version" in reader
+    assert "parsed.value == self._last_seen_settings_value" in reader
     assert "self._unchanged_version_count += 1" in reader
+    assert "self._version_value_collision_count += 1" in reader
 
 
-def test_apply_failure_does_not_commit_version_before_retry():
+def test_apply_failure_does_not_commit_version_value_pair_before_retry():
     source = _source("tracker/live_filter_tuning.py")
     poll = source.split("    def poll(", 1)[1].split("    def close(", 1)[0]
 
     setter = poll.index("self._target.set_measurement_noise(measurement_noise)")
     failure = poll.index("except Exception as error:", setter)
-    success_version = poll.index(
-        "self._last_seen_settings_version = version",
+    success_commit = poll.index(
+        "self._commit_version_sample(version, source)",
         failure,
     )
 
-    assert setter < failure < success_version
-    failure_block = poll[failure:success_version]
-    assert "Do not commit the version" in failure_block
-    assert "self._last_seen_settings_version = version" not in failure_block
+    assert setter < failure < success_commit
+    failure_block = poll[failure:success_commit]
+    assert "Do not commit the version/value pair" in failure_block
+    assert "self._commit_version_sample" not in failure_block
 
 
-def test_documentation_records_projection_and_legacy_fallback():
+def test_writer_coordination_reads_mapping_version_under_named_mutex():
+    source = _source("tracker/shared_settings.py")
+    write = source.split("    def write(self, settings:", 1)[1].split(
+        "    def close(self)",
+        1,
+    )[0]
+
+    process_guard = write.index("with self._process_write_guard():")
+    mapping_version = write.index("_mapping_version(view)")
+    publish = write.index("self._publish_locked(settings, base_version)")
+
+    assert process_guard < mapping_version < publish
+    assert 'f"{name}_WriteMutex"' in source
+
+
+def test_documentation_records_projection_legacy_fallback_and_writer_coordination():
     docs = _source("docs/LIVE_FILTER_TUNING.md")
 
     assert "version-aware scalar projection" in docs
     assert "two full 88-byte snapshots" in docs
     assert "Readers without the projection method" in docs
+    assert "named Windows mutex" in docs
+    assert "preserves the existing committed snapshot" in docs
