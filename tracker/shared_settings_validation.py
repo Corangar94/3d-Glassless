@@ -13,7 +13,10 @@ def finite_float(value: object, field_name: str) -> float:
     """Return one finite real value without coercing bools or text."""
     if isinstance(value, bool) or not isinstance(value, numbers.Real):
         raise ValueError(f"{field_name} must be a finite float")
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{field_name} must be a finite float") from error
     if not math.isfinite(parsed):
         raise ValueError(f"{field_name} must be a finite float")
     return parsed
