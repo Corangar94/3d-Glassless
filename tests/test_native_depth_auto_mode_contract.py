@@ -50,7 +50,7 @@ def test_overlay_build_fails_unless_each_mode_anchor_is_unique():
     assert "if(NOT match_count EQUAL 1)" in helper
     assert "message(FATAL_ERROR" in helper
     assert "PARENT_SCOPE" in helper
-    assert cmake.count("g3d_replace_overlay_once(") == 3
+    assert cmake.count("g3d_replace_overlay_once(") == 2
 
 
 def test_policy_header_injection_does_not_depend_on_source_line_endings():
