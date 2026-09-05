@@ -97,6 +97,19 @@ def test_shared_settings_and_repository_default_request_auto():
     assert config["overlay"]["depth_performance_mode"] == "auto"
 
 
+def test_production_overlay_build_uses_configured_cmake_target():
+    bootstrap = _source("scripts/_bootstrap_core.py")
+    build = bootstrap.split("def step_build_overlay()", 1)[1].split(
+        "\n\n# -- Main",
+        1,
+    )[0]
+
+    assert '[cmake, OVERLAY_SRC, "-B", build_dir' in build
+    assert '[cmake, "--build", build_dir' in build
+    assert "[gpp, " not in build
+    assert "overlay.cpp" not in build
+
+
 def test_native_depth_mode_suite_is_registered_with_ctest():
     cmake = _source("overlay/CMakeLists.txt")
 
