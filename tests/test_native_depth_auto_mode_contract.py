@@ -30,22 +30,40 @@ def test_configured_overlay_uses_policy_for_default_and_shared_request():
         '"dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);"'
         in cmake
     )
-    assert '"depth_mode_policy.h"' in cmake
+    assert (
+        '"#include \\"depth_mode_policy.h\\"\\n${G3D_OVERLAY_SOURCE_TEXT}"'
+        in cmake
+    )
     assert "CMAKE_CONFIGURE_DEPENDS" in cmake
     assert "overlay.configured.cpp" in cmake
 
 
-def test_overlay_build_fails_if_any_mode_anchor_disappears():
+def test_overlay_build_fails_unless_each_mode_anchor_is_unique():
     cmake = _source("overlay/CMakeLists.txt")
     helper = cmake.split(
-        "function(g3d_replace_overlay_required",
+        "function(g3d_replace_overlay_once",
         1,
     )[1].split("endfunction()", 1)[0]
 
-    assert "if(after STREQUAL before)" in helper
+    assert "string(LENGTH" in helper
+    assert "match_count" in helper
+    assert "if(NOT match_count EQUAL 1)" in helper
     assert "message(FATAL_ERROR" in helper
     assert "PARENT_SCOPE" in helper
-    assert cmake.count("g3d_replace_overlay_required(") == 4
+    assert cmake.count("g3d_replace_overlay_once(") == 3
+
+
+def test_policy_header_injection_does_not_depend_on_source_line_endings():
+    cmake = _source("overlay/CMakeLists.txt")
+    setup = cmake.split(
+        'file(READ "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp"',
+        1,
+    )[1].split("g3d_replace_overlay_once(", 1)[0]
+
+    assert "Prepending the small policy header" in setup
+    assert "#include \\"depth_mode_policy.h\\"" in setup
+    assert "capture_recovery.h" not in setup
+    assert "depth_infer.h" not in setup
 
 
 def test_inferencer_accepts_auto_and_resolves_it_at_run_time():
