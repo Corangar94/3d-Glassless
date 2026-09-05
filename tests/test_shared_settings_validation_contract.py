@@ -25,8 +25,8 @@ def test_pack_settings_routes_every_wire_field_through_strict_validation():
     assert pack.count("_finite_float(") == 13
     assert pack.count("_enum_uint32(") == 6
     assert pack.count("\n        _uint32(") == 3
-    assert "float(" not in pack
-    assert "int(" not in pack
+    assert "\n        float(" not in pack
+    assert "\n        int(" not in pack
 
 
 def test_every_abi_enum_has_an_explicit_domain():
