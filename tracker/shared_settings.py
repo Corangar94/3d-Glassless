@@ -30,10 +30,16 @@ from __future__ import annotations
 from contextlib import contextmanager
 import ctypes
 from dataclasses import dataclass
-import math
 import struct
 import threading
 from typing import Iterator
+
+from tracker.shared_settings_validation import (
+    UINT32_MAX as _UINT32_MAX,
+    enum_uint32 as _enum_uint32,
+    finite_float as _finite_float,
+    uint32 as _uint32,
+)
 
 STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)  # == 88
@@ -44,7 +50,6 @@ VERSION_OFFSET = struct.calcsize("<fffffIfffffffII")
 _VERSION_SIZE = struct.calcsize("<I")
 _VERSION_END = VERSION_OFFSET + _VERSION_SIZE
 SHM_NAME = "G3D_Settings"
-_UINT32_MAX = 0xFFFF_FFFF
 
 _PAGE_READWRITE = 0x04
 _FILE_MAP_ALL_ACCESS = 0xF001F
@@ -92,32 +97,6 @@ class OverlaySettings:
     tracking_mode: int = 0
 
 
-def _finite_float(value: object, field_name: str) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(
-            f"{field_name} must be a finite float"
-        ) from error
-    if not math.isfinite(parsed):
-        raise ValueError(f"{field_name} must be a finite float")
-    return parsed
-
-
-def _uint32(value: object, field_name: str) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError(
-            f"{field_name} must be an unsigned 32-bit integer"
-        ) from error
-    if not 0 <= parsed <= _UINT32_MAX:
-        raise ValueError(
-            f"{field_name} must be an unsigned 32-bit integer"
-        )
-    return parsed
-
-
 def _settings_versions(current_version: int) -> tuple[int, int]:
     """Return the odd writing marker and following even committed version."""
     writing_version = (int(current_version) + 1) | 1
@@ -151,7 +130,7 @@ def _pack_settings(s: OverlaySettings, committed_version: int) -> bytes:
         _finite_float(s.virtual_depth_cm, "virtual_depth_cm"),
         _finite_float(s.screen_w_cm, "screen_w_cm"),
         _finite_float(s.screen_h_cm, "screen_h_cm"),
-        _uint32(s.depth_curve, "depth_curve"),
+        _enum_uint32(s.depth_curve, "depth_curve", (0, 1, 2)),
         _finite_float(s.depth_gamma, "depth_gamma"),
         _finite_float(s.focus_radius, "focus_radius"),
         _finite_float(s.head_dist_cm, "head_dist_cm"),
@@ -159,15 +138,15 @@ def _pack_settings(s: OverlaySettings, committed_version: int) -> bytes:
         _finite_float(s.ipd_mm, "ipd_mm"),
         _finite_float(s.smoothing_alpha, "smoothing_alpha"),
         _finite_float(s.deadzone_mm, "deadzone_mm"),
-        _uint32(s.display_backend, "display_backend"),
-        _uint32(s.depth_mode, "depth_mode"),
+        _enum_uint32(s.display_backend, "display_backend", (0, 1, 2)),
+        _enum_uint32(s.depth_mode, "depth_mode", (0, 1, 2, 3)),
         _uint32(committed_version, "version"),
-        _uint32(s.stereo_layout, "stereo_layout"),
-        _uint32(s.eye_order, "eye_order"),
+        _enum_uint32(s.stereo_layout, "stereo_layout", (0, 1)),
+        _enum_uint32(s.eye_order, "eye_order", (0, 1)),
         _uint32(s.panel_width_px, "panel_width_px"),
         _uint32(s.panel_height_px, "panel_height_px"),
         _finite_float(s.focus_plane_cm, "focus_plane_cm"),
-        _uint32(s.tracking_mode, "tracking_mode"),
+        _enum_uint32(s.tracking_mode, "tracking_mode", (0, 1)),
     )
 
 
