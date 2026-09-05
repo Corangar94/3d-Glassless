@@ -19,9 +19,9 @@ This matters because the overlay reapplies settings every render iteration. The 
 
 ## Build integration
 
-`depth_mode_policy.h` is the single source of truth for supported mode values, the default request, and invalid-value normalization. The monolithic Windows overlay is configured into the build directory with exact required substitutions that include and call this policy. Configuration fails if any source anchor changes, preventing a future source edit from silently dropping the adaptive path.
+`depth_mode_policy.h` is the single source of truth for supported mode values, the default request, and invalid-value normalization. The monolithic Windows overlay is configured into the build directory with the policy header prepended and three exact source substitutions. Each substitution anchor must occur exactly once; configuration fails if an anchor disappears or becomes ambiguous.
 
-The generated translation unit otherwise remains byte-for-byte equivalent to `overlay.cpp`, and CMake tracks the source as a configure dependency. The source directory is added to the include path so the generated file resolves the existing native headers.
+The header injection does not depend on source line endings, so Windows CRLF and repository LF checkouts behave the same. Apart from that injected include, the two functional substitutions, and the corrected ABI comment, the generated translation unit is identical to `overlay.cpp`. CMake tracks the source as a configure dependency and adds the source directory to the include path for the generated file.
 
 ## Diagnostics
 
