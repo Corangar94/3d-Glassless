@@ -11,6 +11,11 @@ struct SourceIdentity {
     uint64_t captured_ms = 0;
 };
 
+inline bool SameSource(SourceIdentity a, SourceIdentity b) {
+    return a.generation != 0 && a.generation == b.generation
+        && a.captured_ms == b.captured_ms;
+}
+
 enum class PublishDecision : uint8_t {
     Accept,
     InvalidGeneration,
@@ -19,8 +24,8 @@ enum class PublishDecision : uint8_t {
 };
 
 struct FreshnessPolicy {
-    // Matches the parallax-health zero-strength depth-age boundary. A result at
-    // the exact boundary remains valid; an older result cannot restart blending.
+    // The changing-scene age budget. A fully covered result for the exact held
+    // image can still be useful later; its original source age is never rewritten.
     uint64_t max_source_age_ms = 750;
 };
 
@@ -52,13 +57,20 @@ public:
     explicit ResultFreshnessGate(FreshnessPolicy policy = {})
         : policy_(policy) {}
 
-    PublishDecision consider(SourceIdentity source, uint64_t now_ms) {
+    PublishDecision consider(SourceIdentity source, uint64_t now_ms,
+                             SourceIdentity held_source = {},
+                             bool complete_frame = false) {
         if (source.generation == 0) {
             ++invalid_drop_count_;
             remember_rejection(source.generation, 0);
             return PublishDecision::InvalidGeneration;
         }
-        if (source.generation <= last_published_generation_) {
+        // Permit one partial -> complete upgrade of the SAME capture. The
+        // original timestamp must match; duplicates and older sources still fail.
+        const bool completion_upgrade = complete_frame && !last_published_complete_
+            && source.generation == last_published_generation_
+            && source.captured_ms == last_published_source_ms_;
+        if (source.generation <= last_published_generation_ && !completion_upgrade) {
             ++nonmonotonic_drop_count_;
             remember_rejection(
                 source.generation,
@@ -67,7 +79,10 @@ public:
         }
 
         const uint64_t age_ms = SourceAgeMs(now_ms, source.captured_ms);
-        if (policy_.max_source_age_ms > 0
+        const bool describes_held_frame = complete_frame
+            && SameSource(source, held_source)
+            && source.captured_ms <= now_ms;
+        if (!describes_held_frame && policy_.max_source_age_ms > 0
             && age_ms > policy_.max_source_age_ms) {
             ++stale_drop_count_;
             remember_rejection(source.generation, age_ms);
@@ -76,6 +91,7 @@ public:
 
         last_published_generation_ = source.generation;
         last_published_source_ms_ = source.captured_ms;
+        last_published_complete_ = complete_frame;
         ++accepted_count_;
         return PublishDecision::Accept;
     }
@@ -83,6 +99,7 @@ public:
     void reset() {
         last_published_generation_ = 0;
         last_published_source_ms_ = 0;
+        last_published_complete_ = false;
         accepted_count_ = 0;
         stale_drop_count_ = 0;
         nonmonotonic_drop_count_ = 0;
@@ -113,6 +130,7 @@ private:
     FreshnessPolicy policy_;
     uint64_t last_published_generation_ = 0;
     uint64_t last_published_source_ms_ = 0;
+    bool last_published_complete_ = false;
     uint64_t accepted_count_ = 0;
     uint64_t stale_drop_count_ = 0;
     uint64_t nonmonotonic_drop_count_ = 0;

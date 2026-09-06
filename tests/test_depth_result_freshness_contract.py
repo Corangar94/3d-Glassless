@@ -47,7 +47,7 @@ def test_publication_gate_runs_before_depth_texture_upload_and_commit_marker():
     decision = run_once.index("result_freshness.consider(")
     upload = run_once.index("ctx->UpdateSubresource(")
     blend = run_once.index("blend_started = now")
-    source_time = run_once.index("last_depth_source_ms.store(")
+    source_time = run_once.index("oldest_depth_source_ms.store(")
     commit = run_once.index("publish_freshness_snapshot()")
 
     assert decision < upload < blend < commit
@@ -90,7 +90,7 @@ def test_rejected_completion_resets_temporal_history_before_next_stage():
         "reset_temporal_depth_history_after_rejection()"
     )
     commit = run_once.index("publish_freshness_snapshot()")
-    worker_gate = run_once.index("if (worker_busy) {")
+    worker_gate = run_once.index("if (worker_busy) return true;")
     staging = run_once.index("stage_sources[stage_write]")
 
     assert decision < reset < commit < worker_gate < staging
@@ -140,16 +140,22 @@ def test_stale_result_does_not_relabel_upload_time_as_source_time():
         1,
     )[0]
 
-    assert "last_depth_source_ms" in age_method
+    assert "oldest_depth_source_ms" in age_method
+    assert "all_depth_tiles_valid" in age_method
     assert "last_depth_upload_ms" not in age_method
     assert "SaturatingAgeU32" in age_method
 
 
 def test_first_window_visibility_requires_accepted_publication():
-    header = _source("overlay/depth_infer.h")
-
-    assert "depth->depth_updates_published() > 0" in header
-    assert "has_frame = false" in header
+    source = _source("overlay/overlay.cpp")
+    visibility = source.split("static void UpdateOverlayVisibility() {", 1)[1].split(
+        "static void SetCaptureState(", 1
+    )[0]
+    assert "g_depth->depth_updates_published() > 0" in visibility
+    assert "OverlayVisible(" in visibility
+    assert "g_hasFrame =" not in visibility
+    assert "g_depth->run(" not in visibility
+    assert "#define ShowWindow" not in _source("overlay/depth_infer.h")
 
 
 def test_native_freshness_suite_is_registered_with_ctest():

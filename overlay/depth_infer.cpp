@@ -2,6 +2,7 @@
 
 #include "depth_infer.h"
 #include "depth_result_freshness.h"
+#include "depth_tile_coverage.h"
 #include <d3dcompiler.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -199,8 +200,11 @@ struct DepthInferImpl {
         uint32_t mode = 1;
     };
     bool retained_compact_pending = false;
+    bool retained_completion_pending = false;
     DepthProfile retained_profile{};
     DepthSourceIdentity retained_source{};
+    g3d::depth::TileCoverage tile_coverage;
+    g3d::depth::TileCoverageSnapshot ready_coverage{};
 
     static constexpr int kMaxModelWidth = 686;
     static constexpr int kMaxModelHeight = 392;
@@ -320,6 +324,9 @@ struct DepthInferImpl {
     std::atomic<uint64_t>                last_depth_source_ms{0};
     std::atomic<uint64_t>                last_depth_source_generation{0};
     std::atomic<uint64_t>                latest_capture_generation{0};
+    std::atomic<uint64_t>                complete_depth_generation{0};
+    std::atomic<uint64_t>                oldest_depth_source_ms{0};
+    std::atomic<bool>                    all_depth_tiles_valid{false};
     std::atomic<uint64_t>                published_depth_updates{0};
     std::atomic<uint64_t>                stale_depth_drops{0};
     std::atomic<uint64_t>                nonmonotonic_depth_drops{0};
@@ -431,6 +438,10 @@ struct DepthInferImpl {
         return selected;
     }
 
+    static std::chrono::steady_clock::time_point clock_now() {
+        return std::chrono::steady_clock::now();
+    }
+
     static uint64_t steady_milliseconds() {
         return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -470,6 +481,7 @@ struct DepthInferImpl {
         // run_once cannot queue the next tensor until after this reset. Clear
         // every CPU-side temporal cache that the rejected postprocess touched;
         // leave the current valid GPU depth textures and their blend untouched.
+        tile_coverage.clear();
         prev_norm_f32.clear();
         for (auto& previous : prev_norm_tiles) previous.clear();
         for (auto& cached : cached_tile_norm) {
@@ -1026,6 +1038,12 @@ float4 main(I i):SV_Target {
         retained_source = {};
         retained_profile = {};
         retained_compact_pending = false;
+        retained_completion_pending = false;
+        tile_coverage.reset(static_cast<size_t>(tile_count));
+        ready_coverage = {};
+        complete_depth_generation.store(0, std::memory_order_relaxed);
+        oldest_depth_source_ms.store(0, std::memory_order_relaxed);
+        all_depth_tiles_valid.store(false, std::memory_order_relaxed);
         next_source_generation = 0;
         latest_capture_generation.store(0, std::memory_order_relaxed);
         result_freshness.reset();
@@ -1456,6 +1474,7 @@ float4 main(I i):SV_Target {
     bool run_once(ID3D11Texture2D* captured) {
         std::vector<uint16_t> drained_upload;
         DepthSourceIdentity drained_source{};
+        g3d::depth::TileCoverageSnapshot drained_coverage{};
         bool worker_busy = false;
         {
             std::lock_guard<std::mutex> lock(m);
@@ -1468,165 +1487,119 @@ float4 main(I i):SV_Target {
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
                 drained_source = ready_source;
+                drained_coverage = ready_coverage;
                 ready_source = {};
+                ready_coverage = {};
                 output_ready = false;
             }
         }
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_now();
         const uint64_t now_ms = steady_milliseconds();
 
-        DepthSourceIdentity captured_source{};
-        DepthProfile captured_profile{};
         if (captured) {
-            captured_source = next_source_identity(now_ms);
-            latest_capture_generation.store(
-                captured_source.generation,
-                std::memory_order_relaxed);
-            const uint32_t requested_mode =
-                performance_mode.load(std::memory_order_relaxed);
-            captured_profile = profile_for_mode(
-                resolve_performance_mode(requested_mode));
+            // Save immutable pixels even when the first pass can start now.
+            // The same snapshot can finish missing fast-mode tiles during idle
+            // polls; its identity and acquisition time are never manufactured anew.
+            retained_source = next_source_identity(now_ms);
+            latest_capture_generation.store(retained_source.generation,
+                                            std::memory_order_relaxed);
+            const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
+            retained_profile = profile_for_mode(resolve_performance_mode(requested_mode));
+            if (!render_compact(captured, retained_profile)) return false;
+            ctx->CopyResource(retained_compact_bgra, compact_bgra);
+            retained_compact_pending = true;
+            retained_completion_pending = true;
         }
 
         if (!drained_upload.empty()) {
             const auto decision = result_freshness.consider(
-                drained_source,
-                now_ms);
+                drained_source, now_ms, retained_source,
+                drained_coverage.complete_frame);
             if (decision == g3d::depth::PublishDecision::Accept) {
                 const int N = DepthInferencer::kModelSize;
                 ctx->CopyResource(depth_prev_tex, depth_tex);
-                ctx->UpdateSubresource(
-                    depth_tex, 0, nullptr, drained_upload.data(),
-                    N * tile_count * sizeof(uint16_t), 0);
+                ctx->UpdateSubresource(depth_tex, 0, nullptr, drained_upload.data(),
+                                       N * tile_count * sizeof(uint16_t), 0);
+
                 if (last_depth_arrival.time_since_epoch().count() != 0) {
                     const float interval = std::chrono::duration<float>(
                         now - last_depth_arrival).count();
-                    blend_duration_sec = std::max(
-                        0.04f, std::min(0.22f, interval * 0.90f));
+                    blend_duration_sec = std::max(0.04f, std::min(0.22f, interval * 0.90f));
                 }
                 last_depth_arrival = now;
                 blend_started = now;
                 blend_active = true;
                 has_valid_depth = true;
-                last_depth_upload_ms.store(
-                    now_ms,
-                    std::memory_order_relaxed);
-                last_depth_source_ms.store(
-                    drained_source.captured_ms,
-                    std::memory_order_relaxed);
-                last_depth_source_generation.store(
-                    drained_source.generation,
-                    std::memory_order_relaxed);
+                last_depth_upload_ms.store(now_ms, std::memory_order_relaxed);
+                oldest_depth_source_ms.store(drained_coverage.oldest_source_ms,
+                                             std::memory_order_relaxed);
+                all_depth_tiles_valid.store(drained_coverage.all_valid,
+                                            std::memory_order_relaxed);
+                complete_depth_generation.store(drained_coverage.complete_frame
+                    ? drained_source.generation : 0, std::memory_order_relaxed);
+                if (drained_coverage.complete_frame
+                    && g3d::depth::SameSource(drained_source, retained_source)) {
+                    retained_completion_pending = false;
+                }
             } else {
                 reset_temporal_depth_history_after_rejection();
             }
-            // A release store makes source/upload metadata visible before the
-            // accepted-publication counter observed by diagnostics/visibility.
+            // Source/coverage metadata precedes the release publication marker.
             publish_freshness_snapshot();
         }
-
-        auto interval_ready = [&](const DepthProfile& profile) {
-            if (last_submit.time_since_epoch().count() == 0) return true;
-            const uint32_t elapsed_ms = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - last_submit).count());
-            return elapsed_ms >= adaptive_interval_ms(profile);
-        };
-
-        auto retain_latest = [&](ID3D11Texture2D* source,
-                                 const DepthProfile& profile,
-                                 DepthSourceIdentity identity) {
-            if (!render_compact(source, profile)) return false;
-            ctx->CopyResource(retained_compact_bgra, compact_bgra);
-            retained_profile = profile;
-            retained_source = identity;
-            retained_compact_pending = true;
-            return true;
-        };
-
-        if (worker_busy) {
-            if (captured && !retain_latest(
-                    captured, captured_profile, captured_source)) {
-                return false;
-            }
-            return true;
-        }
-
-        if (stage_count > 0 && captured) {
-            if (!retain_latest(captured, captured_profile, captured_source)) {
-                return false;
-            }
-        }
+        if (worker_busy) return true;
 
         if (stage_count == 0) {
-            const bool captured_ready = captured && interval_ready(captured_profile);
-            if (captured && !captured_ready) {
-                if (!retain_latest(captured, captured_profile, captured_source)) {
-                    return false;
-                }
-                return true;
+            constexpr uint64_t kHeldFrameCompletionDelayMs = 200;
+            const bool complete_held_frame = !retained_compact_pending
+                && retained_completion_pending && retained_source.generation != 0
+                && g3d::depth::SourceAgeMs(now_ms, retained_source.captured_ms)
+                    >= kHeldFrameCompletionDelayMs;
+            if (!retained_compact_pending && !complete_held_frame) return true;
+            const DepthProfile profile = retained_profile;
+            if (last_submit.time_since_epoch().count() != 0) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - last_submit).count();
+                if (elapsed < adaptive_interval_ms(profile)) return true;
             }
-
-            DepthProfile stage_profile{};
-            DepthSourceIdentity stage_source{};
-            ID3D11Texture2D* stage_source_tex = nullptr;
-            if (captured_ready) {
-                if (!render_compact(captured, captured_profile)) return false;
-                stage_profile = captured_profile;
-                stage_source = captured_source;
-                stage_source_tex = compact_bgra;
-                retained_compact_pending = false;
-                retained_source = {};
-            } else if (retained_compact_pending) {
-                if (!interval_ready(retained_profile)) return true;
-                stage_profile = retained_profile;
-                stage_source = retained_source;
-                stage_source_tex = retained_compact_bgra;
-                retained_compact_pending = false;
-                retained_source = {};
+            std::vector<int> selected;
+            if (complete_held_frame) {
+                // One bounded all-tile completion pass. Partial results never
+                // claim that the entire atlas belongs to the latest capture.
+                for (int tile = 0; tile < tile_count; ++tile) selected.push_back(tile);
             } else {
-                return true;
+                selected = select_tiles(profile);
             }
-
-            const std::vector<int> selected = select_tiles(stage_profile);
-            ctx->CopyResource(stage_bgra[stage_write], stage_source_tex);
-            stage_profiles[stage_write] = stage_profile;
-            stage_sources[stage_write] = stage_source;
+            ctx->CopyResource(stage_bgra[stage_write], retained_compact_bgra);
+            stage_profiles[stage_write] = profile;
+            stage_sources[stage_write] = retained_source;
             stage_tiles[stage_write] = selected;
             stage_pending[stage_write] = true;
             stage_write = (stage_write + 1) % kReadbackRingSize;
             ++stage_count;
+            retained_compact_pending = false;
         }
 
         if (stage_count == 0 || !stage_pending[stage_read]) return true;
         D3D11_MAPPED_SUBRESOURCE mapped = {};
-        const HRESULT map_hr = ctx->Map(
-            stage_bgra[stage_read], 0, D3D11_MAP_READ,
-            D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        const HRESULT map_hr = ctx->Map(stage_bgra[stage_read], 0, D3D11_MAP_READ,
+                                       D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
         if (map_hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
-        if (FAILED(map_hr)) {
-            last_err = "Map(staging ring) failed";
-            return false;
-        }
+        if (FAILED(map_hr)) { last_err = "Map(staging ring) failed"; return false; }
         const DepthProfile profile = stage_profiles[stage_read];
         const DepthSourceIdentity source = stage_sources[stage_read];
         const std::vector<int> selected = stage_tiles[stage_read];
-        preprocess_compact(
-            static_cast<const uint8_t*>(mapped.pData),
-            static_cast<int>(mapped.RowPitch), profile, selected);
+        preprocess_compact(static_cast<const uint8_t*>(mapped.pData),
+                           static_cast<int>(mapped.RowPitch), profile, selected);
         ctx->Unmap(stage_bgra[stage_read], 0);
         stage_pending[stage_read] = false;
         stage_sources[stage_read] = {};
         stage_tiles[stage_read].clear();
         stage_read = (stage_read + 1) % kReadbackRingSize;
         --stage_count;
-
         {
             std::lock_guard<std::mutex> lock(m);
-            if (stop.load()) {
-                last_err = "DepthInferencer is stopping";
-                return false;
-            }
+            if (stop.load()) { last_err = "DepthInferencer is stopping"; return false; }
             pending_input_f32.swap(scratch_input_f32);
             pending_profile = profile;
             pending_source = source;
@@ -1635,8 +1608,7 @@ float4 main(I i):SV_Target {
         }
         active_model_width.store(profile.width, std::memory_order_relaxed);
         active_model_height.store(profile.height, std::memory_order_relaxed);
-        active_scheduled_tiles.store(
-            static_cast<int>(selected.size()), std::memory_order_relaxed);
+        active_scheduled_tiles.store(static_cast<int>(selected.size()), std::memory_order_relaxed);
         last_submit = now;
         cv_work.notify_one();
         return true;
@@ -1859,6 +1831,8 @@ float4 main(I i):SV_Target {
                 if (ok) {
                     worker_failed = false;
                     ready_upload_fp16 = std::move(produced_upload);
+                    tile_coverage.record(running_tiles, running_source);
+                    ready_coverage = tile_coverage.snapshot(running_source);
                     ready_source = running_source;
                     output_ready = true;
                 } else {
@@ -1927,7 +1901,13 @@ float4 main(I i):SV_Target {
         running_input_f32.clear();
         ready_upload_fp16.clear();
         retained_compact_pending = false;
+        retained_completion_pending = false;
         retained_source = {};
+        ready_coverage = {};
+        tile_coverage.reset(0);
+        complete_depth_generation.store(0, std::memory_order_relaxed);
+        oldest_depth_source_ms.store(0, std::memory_order_relaxed);
+        all_depth_tiles_valid.store(false, std::memory_order_relaxed);
         latest_capture_generation.store(0, std::memory_order_relaxed);
         pending_tiles.clear();
         running_tiles.clear();
@@ -2075,10 +2055,11 @@ float DepthInferencer::blend_duration_ms() const {
 }
 
 uint32_t DepthInferencer::depth_age_ms() const {
-    if (!impl_ || depth_updates_published() == 0) return UINT32_MAX;
+    if (!impl_ || depth_updates_published() == 0
+        || !impl_->all_depth_tiles_valid.load(std::memory_order_relaxed)) return UINT32_MAX;
     return g3d::depth::SaturatingAgeU32(
         DepthInferImpl::steady_milliseconds(),
-        impl_->last_depth_source_ms.load(std::memory_order_relaxed));
+        impl_->oldest_depth_source_ms.load(std::memory_order_relaxed));
 }
 
 uint32_t DepthInferencer::depth_upload_age_ms() const {
@@ -2127,6 +2108,10 @@ uint64_t DepthInferencer::latest_depth_generation() const {
     return impl_
         ? impl_->last_depth_source_generation.load(std::memory_order_relaxed)
         : 0;
+}
+
+uint64_t DepthInferencer::complete_depth_generation() const {
+    return impl_ ? impl_->complete_depth_generation.load(std::memory_order_relaxed) : 0;
 }
 
 uint64_t DepthInferencer::latest_capture_generation() const {

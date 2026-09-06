@@ -320,20 +320,20 @@ def test_depth_pipeline_progresses_without_a_new_capture_and_recovers_worker_fai
     assert "return impl_->run_once(nullptr);" in depth
     assert "retained_compact_pending" in depth
     assert "latest_capture_generation.store(" in depth
-    assert "stage_source_tex = retained_compact_bgra" in depth
+    assert "ctx->CopyResource(stage_bgra[stage_write], retained_compact_bgra)" in depth
     assert "worker_failed = true" in depth
     assert "if (worker_failed) return false" in depth
     assert "g_depth && !g_depth->poll()" in overlay
     assert 'QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed")' in overlay
 
 
-def test_depth_recovery_backoff_waits_for_published_inference():
+def test_depth_recovery_waits_for_sustained_publication_in_a_new_session():
     source = OVERLAY.read_text(encoding="utf-8")
-
-    assert "g_depthRecoveryEpisodeActive = true" in source
-    assert "if (!g_depthRecoveryEpisodeActive)" in source
-    confirmed = source.index(
-        "g_depthRecoveryEpisodeActive && g_depth"
-    )
-    reset = source.index("g_rebindRetry.Reset(GetTickCount64());", confirmed)
-    assert confirmed < reset
+    recovery = source.split("static void TickDepthRecovery()", 1)[1].split(
+        "static bool IsUnavailableDuplicationFailure", 1
+    )[0]
+    assert "g_depthRecovery.MarkFailure()" in source
+    assert "g_depthRecovery.SessionStarted()" in source
+    assert recovery.index("if (g_depthRecoveryPending)") < recovery.index("g_depthRecovery.Observe(")
+    assert "g_rebindRetry.Reset(now)" in recovery
+    assert "if (!g_depthRecovery.active())" in source

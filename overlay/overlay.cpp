@@ -41,6 +41,7 @@
 
 #include "capture_recovery.h"
 #include "depth_infer.h"
+#include "overlay_runtime_health.h"
 #include "depth_cohesion_shader.h"
 #include "parallax_health.h"
 #include "pose_prediction.h"
@@ -668,7 +669,7 @@ static const void*               g_stateView = nullptr;
 // far-plane texture remains available only for shader diagnostics and recovery.
 static DepthInferencer*          g_depth       = nullptr;
 static bool                      g_depthRecoveryPending = false;
-static bool                      g_depthRecoveryEpisodeActive = false;
+static g3d::runtime_health::DepthRecoveryEpisode g_depthRecovery;
 static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=1.0 diagnostic fallback
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
 static ID3D11Query*              g_gpuDisjoint = nullptr;
@@ -2078,10 +2079,12 @@ static bool InitDepth() {
     std::wstring model = FindDepthModel();
     if (model.empty()) {
         Log("InitDepth: model file not found. Run scripts/bootstrap.py.");
+        g_depthRecovery.MarkFailure();
         return false;
     }
     if (!g_capTex) {
         Log("InitDepth: capture texture not ready");
+        g_depthRecovery.MarkFailure();
         return false;
     }
     D3D11_TEXTURE2D_DESC cd = {};
@@ -2091,9 +2094,11 @@ static bool InitDepth() {
     if (!d->init(g_dev, g_ctx, model, (int)cd.Width, (int)cd.Height)) {
         Log("InitDepth: DepthInferencer::init failed: %s", d->last_error());
         delete d;
+        g_depthRecovery.MarkFailure();
         return false;
     }
     g_depth = d;
+    g_depthRecovery.SessionStarted();
     g_depth->set_performance_mode(g_depthMode);
     Log("InitDepth: depth inference online (capture %ux%u, requested_mode=%s)",
         cd.Width, cd.Height, DepthModeName(g_depthMode));
@@ -2129,10 +2134,10 @@ static void UpdateOverlayVisibility() {
     const uint64_t captureAgeMs = g_lastCaptureFrameMs == 0
         ? UINT64_MAX
         : nowMs - g_lastCaptureFrameMs;
-    const bool visible = g_captureState == CaptureState::Running
-        && g_hasFrame
-        && g_depth != nullptr
-        && (g_targetExePath.empty() || targetForeground);
+    const bool visible = g3d::runtime_health::OverlayVisible(
+        g_captureState == CaptureState::Running, g_hasFrame,
+        g_depth && g_depth->depth_updates_published() > 0,
+        g_targetExePath.empty() || targetForeground);
     if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     g_overlayVisible = visible;
@@ -2155,7 +2160,7 @@ static void MarkDepthFailure() {
         static_cast<unsigned long long>(failures),
         g_depth ? g_depth->last_error() : "depth unavailable");
     g_depthRecoveryPending = true;
-    g_depthRecoveryEpisodeActive = true;
+    g_depthRecovery.MarkFailure();
 }
 
 static void DestroyCaptureResources() {
@@ -2174,12 +2179,36 @@ static void QueueCaptureSignal(CaptureSignal signal, const char* reason) {
     const auto action = g3d::capture::AdvanceCaptureState(g_captureState, signal);
     if (signal == CaptureSignal::BindingDirty) {
         DestroyCaptureResources();
-        g_rebindRetry.Reset(GetTickCount64());
+        if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
     } else if (signal == CaptureSignal::DuplicationLost || signal == CaptureSignal::RebindRetry) {
         DestroyCaptureResources();
         g_rebindRetry.RecordFailure(GetTickCount64());
     }
     SetCaptureState(action.next_state, reason);
+}
+
+static bool PublishedDepthMatchesHeldCapture() {
+    const uint64_t complete = g_depth ? g_depth->complete_depth_generation() : 0;
+    return g_captureState == CaptureState::Running && g_hasFrame
+        && complete != 0 && complete == g_depth->latest_capture_generation();
+}
+
+static void TickDepthRecovery() {
+    // Failure wins over any publication belonging to the failed session.
+    if (g_depthRecoveryPending) {
+        g_depthRecoveryPending = false;
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed");
+        return;
+    }
+    const uint64_t publications = g_depth ? g_depth->depth_updates_published() : 0;
+    const bool held = PublishedDepthMatchesHeldCapture();
+    const bool healthy = g_captureState == CaptureState::Running && g_hasFrame
+        && publications > 0 && (held || g_depth->depth_age_ms() <= 750);
+    const uint64_t now = GetTickCount64();
+    if (g_depthRecovery.Observe(now, publications, healthy, held)) {
+        g_rebindRetry.Reset(now);
+        Log("Depth recovery confirmed by sustained health in a new session");
+    }
 }
 
 static bool IsUnavailableDuplicationFailure(HRESULT hr) {
@@ -2257,7 +2286,7 @@ static void TickCaptureRebind() {
             g_rebindRetry.RecordFailure(GetTickCount64());
             return;
         }
-        g_rebindRetry.Reset(GetTickCount64());
+        if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
         if (recoveryBinding == BindingStatus::TargetUnavailable) {
             g_bindingDirty = false;
             g_rebindRetry.RecordFailure(GetTickCount64());
@@ -2306,7 +2335,7 @@ static void TickCaptureRebind() {
 
     SyncOverlayWindowToBinding();
     if (!g_dev || !g_ctx || !g_swap) {
-        g_rebindRetry.Reset(GetTickCount64());
+        if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
         SetCaptureState(CaptureState::DeviceRecovery, "renderer_missing");
         return;
     }
@@ -2346,9 +2375,7 @@ static void TickCaptureRebind() {
             SetCaptureState(CaptureState::Unavailable, "depth_unavailable");
             return;
         }
-        if (!g_depthRecoveryEpisodeActive) {
-            g_rebindRetry.Reset(GetTickCount64());
-        }
+        if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
         const char* boundReason = usingWgc ? "bound_target_wgc" : "bound_desktop";
         SetCaptureState(CaptureState::Running, boundReason);
     } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
@@ -2854,7 +2881,7 @@ static void EnterDeviceRecovery(const char* operation, HRESULT hr, const char* r
     Log("Device recovery: operation=%s hr=0x%08X reason=0x%08X",
         operation, static_cast<unsigned>(hr), static_cast<unsigned>(removedReason));
     DestroyDeviceResources();
-    g_rebindRetry.Reset(GetTickCount64());
+    if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
     SetCaptureState(CaptureState::DeviceRecovery, reasonCode);
 }
 
@@ -2997,11 +3024,11 @@ static bool Init(HINSTANCE hInst) {
     const HRESULT createHr = CreateDeviceAndRenderer();
     if (FAILED(createHr)) {
         LogHR("Initial CreateDeviceAndRenderer", createHr);
-        g_rebindRetry.Reset(GetTickCount64());
+        if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
         SetCaptureState(CaptureState::DeviceRecovery, "renderer_create_failed");
         return true;
     }
-    g_rebindRetry.Reset(GetTickCount64());
+    if (!g_depthRecovery.active()) g_rebindRetry.Reset(GetTickCount64());
     if (initialBinding == BindingStatus::TargetSpansOutput) {
         g_bindingDirty = false;
         g_rebindRetry.RecordFailure(GetTickCount64());
@@ -3207,16 +3234,7 @@ static void Frame() {
             MarkDepthFailure();
         }
     }
-    if (g_depthRecoveryEpisodeActive && g_depth
-        && g_depth->depth_updates_published() > 0) {
-        g_depthRecoveryEpisodeActive = false;
-        g_rebindRetry.Reset(GetTickCount64());
-        Log("Depth recovery confirmed by a published inference result");
-    }
-    if (g_depthRecoveryPending) {
-        g_depthRecoveryPending = false;
-        QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed");
-    }
+    TickDepthRecovery();
     UpdateOverlayVisibility();
 
     // Convert upstream tracking/depth health into a continuous comfort
@@ -3230,15 +3248,7 @@ static void Frame() {
     const uint32_t captureAgeMs = captureAge64 > UINT32_MAX
         ? UINT32_MAX
         : static_cast<uint32_t>(captureAge64);
-    const uint64_t depthGeneration = g_depth
-        ? g_depth->latest_depth_generation() : 0;
-    const uint64_t captureGeneration = g_depth
-        ? g_depth->latest_capture_generation() : 0;
-    const bool depthMatchesHeldFrame =
-        g_captureState == CaptureState::Running
-        && g_hasFrame
-        && depthGeneration != 0
-        && depthGeneration == captureGeneration;
+    const bool depthMatchesHeldFrame = PublishedDepthMatchesHeldCapture();
     const uint32_t effectiveDepthAgeMs = g3d::parallax::DepthAgeForHealth(
         depthAgeMs,
         captureAgeMs,

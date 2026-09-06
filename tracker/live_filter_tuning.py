@@ -63,6 +63,24 @@ class LiveFilterTuningPolicy:
             raise ValueError("change_epsilon must be non-negative")
 
 
+def validate_live_measurement_noise(
+    raw: object,
+    policy: LiveFilterTuningPolicy = LiveFilterTuningPolicy(),
+) -> float | None:
+    """Admit live values without replacing unavailable/invalid data with defaults."""
+    if isinstance(raw, bool) or not isinstance(raw, numbers.Real):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    if not policy.minimum_measurement_noise <= value <= policy.maximum_measurement_noise:
+        return None
+    return value
+
+
 @dataclass(frozen=True)
 class LiveFilterTuningSnapshot:
     # Preserve the original public positional field order. New diagnostics are
@@ -179,22 +197,7 @@ class LiveFilterTuningController:
         return getattr(settings, "smoothing_alpha", _MISSING)
 
     def _measurement_noise_value(self, raw: object) -> float | None:
-        if (
-            raw is _MISSING
-            or isinstance(raw, bool)
-            or not isinstance(raw, numbers.Real)
-        ):
-            return None
-        value = float(raw)
-        if not math.isfinite(value):
-            return None
-        if not (
-            self._policy.minimum_measurement_noise
-            <= value
-            <= self._policy.maximum_measurement_noise
-        ):
-            return None
-        return value
+        return validate_live_measurement_noise(raw, self._policy)
 
     def _measurement_noise(self, settings: object) -> float | None:
         return self._measurement_noise_value(

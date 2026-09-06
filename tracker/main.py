@@ -24,6 +24,7 @@ from tracker.camera_reconnect_retry import (
 )
 from tracker.face_tracker_cv2 import HeadPosition
 from tracker.frame_processor import FrameProcessorAdapter
+from tracker.live_filter_tuning import validate_live_measurement_noise
 from tracker.freetrack import FreetracWriter
 from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms
 from tracker.pose_filter import AdaptivePoseFilter
@@ -423,6 +424,7 @@ class TrackingLoop:
         self._stop_event = stop_event
         self._camera_tilt_deg = camera_tilt_deg
         self._config_path = config_path
+        self._last_live_measurement_noise: float | None = None
         self._camera_quality_monitor = camera_quality_monitor
         self._lock_camera_controls = bool(lock_camera_controls)
         self._camera_control_lock_retry = (
@@ -462,6 +464,15 @@ class TrackingLoop:
             self._last_output_pose = neutral
             self._last_smoothed = neutral.xyz
         self._backend_transition_generation = transition.generation
+
+    def _apply_live_filter_settings(self, settings: OverlaySettings | None) -> None:
+        """Direct loops own live tuning unless a runtime controller overrides it."""
+        value = validate_live_measurement_noise(
+            getattr(settings, "smoothing_alpha", None)
+        )
+        if value is not None and value != self._last_live_measurement_noise:
+            self._smoother.set_measurement_noise(value)
+            self._last_live_measurement_noise = value
 
     def _update_filter(self, pose: HeadPosition) -> FilteredPose:
         if self._supports_pose_filter():
@@ -793,9 +804,7 @@ class TrackingLoop:
                     settings,
                     applied_calibration,
                 )
-                self._smoother.set_measurement_noise(
-                    _measurement_noise(settings)
-                )
+                self._apply_live_filter_settings(settings)
                 measured = _validated_pose(
                     self._process_frame(frame, capture_timestamp_ms)
                 )

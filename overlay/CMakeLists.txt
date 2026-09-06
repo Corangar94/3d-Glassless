@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(Glassless3DOverlay CXX)
 
 include(CTest)
+option(G3D_PORTABLE_TESTS_ONLY "Build deterministic policy/integration tests without GPU dependencies" OFF)
 
 if(BUILD_TESTING)
     add_executable(capture_recovery_tests
@@ -50,7 +51,19 @@ if(BUILD_TESTING)
     target_compile_features(depth_cohesion_tests PRIVATE cxx_std_17)
     add_test(NAME depth_cohesion_tests COMMAND depth_cohesion_tests)
 
-    if(WIN32)
+    include(RuntimeIntegrationTests.cmake)
+    # The older suites use assert(); Release builds must execute those checks.
+    foreach(test_target capture_recovery_tests parallax_health_tests
+            pose_prediction_tests depth_result_freshness_tests depth_mode_policy_tests
+            settings_policy_tests depth_cohesion_tests runtime_integration_tests)
+        if(MSVC)
+            target_compile_options(${test_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_target} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
+
+    if(WIN32 AND NOT G3D_PORTABLE_TESTS_ONLY)
         add_executable(shader_numeric_tests
             shader_numeric_tests.cpp
         )
@@ -66,6 +79,10 @@ if(BUILD_TESTING)
         )
         set_tests_properties(shader_numeric_tests PROPERTIES TIMEOUT 30)
     endif()
+endif()
+
+if(G3D_PORTABLE_TESTS_ONLY)
+    return()
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -212,13 +229,6 @@ add_executable(Glassless3DOverlay WIN32
     "${G3D_CONFIGURED_OVERLAY_SOURCE}"
     depth_infer.cpp
     capture_recovery.cpp
-)
-
-# Only the configured overlay source owns g_depth/g_capTex/g_hasFrame. Enable
-# the visibility guard there without leaking its ShowWindow wrapper into
-# depth_infer.cpp.
-set_source_files_properties("${G3D_CONFIGURED_OVERLAY_SOURCE}" PROPERTIES
-    COMPILE_DEFINITIONS G3D_OVERLAY_SHOWWINDOW_GUARD
 )
 
 target_compile_definitions(Glassless3DOverlay PRIVATE UNICODE _UNICODE)

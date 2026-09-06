@@ -10,7 +10,7 @@
 //   2. Map without waiting; BGRA->RGB + normalize into a float NCHW tensor
 //   3. ORT inference with DirectML EP on one worker thread
 //   4. Normalize depth to [0,1], retain source generation/time, and publish
-//      only a monotonic result no older than the depth-health budget
+//      only an admitted result (complete held-frame results may exceed the age budget)
 //   5. Update a R16F texture and expose both current/previous SRVs for blending
 //
 // The worker is sequential, but source identity still travels through staging,
@@ -71,9 +71,9 @@ public:
     float last_inference_ms() const;
     float blend_duration_ms() const;
 
-    // Age of the desktop capture that produced the currently published depth,
-    // not merely time since its GPU upload. Returns UINT32_MAX until a real
-    // source-aware depth update has been published.
+    // Age of the oldest actually inferred tile in the published atlas, not its
+    // upload time or merely the newest batch. UINT32_MAX until all tiles have
+    // been inferred. Late held-frame acceptance does not rewrite this timestamp.
     uint32_t depth_age_ms() const;
     uint32_t depth_upload_age_ms() const;
 
@@ -85,8 +85,11 @@ public:
     uint64_t stale_depth_results_dropped() const;
     uint64_t nonmonotonic_depth_results_dropped() const;
     uint64_t invalid_depth_results_dropped() const;
-    uint64_t latest_depth_generation() const;
+    uint64_t latest_depth_generation() const;  // newest batch, possibly mixed tiles
     uint64_t latest_capture_generation() const;
+    // Nonzero only if EVERY tile in the published atlas belongs to one capture.
+    // Compare with latest_capture_generation() before exempting held-frame age.
+    uint64_t complete_depth_generation() const;
 
     // Two depth SRVs for render-rate interpolation.
     // The shader lerps between prev_srv (depth at last inference) and
@@ -120,38 +123,3 @@ public:
 private:
     std::unique_ptr<DepthInferImpl> impl_;
 };
-
-#ifdef G3D_OVERLAY_SHOWWINDOW_GUARD
-// overlay.cpp marks a captured frame available before calling run(). Without
-// this gate, its first visibility update can expose the initial flat 0.5 depth
-// texture while the asynchronous worker is still producing the first result.
-//
-// Once the worker reports a completion, call run() here to drain it. Reveal the
-// window only if that result survived source-age/generation admission and was
-// actually uploaded. While no valid publication exists, clear has_frame; the
-// render loop's second visibility pass restores its bookkeeping to hidden and
-// the next captured frame retries normally.
-inline BOOL G3DShowWindowAfterDepthUpload(
-    HWND window,
-    int command,
-    DepthInferencer* depth,
-    ID3D11Texture2D* captured_frame,
-    bool& has_frame) {
-    if (command == SW_SHOWNOACTIVATE) {
-        const bool depth_ready = depth
-            && depth->inferences_completed() > 0
-            && captured_frame
-            && depth->run(captured_frame)
-            && depth->depth_updates_published() > 0;
-        if (!depth_ready) {
-            has_frame = false;
-            return ::ShowWindow(window, SW_HIDE);
-        }
-    }
-    return ::ShowWindow(window, command);
-}
-
-#define ShowWindow(window, command) \
-    G3DShowWindowAfterDepthUpload( \
-        (window), (command), g_depth, g_capTex, g_hasFrame)
-#endif
