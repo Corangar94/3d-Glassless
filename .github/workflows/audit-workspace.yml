@@ -21,12 +21,24 @@ jobs:
         run: |
           set -euo pipefail
           if test -f .audit-remediation.patch; then
-            git apply --check .audit-remediation.patch
-            git apply .audit-remediation.patch
-            git rm .audit-remediation.patch .github/workflows/audit-workspace.yml
+            python - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess, tempfile
+          expected = pathlib.Path('.audit-remediation.patch').read_text().strip()
+          parts = sorted(pathlib.Path('.audit-remediation').glob('*.b64'))
+          encoded = ''.join(part.read_text().strip() for part in parts)
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          if hashlib.sha256(patch).hexdigest() != expected:
+              raise SystemExit('reviewed patch digest mismatch')
+          with tempfile.NamedTemporaryFile(suffix='.patch') as stream:
+              stream.write(patch)
+              stream.flush()
+              subprocess.run(['git', 'apply', '--check', stream.name], check=True)
+              subprocess.run(['git', 'apply', stream.name], check=True)
+          PY
+            git rm -r .audit-remediation.patch .audit-remediation
             git config user.name 'glassless-audit'
             git config user.email 'glassless-audit@users.noreply.github.com'
-            git add launcher overlay scripts tests .github docs pyproject.toml README.md requirements* AGENTS.md CLAUDE.md Glassless3D.spec
+            git add -A
             git commit -m 'Fix audited runtime, depth, build and validation defects'
             git push origin HEAD:fix/audit-2026-09-06
           fi
