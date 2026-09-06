@@ -21,6 +21,7 @@ bool Require(bool condition, const char* message) {
 int main() {
     using g3d::parallax::AgeScale;
     using g3d::parallax::ConfidenceScale;
+    using g3d::parallax::DepthAgeForHealth;
     using g3d::parallax::HealthInputs;
     using g3d::parallax::Saturate;
     using g3d::parallax::SlewScale;
@@ -77,6 +78,16 @@ int main() {
     HealthInputs stale_depth = healthy;
     stale_depth.depth_age_ms = 750;
     check(Near(TargetScale(stale_depth), 0.0f), "stale depth should fade parallax to zero");
+
+    check(
+        DepthAgeForHealth(900, 500, true) == 0,
+        "static held capture should keep accepted depth healthy");
+    check(
+        DepthAgeForHealth(900, 50, true) == 900,
+        "active capture must preserve stale-depth age");
+    check(
+        DepthAgeForHealth(900, 500, false) == 900,
+        "missing held frame must not excuse stale depth");
 
     HealthInputs invalid_confidence = healthy;
     invalid_confidence.pose_confidence = std::numeric_limits<float>::quiet_NaN();

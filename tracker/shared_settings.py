@@ -85,7 +85,7 @@ class OverlaySettings:
     head_dist_cm: float = 60.0
     camera_fov_deg: float = 90.0
     ipd_mm: float = 64.0
-    smoothing_alpha: float = 0.1
+    smoothing_alpha: float = 0.1  # Kalman measurement noise r
     deadzone_mm: float = 5.0
     display_backend: int = 0
     depth_mode: int = 3

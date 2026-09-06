@@ -300,6 +300,7 @@ struct DepthInferImpl {
     std::condition_variable              cv_work;           // main → worker wakeup
     bool                                 input_pending = false;   // new input waiting for worker
     bool                                 worker_running = false;
+    bool                                 worker_failed = false;
     bool                                 output_ready  = false;   // new depth waiting for main to upload
     std::atomic<bool>                    stop{false};
     std::atomic<uint64_t>                inferences{0};    // completed Run calls (for diagnostics)
@@ -1450,6 +1451,7 @@ float4 main(I i):SV_Target {
                 last_err = "DepthInferencer is stopping";
                 return false;
             }
+            if (worker_failed) return false;
             worker_busy = input_pending || worker_running;
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
@@ -1498,17 +1500,19 @@ float4 main(I i):SV_Target {
         }
         if (worker_busy) return true;
 
-        const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
-        const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
-        const DepthProfile requested = profile_for_mode(resolved_mode);
-        if (last_submit.time_since_epoch().count() != 0) {
-            const uint32_t elapsed_ms = static_cast<uint32_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - last_submit).count());
-            if (elapsed_ms < adaptive_interval_ms(requested)) return true;
-        }
-
         if (stage_count == 0) {
+            // A null capture means "poll only": drain completed work and retry a
+            // nonblocking staging map, but never manufacture a new source frame.
+            if (!captured) return true;
+            const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
+            const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
+            const DepthProfile requested = profile_for_mode(resolved_mode);
+            if (last_submit.time_since_epoch().count() != 0) {
+                const uint32_t elapsed_ms = static_cast<uint32_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - last_submit).count());
+                if (elapsed_ms < adaptive_interval_ms(requested)) return true;
+            }
             const std::vector<int> selected = select_tiles(requested);
             if (!render_compact(captured, requested)) return false;
             ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
@@ -1775,10 +1779,12 @@ float4 main(I i):SV_Target {
                 std::lock_guard<std::mutex> lock(m);
                 worker_running = false;
                 if (ok) {
+                    worker_failed = false;
                     ready_upload_fp16 = std::move(produced_upload);
                     ready_source = running_source;
                     output_ready = true;
                 } else {
+                    worker_failed = true;
                     last_err = std::move(error);
                 }
                 running_source = {};
@@ -1836,6 +1842,7 @@ float4 main(I i):SV_Target {
         env.reset();
         input_pending = false;
         worker_running = false;
+        worker_failed = false;
         output_ready = false;
         pending_input_f32.clear();
         running_input_f32.clear();
@@ -1885,6 +1892,7 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     {
         std::lock_guard<std::mutex> lock(impl_->m);
         impl_->input_pending = false;
+        impl_->worker_failed = false;
         impl_->output_ready = false;
         impl_->pending_source = {};
         impl_->running_source = {};
@@ -1927,6 +1935,14 @@ bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
         return false;
     }
     return impl_->run_once(captured_bgra8);
+}
+
+bool DepthInferencer::poll() {
+    if (!impl_ || !impl_->env || !impl_->fixed_session(1).session) {
+        if (impl_) impl_->last_err = "DepthInferencer not initialized";
+        return false;
+    }
+    return impl_->run_once(nullptr);
 }
 
 void DepthInferencer::set_performance_mode(uint32_t mode) {

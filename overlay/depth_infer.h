@@ -51,6 +51,10 @@ public:
     // keep the previous valid depth and return true.
     bool run(ID3D11Texture2D* captured_bgra8);
 
+    // Advance pending staging, worker completion, and failure state without
+    // submitting a new captured image. Safe to call every render tick.
+    bool poll();
+
     // Runtime performance/quality mode from G3D_Settings:
     // 0=quality, 1=balanced, 2=fast, 3=auto.
     void set_performance_mode(uint32_t mode);

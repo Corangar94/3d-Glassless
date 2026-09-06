@@ -668,6 +668,7 @@ static const void*               g_stateView = nullptr;
 // The overlay is not shown unless real depth inference initialized. A uniform
 // far-plane texture remains available only for shader diagnostics and recovery.
 static DepthInferencer*          g_depth       = nullptr;
+static bool                      g_depthRecoveryPending = false;
 static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=1.0 diagnostic fallback
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
 static ID3D11Query*              g_gpuDisjoint = nullptr;
@@ -1801,7 +1802,6 @@ static bool ReadStablePose(HeadPose* out) {
 
 
 static void TryAttachPoseV2() {
-    if (g_poseV2View) return;
     if (!g_poseV2H) {
         g_poseV2H = OpenFileMappingW(FILE_MAP_READ, FALSE, SHM_POSE_V2);
         if (g_poseV2H) Log("SHM: OpenFileMapping(G3D_PoseV2) succeeded, handle=%p", g_poseV2H);
@@ -1900,8 +1900,8 @@ static void ApplySettings() {
     if (g_setView) {
         Settings s = {};
         if (!ReadStableSettings(g_setView, &s)) return;
-        if (s.strengthX    > 0.0f)    sx = s.strengthX;
-        if (s.strengthY    > 0.0f)    sy = s.strengthY;
+        if (std::isfinite(s.strengthX) && s.strengthX >= 0.0f) sx = s.strengthX;
+        if (std::isfinite(s.strengthY) && s.strengthY >= 0.0f) sy = s.strengthY;
         if (s.virtualDepthCm >= 0.0f) dp = s.virtualDepthCm;
         if (s.screenWCm    > 0.0f)    sw = s.screenWCm;
         if (s.screenHCm    > 0.0f)    sh = s.screenHCm;
@@ -2126,18 +2126,19 @@ static void UpdateOverlayVisibility() {
     }
 
     const uint64_t nowMs = GetTickCount64();
-    static constexpr uint64_t kCaptureFrameStaleMs = 1000;
-    const bool captureFresh = g_lastCaptureFrameMs != 0
-        && nowMs - g_lastCaptureFrameMs <= kCaptureFrameStaleMs;
+    const uint64_t captureAgeMs = g_lastCaptureFrameMs == 0
+        ? UINT64_MAX
+        : nowMs - g_lastCaptureFrameMs;
     const bool visible = g_captureState == CaptureState::Running
         && g_hasFrame
         && g_depth != nullptr
-        && (g_targetExePath.empty() || (targetForeground && captureFresh));
+        && (g_targetExePath.empty() || targetForeground);
     if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     g_overlayVisible = visible;
-    Log("Overlay visibility: %s target_foreground=%d capture_fresh=%d",
-        visible ? "shown" : "hidden", targetForeground ? 1 : 0, captureFresh ? 1 : 0);
+    Log("Overlay visibility: %s target_foreground=%d capture_age_ms=%llu",
+        visible ? "shown" : "hidden", targetForeground ? 1 : 0,
+        static_cast<unsigned long long>(captureAgeMs));
 }
 
 static void SetCaptureState(CaptureState state, const char* reason) {
@@ -2147,8 +2148,18 @@ static void SetCaptureState(CaptureState state, const char* reason) {
     UpdateOverlayVisibility();
 }
 
+static void MarkDepthFailure() {
+    static uint64_t failures = 0;
+    ++failures;
+    Log("DepthInferencer failed (#%llu): %s",
+        static_cast<unsigned long long>(failures),
+        g_depth ? g_depth->last_error() : "depth unavailable");
+    g_depthRecoveryPending = true;
+}
+
 static void DestroyCaptureResources() {
     g_hasFrame = false;
+    g_depthRecoveryPending = false;
     g_lastCaptureFrameMs = 0;
     g_presentRetryPending = false;
     if (g_depth) { delete g_depth; g_depth = nullptr; }
@@ -2525,12 +2536,7 @@ static void UpdateWgcCapture() {
                 g_lastCaptureFrameMs = GetTickCount64();
                 ++g_captureFrameSerial;
                 UpdateOverlayVisibility();
-                if (g_depth && !g_depth->run(g_capTex)) {
-                    static int depthFails = 0;
-                    if (++depthFails < 5 || depthFails % 120 == 0) {
-                        Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
-                    }
-                }
+                if (g_depth && !g_depth->run(g_capTex)) MarkDepthFailure();
             }
         } else {
             LogHR("WGC GetInterface(ID3D11Texture2D)", hr);
@@ -2611,12 +2617,7 @@ static void UpdateCapture() {
     g_lastCaptureFrameMs = GetTickCount64();
     ++g_captureFrameSerial;
     UpdateOverlayVisibility();
-    if (g_depth && !g_depth->run(g_capTex)) {
-        static int depthFails = 0;
-        if (++depthFails < 5 || depthFails % 120 == 0) {
-            Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
-        }
-    }
+    if (g_depth && !g_depth->run(g_capTex)) MarkDepthFailure();
 }
 
 static DWORD CaptureIdleWaitMs() {
@@ -3027,6 +3028,7 @@ static void Frame() {
     // Lazy (re)connect to both shared-memory channels — either side may start late
     TryAttachShm();
     TryAttachPoseSequence();
+    TryAttachPoseV2();
     TryAttachTrackerState();
     TryAttachSettings();
     ApplySettings();   // CLI > GUI > autodetect → publishes to g_screenW, g_strength, etc.
@@ -3197,6 +3199,14 @@ static void Frame() {
         ScopedCpuTimer captureCpuTimer(&g_lastCaptureCpuMs);
         TickCaptureRebind();
         UpdateCapture();
+        if (!g_depthRecoveryPending && g_captureState == CaptureState::Running
+            && g_depth && !g_depth->poll()) {
+            MarkDepthFailure();
+        }
+    }
+    if (g_depthRecoveryPending) {
+        g_depthRecoveryPending = false;
+        QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed");
     }
     UpdateOverlayVisibility();
 
@@ -3204,14 +3214,24 @@ static void Frame() {
     // envelope. Pose confidence/age degrades parallax before the hard stale
     // cutoff, while recovery ramps back more slowly to avoid a visible pop.
     const uint32_t depthAgeMs = g_depth ? g_depth->depth_age_ms() : 0u;
-    const bool depthReady = g_depth && g_depth->inferences_completed() > 0;
+    const bool depthReady = g_depth && g_depth->depth_updates_published() > 0;
+    const uint64_t captureAge64 = g_lastCaptureFrameMs == 0
+        ? UINT64_MAX
+        : GetTickCount64() - g_lastCaptureFrameMs;
+    const uint32_t captureAgeMs = captureAge64 > UINT32_MAX
+        ? UINT32_MAX
+        : static_cast<uint32_t>(captureAge64);
+    const uint32_t effectiveDepthAgeMs = g3d::parallax::DepthAgeForHealth(
+        depthAgeMs,
+        captureAgeMs,
+        g_captureState == CaptureState::Running && g_hasFrame);
     const g3d::parallax::HealthInputs healthInputs = {
         poseFresh,
         depthReady,
         usingPoseV2,
         usingPoseV2 ? poseConfidence : 1.0f,
         poseAgeMs,
-        depthAgeMs,
+        effectiveDepthAgeMs,
     };
     g_parallaxHealthTarget = g3d::parallax::TargetScale(healthInputs);
     const uint64_t healthNowMs = GetTickCount64();
@@ -3268,7 +3288,7 @@ static void Frame() {
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
-        Log("ParallaxHealth scale=%.3f target=%.3f pose_fresh=%d pose_source=%s pose_confidence=%.3f pose_age_ms=%u depth_ready=%d depth_age_ms=%u",
+        Log("ParallaxHealth scale=%.3f target=%.3f pose_fresh=%d pose_source=%s pose_confidence=%.3f pose_age_ms=%u depth_ready=%d depth_age_ms=%u effective_depth_age_ms=%u capture_age_ms=%u",
             g_parallaxHealthScale,
             g_parallaxHealthTarget,
             poseFresh ? 1 : 0,
@@ -3276,7 +3296,9 @@ static void Frame() {
             usingPoseV2 ? poseConfidence : 1.0f,
             poseAgeMs,
             depthReady ? 1 : 0,
-            depthAgeMs);
+            depthAgeMs,
+            effectiveDepthAgeMs,
+            captureAgeMs);
         if (g_depth) {
             Log("DepthIO path=%s fallbacks=%llu",
                 g_depth->gpu_io_active() ? "persistent_dml_binding" : "cpu_marshalling_fallback",

@@ -1499,6 +1499,15 @@ class MainWindow(QMainWindow):
             self._restart_overlay_from_health("process exited")
             return
 
+        if (
+            summary.capture_state == "unavailable"
+            and summary.capture_reason in {"depth_failed", "depth_unavailable"}
+        ):
+            self._capture_loss_count += 1
+            if self._capture_loss_count >= _CAPTURE_LOSS_RESTART_THRESHOLD:
+                self._restart_overlay_from_health("depth failure")
+            return
+
         if summary.capture_state in {"unavailable", "rebinding", "device_recovery"}:
             self._capture_loss_count = 0
             return

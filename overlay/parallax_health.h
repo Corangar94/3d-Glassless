@@ -47,6 +47,20 @@ inline float ConfidenceScale(float confidence) {
     return SmoothStep01((confidence - kZeroAt) / (kFullAt - kZeroAt));
 }
 
+inline uint32_t DepthAgeForHealth(
+    uint32_t depth_age_ms,
+    uint32_t capture_age_ms,
+    bool holding_captured_frame) {
+    // Desktop Duplication/WGC may legitimately emit no new image while a scene
+    // is static. In that case the last accepted depth still describes the held
+    // frame, so source age alone must not fade parallax to zero.
+    constexpr uint32_t kCaptureActivityWindowMs = 200;
+    if (holding_captured_frame && capture_age_ms > kCaptureActivityWindowMs) {
+        return 0;
+    }
+    return depth_age_ms;
+}
+
 inline float TargetScale(const HealthInputs& inputs) {
     if (!inputs.pose_fresh || !inputs.depth_ready) return 0.0f;
 

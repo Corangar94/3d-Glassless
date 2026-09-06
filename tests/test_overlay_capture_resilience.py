@@ -100,14 +100,15 @@ def test_overlay_targets_configured_game_without_taking_focus_or_flashing_black(
     assert "WS_EX_TOOLWINDOW" in source
 
 
-def test_overlay_hides_target_frames_when_the_game_is_not_foreground_or_capture_is_stale():
+def test_overlay_hides_target_when_not_foreground_but_keeps_static_capture_visible():
     source = OVERLAY.read_text(encoding="utf-8")
 
     assert "GetForegroundWindow()" in source
     assert "foregroundPid == selectedPid" in source
-    assert "kCaptureFrameStaleMs" in source
+    assert "kCaptureFrameStaleMs" not in source
     assert "g_lastCaptureFrameMs" in source
-    assert "Overlay visibility:" in source
+    assert "capture_age_ms=%llu" in source
+    assert "g_targetExePath.empty() || targetForeground" in source
 
 
 def test_overlay_accepts_partially_masked_frames_but_recovers_uniform_black_capture():
@@ -308,3 +309,17 @@ def test_depth_rate_handles_inference_counter_reset_after_recovery():
     source = OVERLAY.read_text(encoding="utf-8")
 
     assert "infNow >= lastInferences" in source
+
+
+def test_depth_pipeline_progresses_without_a_new_capture_and_recovers_worker_failures():
+    overlay = OVERLAY.read_text(encoding="utf-8")
+    depth = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+    header = Path("overlay/depth_infer.h").read_text(encoding="utf-8")
+
+    assert "bool poll();" in header
+    assert "return impl_->run_once(nullptr);" in depth
+    assert "if (!captured) return true;" in depth
+    assert "worker_failed = true" in depth
+    assert "if (worker_failed) return false" in depth
+    assert "g_depth && !g_depth->poll()" in overlay
+    assert 'QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed")' in overlay
