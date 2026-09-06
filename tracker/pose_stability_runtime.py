@@ -39,7 +39,8 @@ class _ConfirmedMeasurementAdmission:
     ) -> Any:
         method = getattr(self._admission, method_name)
         accepted = method(*args, **kwargs)
-        return self._confirmation.filter(accepted)
+        confirmed = self._confirmation.filter(accepted)
+        return None if accepted is None else confirmed
 
     def accept(self, *args: object, **kwargs: object) -> Any:
         return self._apply("accept", *args, **kwargs)
@@ -55,7 +56,8 @@ class _ConfirmedMeasurementAdmission:
         if not callable(admission):
             raise TypeError("measurement admission boundary is not callable")
         accepted = admission(*args, **kwargs)
-        return self._confirmation.filter(accepted)
+        confirmed = self._confirmation.filter(accepted)
+        return None if accepted is None else confirmed
 
     def reset(self, *args: object, **kwargs: object) -> Any:
         try:
@@ -111,6 +113,9 @@ class StableLatestFrameTrackingLoop(LatestFrameTrackingLoop):
             raise RuntimeError(
                 "TrackingLoop measurement-admission boundary is unavailable"
             )
+        if isinstance(admission, tracker_main.MeasurementAdmission):
+            admission.maximum_age_ms = 750
+            admission.minimum_confidence = 0.05
         self._measurement_admission = _ConfirmedMeasurementAdmission(
             admission,
             self._pose_jump_confirmation,

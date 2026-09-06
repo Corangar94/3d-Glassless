@@ -56,6 +56,7 @@ def _bare_async_tracker() -> FaceTracker:
     tracker._last_submitted_media_timestamp_ms = 5000
     tracker._minimum_result_media_timestamp_ms = None
     tracker._closed = False
+    tracker._async_watchdog = None
     tracker._pose_from_result = lambda _result, _width, _height, timestamp: HeadPosition(
         x_cm=3.0,
         y_cm=4.0,

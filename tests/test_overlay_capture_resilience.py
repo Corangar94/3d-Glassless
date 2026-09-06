@@ -307,4 +307,4 @@ def test_hidden_capture_states_use_bounded_message_wait_and_wall_clock_summary()
 def test_depth_rate_handles_inference_counter_reset_after_recovery():
     source = OVERLAY.read_text(encoding="utf-8")
 
-    assert "infNow >= lastInferences" in source
+    assert "pubNow >= lastPublications" in source

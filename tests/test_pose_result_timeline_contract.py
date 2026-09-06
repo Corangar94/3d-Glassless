@@ -16,7 +16,7 @@ def test_frame_adapter_filters_after_backend_call_and_before_return():
 
 def test_tracking_loop_receives_adapter_output_before_validation():
     source = _source("tracker/main.py")
-    measured = source.index("measured = _validated_pose(")
+    measured = source.index("measured = self._measurement_admission.accept(")
     process = source.index(
         "self._process_frame(frame, capture_timestamp_ms)",
         measured,

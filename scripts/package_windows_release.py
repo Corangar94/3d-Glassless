@@ -270,6 +270,8 @@ def package_windows_release(
     sbom_path: Path | None = None,
 ) -> dict[str, object]:
     _verify_bundle(bundle_dir)
+    from launcher.native_provenance import verify_native_build
+    verify_native_build(bundle_dir / "_internal", expected_commit=commit)
     package_name = f"Glassless3D-{_safe_label(version)}-windows-x64"
     staging = output_dir / package_name
     if staging.exists():

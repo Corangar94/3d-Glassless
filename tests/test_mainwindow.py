@@ -1,5 +1,6 @@
 # tests/test_mainwindow.py
 import sys
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,23 @@ from PySide6.QtWidgets import QApplication, QGroupBox, QScrollArea
 from launcher import diagnostics
 from launcher.mainwindow import MainWindow
 from launcher.window_discovery import RunningGameWindow
+
+def _own_runtime(window):
+    window._runtime_requested = True
+    window._overlay_started = True
+    window._thread = MagicMock()
+    window._thread.isRunning.return_value = True
+    window._overlay = MagicMock()
+    window._overlay.is_running.return_value = True
+    window._overlay.is_transitioning.return_value = False
+    window._overlay.instance_id.return_value = "test-child"
+
+
+def _current_summary(summary, sequence):
+    return replace(summary, frame_count=summary.frame_count + sequence,
+                   instance_id="test-child", depth_published=summary.depth_total + sequence,
+                   depth_age_ms=10)
+
 
 CONFIG = {
     "camera": {"index": 0},
@@ -494,7 +512,8 @@ def test_runtime_health_updates_from_overlay_summary(window):
     )
 
     window._overlay_started = True
-    window._apply_runtime_health(summary)
+    _own_runtime(window)
+    window._apply_runtime_health(_current_summary(summary, 1))
 
     assert "LIVE 7/s" in window._shm_tile.text()
     assert "8 Hz" in window._depth_tile.text()
@@ -555,9 +574,10 @@ def test_runtime_health_warns_without_overriding_depth_preset(qapp, tmp_path):
     win._overlay.is_transitioning.return_value = False
     win._overlay.is_running.return_value = True
 
-    win._apply_runtime_health(summary)
-    win._apply_runtime_health(summary)
-    win._apply_runtime_health(summary)
+    _own_runtime(win)
+    win._apply_runtime_health(_current_summary(summary, 1))
+    win._apply_runtime_health(_current_summary(summary, 2))
+    win._apply_runtime_health(_current_summary(summary, 3))
 
     assert "LOW" in win._depth_tile.text()
     assert win._settings.strength_y == pytest.approx(1.0)
@@ -615,9 +635,9 @@ def test_runtime_health_restarts_overlay_after_repeated_capture_loss(window):
     window._overlay.is_running.return_value = True
     window._active_profile = MagicMock(executable_path=r"C:\Games\Title\Title.exe")
 
-    window._apply_runtime_health(summary)
-    window._apply_runtime_health(summary)
-    window._apply_runtime_health(summary)
+    window._apply_runtime_health(replace(summary, frame_count=summary.frame_count + 1))
+    window._apply_runtime_health(replace(summary, frame_count=summary.frame_count + 2))
+    window._apply_runtime_health(replace(summary, frame_count=summary.frame_count + 3))
 
     window._overlay.restart_async.assert_called_once_with(r"C:\Games\Title\Title.exe")
     assert "Restarting" in window._overlay_tile.text()
@@ -646,9 +666,10 @@ def test_runtime_health_does_not_restart_an_intentionally_unavailable_capture(wi
     window._overlay = MagicMock()
     window._overlay.is_running.return_value = True
 
-    window._apply_runtime_health(summary)
-    window._apply_runtime_health(summary)
-    window._apply_runtime_health(summary)
+    _own_runtime(window)
+    window._apply_runtime_health(_current_summary(summary, 1))
+    window._apply_runtime_health(_current_summary(summary, 2))
+    window._apply_runtime_health(_current_summary(summary, 3))
 
     window._overlay.stop.assert_not_called()
     window._overlay.start.assert_not_called()
@@ -676,7 +697,8 @@ def test_runtime_health_does_not_claim_target_during_desktop_fallback(window, tm
         capture_reason="desktop_fallback",
     )
 
-    window._apply_runtime_health(summary)
+    _own_runtime(window)
+    window._apply_runtime_health(_current_summary(summary, 1))
 
     assert window._profile_target_label.text() == (
         "Waiting for game window: game.exe (desktop preview active)"
@@ -704,7 +726,8 @@ def test_runtime_health_claims_target_only_for_explicit_target_binding(window, t
         capture_reason="bound_target_wgc",
     )
 
-    window._apply_runtime_health(summary)
+    _own_runtime(window)
+    window._apply_runtime_health(_current_summary(summary, 1))
 
     assert window._profile_target_label.text() == "Captured: game.exe"
 

@@ -101,7 +101,7 @@ def test_missing_runtime_config_uses_safe_defaults(tmp_path, monkeypatch):
     policy = _policy_from_config_path(tmp_path / "missing.yaml")
 
     assert policy == CameraControlRecoveryPolicy()
-    assert any("using safe defaults" in message for message in logs)
+    assert any("using caller defaults" in message for message in logs)
 
 
 def test_quality_proxy_uses_latest_frame_acquisition_timestamp():

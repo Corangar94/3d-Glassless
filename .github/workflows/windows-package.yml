@@ -2,29 +2,8 @@ name: Standalone Windows package
 
 on:
   pull_request:
-    paths:
-      - 'launcher/**'
-      - 'tracker/**'
-      - 'scripts/**'
-      - 'overlay/**'
-      - 'profiles/**'
-      - 'Glassless3D.spec'
-      - 'Glassless3DOverlay.exe'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-package.yml'
   push:
-    branches:
-      - master
-    paths:
-      - 'launcher/**'
-      - 'tracker/**'
-      - 'scripts/**'
-      - 'overlay/**'
-      - 'profiles/**'
-      - 'Glassless3D.spec'
-      - 'Glassless3DOverlay.exe'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-package.yml'
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -38,11 +17,13 @@ jobs:
     timeout-minutes: 60
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -50,9 +31,7 @@ jobs:
           cache: pip
 
       - name: Install runtime, packaging, and test dependencies
-        run: |
-          python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+        run: python -m scripts.locked_environment
 
       - name: Verify packaging contracts
         # This subset intentionally contains no pytest-qt fixtures. Disable the
@@ -70,6 +49,9 @@ jobs:
 
       - name: Build and verify native runtime assets
         run: python scripts/bootstrap.py
+
+      - name: Run native production implementation tests
+        run: python -m scripts.run_native_tests
 
       - name: Run deterministic software acceptance
         run: >-

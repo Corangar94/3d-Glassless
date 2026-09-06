@@ -21,12 +21,11 @@ def test_measurement_gap_reset_precedes_every_axis_update():
 
 
 def test_prediction_does_not_apply_measurement_gap_reset():
+    import ast
     source = _source("tracker/pose_filter.py")
-    predict = source.split("    def predict(", 1)[1].split(
-        "    def update(",
-        1,
-    )[0]
-
+    cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "AdaptivePoseFilter")
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "predict")
+    predict = ast.get_source_segment(source, method)
     assert "_reset_for_measurement_gap" not in predict
     assert "self._synchronize_backend_transition()" in predict
 

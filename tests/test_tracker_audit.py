@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+import numpy as np
 
 import tracker.main as tracker_main
 from tracker.face_tracker_cv2 import HeadPosition
@@ -10,7 +11,7 @@ from tracker.shared_settings import OverlaySettings
 def _camera():
     cap = MagicMock()
     cap.isOpened.return_value = True
-    cap.read.return_value = (True, object())
+    cap.read.return_value = (True, np.zeros((8, 8, 3), dtype=np.uint8))
     return cap
 
 
@@ -79,7 +80,7 @@ def test_tracking_loop_applies_live_calibration_before_measuring_frame(monkeypat
     smoother.update.return_value = (1.0, 2.0, 60.0)
     writer = MagicMock()
     cap = _camera()
-    monkeypatch.setattr(tracker_main, "_open_camera", lambda *_args: cap)
+    monkeypatch.setattr(tracker_main, "_open_camera", lambda *_args, **_kwargs: cap)
     monkeypatch.setattr(
         tracker_main,
         "SharedSettingsReader",
@@ -109,7 +110,7 @@ def test_non_finite_pose_is_published_as_neutral_paused_state(monkeypatch):
     writer = MagicMock()
     smoother = MagicMock()
     cap = _camera()
-    monkeypatch.setattr(tracker_main, "_open_camera", lambda *_args: cap)
+    monkeypatch.setattr(tracker_main, "_open_camera", lambda *_args, **_kwargs: cap)
 
     loop = tracker_main.TrackingLoop(
         tracker,

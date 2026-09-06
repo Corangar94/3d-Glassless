@@ -34,10 +34,10 @@ def test_eye_geometry_is_propagated_and_expires():
 
 
 def test_documentation_records_authoritative_cascade_and_cadence():
-    documentation = _source("docs/OPENCV_FALLBACK_TRACKING.md")
+    documentation = " ".join(_source("docs/OPENCV_FALLBACK_TRACKING.md").split())
 
     assert "Cascades remain authoritative" in documentation
-    assert "every five frames" in documentation
+    assert "every five frames" in documentation.lower()
     assert "Every thirty frames" in documentation
     assert "the third miss retires the track" in documentation
     assert "eighteen frames" in documentation

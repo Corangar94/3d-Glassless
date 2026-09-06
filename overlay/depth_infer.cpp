@@ -2,6 +2,8 @@
 
 #include "depth_infer.h"
 #include "depth_result_freshness.h"
+#include "composite_freshness.h"
+#include "gpu_wait_policy.h"
 #include <d3dcompiler.h>
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -73,6 +75,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -218,6 +221,7 @@ struct DepthInferImpl {
     ID3D11ShaderResourceView* depth_prev_srv = nullptr;
     std::chrono::steady_clock::time_point blend_started{};
     bool                      blend_active = false;
+    uint64_t                  previous_depth_source_ms = 0;
 
     // ORT state
     std::unique_ptr<Ort::Env>            env;
@@ -232,6 +236,7 @@ struct DepthInferImpl {
         uint64_t fence_value = 0;
         const OrtDmlApi* api = nullptr;
         bool ready = false;
+        bool copy_in_flight = false;
     } dml_interop;
     struct FixedProfileSession {
         std::unique_ptr<Ort::SessionOptions> options;
@@ -294,9 +299,21 @@ struct DepthInferImpl {
 
     std::string                          last_err;          // init/Run errors (worker writes under m)
 
+    mutable std::mutex error_mutex;
+    void set_error(std::string message) {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        last_err = std::move(message);
+    }
+    std::string error_snapshot() const {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        return last_err;
+    }
+
     // ── Async pipeline ──
     std::thread                          worker;
     std::mutex                           m;                 // guards flags + pending/ready buffers
+    std::condition_variable              cv_exited;
+    bool                                 worker_exited = true; // guarded by m
     std::condition_variable              cv_work;           // main → worker wakeup
     bool                                 input_pending = false;   // new input waiting for worker
     bool                                 worker_running = false;
@@ -334,9 +351,14 @@ struct DepthInferImpl {
     std::array<std::vector<int>, kReadbackRingSize> stage_tiles;
     std::vector<std::vector<float>>      cached_tile_norm;
     std::vector<uint64_t>                tile_generation;
+    std::vector<DepthSourceIdentity>      tile_sources;
+    uint32_t scheduled_profile_mode = 1;
+    std::atomic<uint32_t> consecutive_worker_failures{0};
+    std::atomic<bool> gpu_transfer_failed{false};
     uint64_t                             scheduler_cycle = 0;
     uint64_t                             completion_generation = 0;
     uint64_t                             next_source_generation = 0;
+    uint64_t                             last_staged_capture_ms = 0;
     g3d::depth::ResultFreshnessGate      result_freshness{
         g3d::depth::FreshnessPolicy{kMaxDepthResultAgeMs}};
     std::chrono::steady_clock::time_point last_submit{};
@@ -405,6 +427,14 @@ struct DepthInferImpl {
     std::vector<int> select_tiles(const DepthProfile& profile) {
         std::vector<int> selected;
         if (tile_count <= 1) return {0};
+        // Refresh complete coverage before a cached peripheral tile expires.
+        // Startup and mode changes also require real depth for every tile.
+        if (g3d::depth::CompositeNeedsRefresh(
+                tile_sources.data(), tile_sources.size(), steady_milliseconds())) {
+            selected.resize(tile_count);
+            for (int tile = 0; tile < tile_count; ++tile) selected[tile] = tile;
+            return selected;
+        }
         const int center = tile_count / 2;
         if (profile.mode == 0) {
             selected.resize(tile_count);
@@ -426,8 +456,8 @@ struct DepthInferImpl {
     }
 
     static uint64_t steady_milliseconds() {
-        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
+        // Freshness shares the acquisition clock; scheduling still uses steady_clock.
+        return GetTickCount64();
     }
 
     DepthSourceIdentity next_source_identity(uint64_t captured_ms) {
@@ -470,6 +500,7 @@ struct DepthInferImpl {
             std::fill(cached.begin(), cached.end(), 0.5f);
         }
         std::fill(tile_generation.begin(), tile_generation.end(), 0);
+        std::fill(tile_sources.begin(), tile_sources.end(), DepthSourceIdentity{});
         scheduler_cycle = 0;  // fast mode refreshes the center tile next.
         completion_generation = 0;
         smoothed_global_lo = 0.0f;
@@ -569,26 +600,26 @@ float4 main(I i):SV_Target {
         HRESULT hr = D3DCompile(vs_src, std::strlen(vs_src), "depth_compact_vs", nullptr,
             nullptr, "main", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vs_blob, &errors);
         if (errors) errors->Release();
-        if (FAILED(hr)) { last_err = "Compile compact VS failed"; return false; }
+        if (FAILED(hr)) { set_error("Compile compact VS failed"); return false; }
         hr = D3DCompile(ps_src, std::strlen(ps_src), "depth_compact_ps", nullptr,
             nullptr, "main", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ps_blob, &errors);
         if (errors) errors->Release();
-        if (FAILED(hr)) { vs_blob->Release(); last_err = "Compile compact PS failed"; return false; }
+        if (FAILED(hr)) { vs_blob->Release(); set_error("Compile compact PS failed"); return false; }
         hr = dev->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &compact_vs);
         if (SUCCEEDED(hr)) hr = dev->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &compact_ps);
         vs_blob->Release(); ps_blob->Release();
-        if (FAILED(hr)) { last_err = "Create compact shaders failed"; return false; }
+        if (FAILED(hr)) { set_error("Create compact shaders failed"); return false; }
         D3D11_SAMPLER_DESC sm = {};
         sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sm.MaxLOD = D3D11_FLOAT32_MAX;
         hr = dev->CreateSamplerState(&sm, &compact_sampler);
-        if (FAILED(hr)) { last_err = "Create compact sampler failed"; return false; }
+        if (FAILED(hr)) { set_error("Create compact sampler failed"); return false; }
         D3D11_BUFFER_DESC bd = {};
         bd.ByteWidth = sizeof(CompactCB); bd.Usage = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         hr = dev->CreateBuffer(&bd, nullptr, &compact_cb);
-        if (FAILED(hr)) { last_err = "Create compact constants failed"; return false; }
+        if (FAILED(hr)) { set_error("Create compact constants failed"); return false; }
         return true;
     }
 
@@ -773,22 +804,53 @@ float4 main(I i):SV_Target {
         return SUCCEEDED(hr);
     }
 
+    bool copy_resources_safe_to_release() const {
+        if (!dml_interop.copy_in_flight) return true;
+        const uint64_t value = dml_interop.fence->GetCompletedValue();
+        return value == std::numeric_limits<uint64_t>::max()
+            || value >= dml_interop.fence_value
+            || FAILED(dml_interop.device->GetDeviceRemovedReason());
+    }
+
     bool execute_copy_commands_and_wait() {
+        if (stop.load(std::memory_order_acquire)) return false;
         HRESULT hr = dml_interop.copy_list->Close();
         if (FAILED(hr)) return false;
         ID3D12CommandList* lists[] = {dml_interop.copy_list.Get()};
-        dml_interop.queue->ExecuteCommandLists(1, lists);
         const uint64_t value = ++dml_interop.fence_value;
+        dml_interop.copy_in_flight = true;
+        dml_interop.queue->ExecuteCommandLists(1, lists);
         hr = dml_interop.queue->Signal(dml_interop.fence.Get(), value);
-        if (FAILED(hr)) return false;
-        if (dml_interop.fence->GetCompletedValue() < value) {
-            hr = dml_interop.fence->SetEventOnCompletion(
-                value, dml_interop.fence_event);
-            if (FAILED(hr)) return false;
-            if (WaitForSingleObject(dml_interop.fence_event, INFINITE)
-                != WAIT_OBJECT_0) return false;
+        if (FAILED(hr)) {
+            gpu_transfer_failed.store(true, std::memory_order_relaxed);
+            return false;
         }
-        return true;
+        hr = dml_interop.fence->SetEventOnCompletion(value, dml_interop.fence_event);
+        if (FAILED(hr)) {
+            gpu_transfer_failed.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        const uint64_t started = GetTickCount64();
+        while (true) {
+            const auto decision = g3d::gpu::FenceDecision(
+                dml_interop.fence->GetCompletedValue(), value,
+                FAILED(dml_interop.device->GetDeviceRemovedReason()),
+                stop.load(std::memory_order_acquire),
+                GetTickCount64() - started, 2000);
+            if (decision == g3d::gpu::WaitDecision::Complete) {
+                dml_interop.copy_in_flight = false;
+                return true;
+            }
+            if (decision != g3d::gpu::WaitDecision::Pending) {
+                gpu_transfer_failed.store(true, std::memory_order_relaxed);
+                return false;
+            }
+            const DWORD waited = WaitForSingleObject(dml_interop.fence_event, 25);
+            if (waited != WAIT_OBJECT_0 && waited != WAIT_TIMEOUT) {
+                gpu_transfer_failed.store(true, std::memory_order_relaxed);
+                return false;
+            }
+        }
     }
 
     bool initialize_gpu_io(
@@ -953,6 +1015,15 @@ float4 main(I i):SV_Target {
             gpu_io_note = std::string("DML I/O binding failed; CPU fallback active: ")
                 + exception.what();
             gpu_io_active.store(false, std::memory_order_relaxed);
+            if (gpu_transfer_failed.load(std::memory_order_relaxed)
+                || !copy_resources_safe_to_release()
+                || stop.load(std::memory_order_acquire)) {
+                // No fallback, reuse, or deallocation while GPU work may still
+                // reference persistent allocations. The main loop exits and
+                // cleanup drains, or terminates this isolated child process.
+                gpu_transfer_failed.store(true, std::memory_order_relaxed);
+                throw;
+            }
             gpu_io_fallbacks.fetch_add(1, std::memory_order_relaxed);
             reset_fixed_gpu_io(fixed);
             return false;
@@ -1010,6 +1081,8 @@ float4 main(I i):SV_Target {
                     * DepthInferencer::kModelSize,
                 0.5f));
         tile_generation.assign(tile_count, 0);
+        tile_sources.assign(tile_count, {});
+        scheduled_profile_mode = 1;
         pending_tiles.clear();
         running_tiles.clear();
         for (auto& tiles : stage_tiles) tiles.clear();
@@ -1036,15 +1109,15 @@ float4 main(I i):SV_Target {
         sd.Usage = D3D11_USAGE_DEFAULT;
         sd.BindFlags = D3D11_BIND_RENDER_TARGET;
         HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &compact_bgra);
-        if (FAILED(hr)) { last_err = "CreateTexture2D(compact BGRA) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateTexture2D(compact BGRA) failed"); return false; }
         hr = dev->CreateRenderTargetView(compact_bgra, nullptr, &compact_rtv);
-        if (FAILED(hr)) { last_err = "CreateRenderTargetView(compact BGRA) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateRenderTargetView(compact BGRA) failed"); return false; }
         sd.Usage = D3D11_USAGE_STAGING;
         sd.BindFlags = 0;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
         for (auto& stage : stage_bgra) {
             hr = dev->CreateTexture2D(&sd, nullptr, &stage);
-            if (FAILED(hr)) { last_err = "CreateTexture2D(staging ring) failed"; return false; }
+            if (FAILED(hr)) { set_error("CreateTexture2D(staging ring) failed"); return false; }
         }
 
         D3D11_TEXTURE2D_DESC dd = {};
@@ -1057,17 +1130,17 @@ float4 main(I i):SV_Target {
         dd.Usage = D3D11_USAGE_DEFAULT;
         dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         hr = dev->CreateTexture2D(&dd, nullptr, &depth_tex);
-        if (FAILED(hr)) { last_err = "CreateTexture2D(depth current) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateTexture2D(depth current) failed"); return false; }
         hr = dev->CreateTexture2D(&dd, nullptr, &depth_prev_tex);
-        if (FAILED(hr)) { last_err = "CreateTexture2D(depth prev) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateTexture2D(depth prev) failed"); return false; }
         D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
         srv.Format = dd.Format;
         srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srv.Texture2D.MipLevels = 1;
         hr = dev->CreateShaderResourceView(depth_tex, &srv, &depth_srv);
-        if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth current) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateShaderResourceView(depth current) failed"); return false; }
         hr = dev->CreateShaderResourceView(depth_prev_tex, &srv, &depth_prev_srv);
-        if (FAILED(hr)) { last_err = "CreateShaderResourceView(depth prev) failed"; return false; }
+        if (FAILED(hr)) { set_error("CreateShaderResourceView(depth prev) failed"); return false; }
 
         const int pixels = DepthInferencer::kModelSize
             * DepthInferencer::kModelSize * tile_count;
@@ -1097,6 +1170,7 @@ float4 main(I i):SV_Target {
     bool ensure_fixed_session(uint32_t mode) {
         mode = mode > 2 ? 1 : mode;
         FixedProfileSession& fixed = fixed_session(mode);
+        if (stop.load(std::memory_order_acquire)) return false;
         if (fixed.session) return true;
         try {
             const DepthProfile profile = profile_for_mode(mode);
@@ -1123,19 +1197,18 @@ float4 main(I i):SV_Target {
                 : OrtSessionOptionsAppendExecutionProvider_DML(
                     *fixed.options, dml_device_id);
             if (status != nullptr) {
-                last_err = std::string("Append DML EP failed: ")
-                    + api.GetErrorMessage(status);
+                set_error(std::string("Append DML EP failed: ")
+                    + api.GetErrorMessage(status));
                 api.ReleaseStatus(status);
                 fixed.options.reset();
                 return false;
             }
             fixed.session = std::make_unique<Ort::Session>(
                 *env, model_path_copy.c_str(), *fixed.options);
-            fixed.run_options = std::make_unique<Ort::RunOptions>();
             if (input_name.empty() || output_name.empty()) {
                 if (fixed.session->GetInputCount() != 1
                     || fixed.session->GetOutputCount() != 1) {
-                    last_err = "Unexpected model input/output count";
+                    set_error("Unexpected model input/output count");
                     return false;
                 }
                 Ort::AllocatedStringPtr input = fixed.session->GetInputNameAllocated(0, allocator);
@@ -1143,14 +1216,14 @@ float4 main(I i):SV_Target {
                 input_name = input.get();
                 output_name = output.get();
             }
+            if (stop.load(std::memory_order_acquire)) return false;
             if (dml_interop.ready) {
                 initialize_gpu_io(fixed, profile);
             }
             return true;
         } catch (const Ort::Exception& exception) {
-            last_err = std::string("Fixed-profile ORT session exception: ")
-                + exception.what();
-            fixed.run_options.reset();
+            set_error(std::string("Fixed-profile ORT session exception: ")
+                + exception.what());
             fixed.session.reset();
             fixed.options.reset();
             return false;
@@ -1162,6 +1235,11 @@ float4 main(I i):SV_Target {
             env = std::make_unique<Ort::Env>(
                 ORT_LOGGING_LEVEL_WARNING, "Glassless3D");
             model_path_copy = model_path;
+            // Allocate before the worker starts; never mutate these pointers
+            // during lazy session creation or concurrent termination.
+            for (auto& fixed : profile_sessions) {
+                fixed.run_options = std::make_unique<Ort::RunOptions>();
+            }
             dml_device_id = resolve_dml_device_id();
             initialize_dml_interop();
             // Balanced is the startup default. Fast and quality sessions are
@@ -1169,7 +1247,7 @@ float4 main(I i):SV_Target {
             // model weights on every machine.
             return ensure_fixed_session(1);
         } catch (const Ort::Exception& exception) {
-            last_err = std::string("ORT init exception: ") + exception.what();
+            set_error(std::string("ORT init exception: ") + exception.what());
             return false;
         }
     }
@@ -1218,7 +1296,7 @@ float4 main(I i):SV_Target {
             if (compact_input_srv) { compact_input_srv->Release(); compact_input_srv = nullptr; }
             if (compact_input_tex) { compact_input_tex->Release(); compact_input_tex = nullptr; }
             HRESULT hr = dev->CreateShaderResourceView(captured, nullptr, &compact_input_srv);
-            if (FAILED(hr)) { last_err = "Create compact input SRV failed"; return false; }
+            if (FAILED(hr)) { set_error("Create compact input SRV failed"); return false; }
             compact_input_tex = captured;
             compact_input_tex->AddRef();
         }
@@ -1440,15 +1518,19 @@ float4 main(I i):SV_Target {
     // Doing the readback+map every frame (60fps) while the worker only consumes
     // at ~10fps stalls the GPU pipeline 60×/s for nothing. By skipping the
     // readback when busy, we reduce the D3D11_MAP_READ stalls to ~10×/s.
-    bool run_once(ID3D11Texture2D* captured) {
+    bool run_once(ID3D11Texture2D* captured, uint64_t captured_ms) {
         std::vector<uint16_t> drained_upload;
         DepthSourceIdentity drained_source{};
         bool worker_busy = false;
         {
             std::lock_guard<std::mutex> lock(m);
             if (stop.load()) {
-                last_err = "DepthInferencer is stopping";
+                set_error("DepthInferencer is stopping");
                 return false;
+            }
+            if (gpu_transfer_failed.load(std::memory_order_relaxed)
+                || consecutive_worker_failures.load(std::memory_order_relaxed) >= 3) {
+                return false;  // launcher owns the bounded process restart budget
             }
             worker_busy = input_pending || worker_running;
             if (output_ready) {
@@ -1466,10 +1548,16 @@ float4 main(I i):SV_Target {
                 now_ms);
             if (decision == g3d::depth::PublishDecision::Accept) {
                 const int N = DepthInferencer::kModelSize;
-                ctx->CopyResource(depth_prev_tex, depth_tex);
+                const bool previous_fresh = has_valid_depth
+                    && g3d::depth::SourceAgeMs(now_ms,
+                        last_depth_source_ms.load(std::memory_order_relaxed)) <= kMaxDepthResultAgeMs;
+                previous_depth_source_ms = previous_fresh
+                    ? last_depth_source_ms.load(std::memory_order_relaxed) : drained_source.captured_ms;
+                if (previous_fresh) ctx->CopyResource(depth_prev_tex, depth_tex);
                 ctx->UpdateSubresource(
                     depth_tex, 0, nullptr, drained_upload.data(),
                     N * tile_count * sizeof(uint16_t), 0);
+                if (!previous_fresh) ctx->CopyResource(depth_prev_tex, depth_tex);
                 if (last_depth_arrival.time_since_epoch().count() != 0) {
                     const float interval = std::chrono::duration<float>(
                         now - last_depth_arrival).count();
@@ -1478,7 +1566,7 @@ float4 main(I i):SV_Target {
                 }
                 last_depth_arrival = now;
                 blend_started = now;
-                blend_active = true;
+                blend_active = previous_fresh;
                 has_valid_depth = true;
                 last_depth_upload_ms.store(
                     now_ms,
@@ -1497,10 +1585,15 @@ float4 main(I i):SV_Target {
             publish_freshness_snapshot();
         }
         if (worker_busy) return true;
+        if (stage_count == 0 && captured_ms == last_staged_capture_ms) return true;
 
         const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
         const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
         const DepthProfile requested = profile_for_mode(resolved_mode);
+        if (scheduled_profile_mode != resolved_mode) {
+            reset_temporal_depth_history_after_rejection();
+            scheduled_profile_mode = resolved_mode;
+        }
         if (last_submit.time_since_epoch().count() != 0) {
             const uint32_t elapsed_ms = static_cast<uint32_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1513,7 +1606,8 @@ float4 main(I i):SV_Target {
             if (!render_compact(captured, requested)) return false;
             ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
             stage_profiles[stage_write] = requested;
-            stage_sources[stage_write] = next_source_identity(now_ms);
+            stage_sources[stage_write] = next_source_identity(captured_ms);
+            last_staged_capture_ms = captured_ms;
             stage_tiles[stage_write] = selected;
             stage_pending[stage_write] = true;
             stage_write = (stage_write + 1) % kReadbackRingSize;
@@ -1525,7 +1619,7 @@ float4 main(I i):SV_Target {
             stage_bgra[stage_read], 0, D3D11_MAP_READ,
             D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
         if (map_hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
-        if (FAILED(map_hr)) { last_err = "Map(staging ring) failed"; return false; }
+        if (FAILED(map_hr)) { set_error("Map(staging ring) failed"); return false; }
         const DepthProfile profile = stage_profiles[stage_read];
         const DepthSourceIdentity source = stage_sources[stage_read];
         const std::vector<int> selected = stage_tiles[stage_read];
@@ -1542,7 +1636,7 @@ float4 main(I i):SV_Target {
         {
             std::lock_guard<std::mutex> lock(m);
             if (stop.load()) {
-                last_err = "DepthInferencer is stopping";
+                set_error("DepthInferencer is stopping");
                 return false;
             }
             pending_input_f32.swap(scratch_input_f32);
@@ -1593,8 +1687,13 @@ float4 main(I i):SV_Target {
                 int output_height = 0, output_width = 0;
                 for (size_t batch = 0; batch < running_tiles.size() && ok; ++batch) {
                     if (!ensure_fixed_session(running_profile.mode)) {
-                        error = last_err;
+                        error = error_snapshot();
                         ok = false;
+                        break;
+                    }
+                    if (stop.load(std::memory_order_acquire)) {
+                        ok = false;
+                        error = "Depth inference cancelled";
                         break;
                     }
                     FixedProfileSession& fixed = fixed_session(running_profile.mode);
@@ -1699,6 +1798,7 @@ float4 main(I i):SV_Target {
                         prev_norm_f32.swap(prev_norm_tiles[tile]);
                         any_scene_cut = any_scene_cut || tile_cut;
                         tile_generation[tile] = ++completion_generation;
+                        tile_sources[tile] = running_source;
                     }
 
                     double sum = 0.0, sum_sq = 0.0;
@@ -1776,10 +1876,14 @@ float4 main(I i):SV_Target {
                 worker_running = false;
                 if (ok) {
                     ready_upload_fp16 = std::move(produced_upload);
-                    ready_source = running_source;
+                    ready_source = g3d::depth::OldestCompositeSource(
+                        tile_sources.data(), tile_sources.size(),
+                        running_source.generation);
                     output_ready = true;
+                    consecutive_worker_failures.store(0, std::memory_order_relaxed);
                 } else {
-                    last_err = std::move(error);
+                    set_error(std::move(error));
+                    consecutive_worker_failures.fetch_add(1, std::memory_order_relaxed);
                 }
                 running_source = {};
             }
@@ -1795,9 +1899,9 @@ float4 main(I i):SV_Target {
                 stop.store(true);
                 input_pending = false;
             }
-            // DirectML may be blocked in Run while its D3D device is being
-            // removed. ORT's termination flag is thread-safe and makes that
-            // Run return, allowing the worker join to complete.
+            // Request cancellation through stable run-option objects. A driver
+            // may fail to honor it; the bounded exit wait below is the final
+            // process-isolation boundary, not an unbounded std::thread::join.
             for (auto& fixed : profile_sessions) {
                 if (!fixed.run_options) continue;
                 try {
@@ -1808,8 +1912,27 @@ float4 main(I i):SV_Target {
                 }
             }
             cv_work.notify_all();
+            {
+                std::unique_lock<std::mutex> lock(m);
+                if (!cv_exited.wait_for(lock, std::chrono::seconds(4), [&] { return worker_exited; })) {
+                    OutputDebugStringA("Glassless3D: worker cancellation timed out; isolated process exit 71\n");
+                    std::_Exit(71);
+                }
+            }
             worker.join();
         }
+        // A cancelled/timed-out fence is NOT permission to release live GPU
+        // resources. Bound drain time, then leave teardown to the OS by exiting
+        // this isolated overlay process without running resource destructors.
+        const uint64_t drain_started = GetTickCount64();
+        while (!copy_resources_safe_to_release()) {
+            if (GetTickCount64() - drain_started >= 2000) {
+                OutputDebugStringA("Glassless3D: GPU drain timed out; isolated process exit 70\n");
+                std::_Exit(70);
+            }
+            Sleep(10);
+        }
+        dml_interop.copy_in_flight = false;
         if (depth_prev_srv) { depth_prev_srv->Release(); depth_prev_srv = nullptr; }
         if (depth_srv) { depth_srv->Release(); depth_srv = nullptr; }
         if (depth_prev_tex) { depth_prev_tex->Release(); depth_prev_tex = nullptr; }
@@ -1854,6 +1977,7 @@ float4 main(I i):SV_Target {
         blend_active = false;
         cached_tile_norm.clear();
         tile_generation.clear();
+        tile_sources.clear();
         percentile_scratch.clear();
         global_samples_scratch.clear();
         normalized_scratch.clear();
@@ -1889,9 +2013,12 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         impl_->pending_source = {};
         impl_->running_source = {};
         impl_->ready_source = {};
-        impl_->last_err.clear();
+        impl_->set_error("");
     }
     impl_->stop.store(false, std::memory_order_relaxed);
+    impl_->last_staged_capture_ms = 0;
+    impl_->consecutive_worker_failures.store(0, std::memory_order_relaxed);
+    impl_->gpu_transfer_failed.store(false, std::memory_order_relaxed);
     impl_->inferences.store(0, std::memory_order_relaxed);
     impl_->active_performance_mode.store(1, std::memory_order_relaxed);
     impl_->last_inference_ms.store(0.0f, std::memory_order_relaxed);
@@ -1917,16 +2044,36 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         return false;
     }
     // Session is ready — spin up the async inference worker.
-    impl_->worker = std::thread([impl = impl_.get()] { impl->worker_loop(); });
+    {
+        std::lock_guard<std::mutex> lock(impl_->m);
+        impl_->worker_exited = false;
+    }
+    impl_->worker = std::thread([impl = impl_.get()] {
+        try {
+            impl->worker_loop();
+        } catch (const std::exception& error) {
+            impl->set_error(std::string("Depth worker terminated: ") + error.what());
+            impl->consecutive_worker_failures.store(3, std::memory_order_relaxed);
+        } catch (...) {
+            impl->set_error("Depth worker terminated with an unknown exception");
+            impl->consecutive_worker_failures.store(3, std::memory_order_relaxed);
+        }
+        {
+            std::lock_guard<std::mutex> lock(impl->m);
+            impl->worker_exited = true;
+        }
+        impl->cv_exited.notify_all();
+    });
     return true;
 }
 
-bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8) {
+bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms) {
     if (!impl_ || !impl_->env || !impl_->fixed_session(1).session) {
-        if (impl_) impl_->last_err = "DepthInferencer not initialized";
+        if (impl_) impl_->set_error("DepthInferencer not initialized");
         return false;
     }
-    return impl_->run_once(captured_bgra8);
+    return impl_->run_once(captured_bgra8, capture_timestamp_ms
+        ? capture_timestamp_ms : DepthInferImpl::steady_milliseconds());
 }
 
 void DepthInferencer::set_performance_mode(uint32_t mode) {
@@ -2045,6 +2192,11 @@ float DepthInferencer::depth_blend() const {
     // depth texture morph starts and ends with no visible velocity — the
     // discrete 10 Hz update slides past the eye instead of snapping.
     if (!impl_->blend_active) return 1.0f;
+    // A new publication must never revive an expired previous texture through
+    // interpolation. Finish the crossfade as soon as that older source expires.
+    if (g3d::depth::SourceAgeMs(DepthInferImpl::steady_milliseconds(),
+            impl_->previous_depth_source_ms) > DepthInferImpl::kMaxDepthResultAgeMs)
+        return 1.0f;
     const auto elapsed = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - impl_->blend_started).count();
     float t = elapsed / std::max(0.001f, impl_->blend_duration_sec);
@@ -2054,7 +2206,9 @@ float DepthInferencer::depth_blend() const {
 }
 
 const char* DepthInferencer::last_error() const {
-    return impl_ ? impl_->last_err.c_str() : "";
+    thread_local std::string snapshot;
+    snapshot = impl_ ? impl_->error_snapshot() : "";
+    return snapshot.c_str();
 }
 
 uint64_t DepthInferencer::inferences_completed() const {
@@ -2067,4 +2221,8 @@ float DepthInferencer::depth_crop_x0_uv() const {
 
 float DepthInferencer::depth_crop_w_uv() const {
     return 1.0f;
+}
+
+uint32_t DepthInferencer::consecutive_worker_failures() const {
+    return impl_ ? impl_->consecutive_worker_failures.load(std::memory_order_relaxed) : 0;
 }

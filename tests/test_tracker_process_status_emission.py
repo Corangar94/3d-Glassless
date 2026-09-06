@@ -20,7 +20,6 @@ def test_tracker_process_routes_every_status_through_transition_gate():
     assert "self.status_changed.emit(" not in source
     for status in (
         "initializing",
-        "tracking",
         "paused",
         "restarting",
         "error",
@@ -61,31 +60,22 @@ def test_internal_relaunch_keeps_transition_history():
 
 def test_fresh_pose_status_leads_timestamp_commit_and_both_pose_signals():
     source = _source("launcher/tracker_process.py")
-    poll = source.split("    def _poll(self)", 1)[1]
-    fresh = poll.split("        if ts != self._last_ts:", 1)[1].split(
-        "        else:",
-        1,
-    )[0]
-
-    status = fresh.index("self._emit_status(")
-    timestamp = fresh.index("self._last_ts = ts")
+    fresh = source.split("    def _poll(self)", 1)[1]
+    status = fresh.index("self._emit_status(state_decision.status)")
+    timestamp = fresh.index("self._last_ts = accepted_timestamp_ms")
     timestamp_clock = fresh.index("self._last_ts_time = now")
     legacy_pose = fresh.index("self.position_updated.emit(")
     sampled_pose = fresh.index("self.position_sampled.emit(")
-
     assert status < timestamp < timestamp_clock < legacy_pose < sampled_pose
 
 
 def test_repeated_stale_poll_uses_deduplicated_paused_path():
     source = _source("launcher/tracker_process.py")
-    poll = source.split("    def _poll(self)", 1)[1]
-    stale = poll.split("        else:", 1)[1]
-
-    restart = stale.index("self._restart_after_stale()")
-    paused = stale.index('self._emit_status("paused")')
-
-    assert restart < paused
+    stale = _method(source, "_handle_no_fresh_pose", "_poll")
+    assert stale.index("self._restart_after_stale()") < stale.index('self._emit_status("paused")')
     assert "self.status_changed.emit" not in stale
+    poll = source.split("    def _poll(self)", 1)[1]
+    assert "self._handle_no_fresh_pose(now)" in poll
 
 
 def test_status_diagnostics_expose_gate_snapshot():

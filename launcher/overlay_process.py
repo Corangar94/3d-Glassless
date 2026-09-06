@@ -17,10 +17,14 @@ import os
 import subprocess
 import sys
 import threading
+import logging
+import uuid
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Optional
+
+_log = logging.getLogger(__name__)
 
 OVERLAY_EXE_NAME = "Glassless3DOverlay.exe"
 DEPTH_MODEL_RELS = (
@@ -243,6 +247,9 @@ class OverlayProcess:
         self._desired_running = False
         self._worker_running = False
         self._restart_requested = False
+        self._worker_owner: object | None = None
+        self._instance_id: str | None = None
+        self._last_start_error: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -268,6 +275,7 @@ class OverlayProcess:
             self._target_executable = normalized_target
             self._target_pid = normalized_pid
             if self._worker_running:
+                self._request_generation += 1
                 # A previous process is still being reaped.  The worker will
                 # reconcile this newest desired target before it exits.
                 exe = find_overlay_exe()
@@ -306,6 +314,13 @@ class OverlayProcess:
                 f"{formatted}. Run `python scripts/bootstrap.py`, then try again."
             )
 
+        from launcher.native_provenance import MANIFEST, verify_native_build
+        if (exe.parent / MANIFEST).is_file() or getattr(sys, "frozen", False):
+            try:
+                verify_native_build(exe.parent)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise OverlayStartError(f"Native runtime provenance failed: {error}. Rebuild with bootstrap.") from error
+
         # CWD = project root so the overlay's <exe>/models/ search hits.
         cwd = str(_project_root())
         creationflags = 0
@@ -322,10 +337,14 @@ class OverlayProcess:
                 args.extend(["--target-exe", target_executable])
             if target_pid is not None:
                 args.extend(["--target-pid", str(target_pid)])
+            instance_id = uuid.uuid4().hex
+            environment = os.environ.copy()
+            environment["G3D_INSTANCE_ID"] = instance_id
             proc = subprocess.Popen(
                 args,
                 cwd=cwd,
                 creationflags=creationflags,
+                env=environment,
                 # Inherit stdout/stderr so the overlay's diagnostic prints show up
                 # in the launcher console when run from a terminal.
             )
@@ -335,6 +354,9 @@ class OverlayProcess:
                 "`python scripts/bootstrap.py` to rebuild it, then try again. "
                 f"Original error: {e}"
             ) from e
+        with self._lock:
+            self._instance_id = instance_id
+            self._last_start_error = None
         return exe, proc
 
     def stop(self, timeout: float = 3.0) -> None:
@@ -400,15 +422,25 @@ class OverlayProcess:
             if self._worker_running:
                 return
             self._worker_running = True
-        threading.Thread(
+            owner = object()
+            self._worker_owner = owner
+        worker = threading.Thread(
             target=self._reconcile_lifecycle,
-            args=(timeout,),
+            args=(timeout, owner),
             name="g3d-overlay-lifecycle",
             # A detached native overlay must never outlive the launcher just
             # because Python began interpreter shutdown while cleanup was in
             # progress. Non-daemon lifecycle workers finish their bounded reap.
             daemon=False,
-        ).start()
+        )
+        try:
+            worker.start()
+        except Exception:
+            with self._lock:
+                if self._worker_owner is owner:
+                    self._worker_running = False
+                    self._worker_owner = None
+            raise
 
     @staticmethod
     def _reap(proc: subprocess.Popen[bytes], timeout: float) -> None:
@@ -427,7 +459,21 @@ class OverlayProcess:
         except OSError:
             pass
 
-    def _reconcile_lifecycle(self, timeout: float) -> None:
+    def _reconcile_lifecycle(self, timeout: float, owner: object) -> None:
+        """Retain worker ownership through exceptions without clearing a successor."""
+        try:
+            self._reconcile_loop(timeout)
+        except Exception as error:
+            _log.exception("overlay lifecycle failed")
+            with self._lock:
+                self._last_start_error = str(error)
+        finally:
+            with self._lock:
+                if self._worker_owner is owner:
+                    self._worker_running = False
+                    self._worker_owner = None
+
+    def _reconcile_loop(self, timeout: float) -> None:
         """Single serialized worker implementing latest-request-wins semantics."""
         while True:
             with self._lock:
@@ -466,11 +512,17 @@ class OverlayProcess:
 
             try:
                 exe, spawned = self._spawn(target, target_pid)
-            except OverlayStartError:
+            except Exception as error:
+                # A newer Stop/Restart owns the intent. A failed older spawn
+                # must not abandon the sole reconciler while leaving it marked
+                # alive. Unexpected boundary failures follow the same rule.
                 with self._lock:
-                    if generation == self._request_generation:
-                        self._desired_running = False
-                        self._worker_running = False
+                    self._last_start_error = str(error)
+                    if generation != self._request_generation:
+                        continue
+                    self._desired_running = False
+                    self._worker_running = False
+                _log.error("overlay spawn failed: %s", error)
                 return
 
             with self._lock:
@@ -484,6 +536,15 @@ class OverlayProcess:
                 # to the next loop so it is retired before any replacement.
 
     # ── Status ────────────────────────────────────────────────────────────
+
+    def instance_id(self) -> str | None:
+        """Identifier carried in this child process's health summaries."""
+        with self._lock:
+            return self._instance_id
+
+    def last_start_error(self) -> str | None:
+        with self._lock:
+            return self._last_start_error
 
     def is_running(self) -> bool:
         with self._lock:

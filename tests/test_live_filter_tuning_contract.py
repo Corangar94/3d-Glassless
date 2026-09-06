@@ -23,7 +23,7 @@ def test_shared_settings_field_remains_the_kalman_measurement_noise():
     source = _source("tracker/shared_settings.py")
 
     assert "smoothing_alpha: float = 0.1" in source
-    assert "# Kalman measurement noise r" in source
+    assert "(Kalman measurement noise r)" in source
     assert 'STRUCT_FORMAT = "<fffffIfffffffIII" "IIIIfI"' in source
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import zipfile
 
@@ -21,6 +22,11 @@ def _fake_bundle(root: Path) -> Path:
     (
         internal / "models" / "depth_anything_v2_small_fp16.onnx"
     ).write_bytes(b"depth")
+    (internal / "Glassless3DOverlay.build.json").write_text(json.dumps({
+        "source_commit": "a" * 40,
+        "files": {name: hashlib.sha256((internal / name).read_bytes()).hexdigest()
+                  for name in ("Glassless3DOverlay.exe", "onnxruntime.dll", "DirectML.dll")},
+    }), encoding="utf-8")
     return bundle
 
 

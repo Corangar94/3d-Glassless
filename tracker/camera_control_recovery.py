@@ -403,6 +403,14 @@ def apply_camera_control_recovery(
     return updated
 
 
+def _strict_config_integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("timing and count settings must be integers")
+    if isinstance(value, str) and not value.strip().lstrip("+-").isdigit():
+        raise ValueError("timing and count settings must be integers")
+    return int(value)
+
+
 def parse_camera_control_recovery_policy(
     camera_config: object,
     *,
@@ -416,13 +424,13 @@ def parse_camera_control_recovery_policy(
         if values is None:
             raise ValueError("camera.control_recovery must be a mapping")
         return CameraControlRecoveryPolicy(
-            degradation_hold_ms=int(
+            degradation_hold_ms=_strict_config_integer(
                 values.get("degradation_hold_ms", 2_000)
             ),
-            retry_interval_ms=int(
+            retry_interval_ms=_strict_config_integer(
                 values.get("retry_interval_ms", 5_000)
             ),
-            max_attempts_per_episode=int(
+            max_attempts_per_episode=_strict_config_integer(
                 values.get("max_attempts_per_episode", 3)
             ),
         )

@@ -66,7 +66,7 @@ def test_frozen_entrypoint_dispatches_private_tracker_child():
     source = (ROOT / "launcher" / "__main__.py").read_text(encoding="utf-8")
 
     assert '"--tracker-child"' in source
-    assert "from tracker.main import main" in source
+    assert "from tracker.pose_stability_runtime import main" in source
 
 
 def test_bootstrap_pins_current_official_reshade_release():

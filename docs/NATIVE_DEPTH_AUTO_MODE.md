@@ -35,3 +35,10 @@ With auto requested, `mode=auto` remains stable while `active=` reflects adaptiv
 ## Compatibility
 
 No shared-memory name, field offset, enum code, native class signature, or model resource changes. Existing settings using codes `0`, `1`, or `2` retain their behavior. The strict settings writer already accepts `depth_mode=3`, and the repository default remains auto.
+
+## Canonical source build
+
+The audit remediation removes configure-time text substitutions. Both default and
+shared-settings normalization now call the centralized policy directly from
+`overlay.cpp`. CMake compiles that canonical file. Native policy tests remain
+registered with CTest; source line endings no longer affect mode selection.

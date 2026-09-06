@@ -49,7 +49,8 @@ public:
     // a completed earlier inference and, when idle, stage the current capture.
     // Returns false on a pipeline/device failure; controlled stale-result drops
     // keep the previous valid depth and return true.
-    bool run(ID3D11Texture2D* captured_bgra8);
+    // capture_timestamp_ms uses GetTickCount64; zero is invocation time for synthetic callers.
+    bool run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms = 0);
 
     // Runtime performance/quality mode from G3D_Settings:
     // 0=quality, 1=balanced, 2=fast, 3=auto.
@@ -99,6 +100,7 @@ public:
     // Number of successful worker inferences since init, including a result that
     // was later dropped at publication because its source frame had become stale.
     uint64_t inferences_completed() const;
+    uint32_t consecutive_worker_failures() const;
 
     // UV transform to convert screen UV X → depth texture UV X.
     // The depth texture only covers the center crop of the captured frame
@@ -115,38 +117,3 @@ public:
 private:
     std::unique_ptr<DepthInferImpl> impl_;
 };
-
-#ifdef G3D_OVERLAY_SHOWWINDOW_GUARD
-// overlay.cpp marks a captured frame available before calling run(). Without
-// this gate, its first visibility update can expose the initial flat 0.5 depth
-// texture while the asynchronous worker is still producing the first result.
-//
-// Once the worker reports a completion, call run() here to drain it. Reveal the
-// window only if that result survived source-age/generation admission and was
-// actually uploaded. While no valid publication exists, clear has_frame; the
-// render loop's second visibility pass restores its bookkeeping to hidden and
-// the next captured frame retries normally.
-inline BOOL G3DShowWindowAfterDepthUpload(
-    HWND window,
-    int command,
-    DepthInferencer* depth,
-    ID3D11Texture2D* captured_frame,
-    bool& has_frame) {
-    if (command == SW_SHOWNOACTIVATE) {
-        const bool depth_ready = depth
-            && depth->inferences_completed() > 0
-            && captured_frame
-            && depth->run(captured_frame)
-            && depth->depth_updates_published() > 0;
-        if (!depth_ready) {
-            has_frame = false;
-            return ::ShowWindow(window, SW_HIDE);
-        }
-    }
-    return ::ShowWindow(window, command);
-}
-
-#define ShowWindow(window, command) \
-    G3DShowWindowAfterDepthUpload( \
-        (window), (command), g_depth, g_capTex, g_hasFrame)
-#endif

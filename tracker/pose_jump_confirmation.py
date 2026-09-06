@@ -496,7 +496,7 @@ class PoseJumpConfirmationGate:
         )
         if delta_ms is None or delta_ms >= self._policy.reset_after_ms:
             return self._accept(value, sample)
-        if delta_ms == 0:
+        if delta_ms == 0 or sample.timestamp_ms == self._candidate_latest_timestamp_ms:
             self._duplicate_timestamp_drop_count += 1
             self._rejected_candidate_count += 1
             self._last_rejection_reason = (

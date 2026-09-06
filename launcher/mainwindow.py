@@ -59,6 +59,7 @@ from launcher.diagnostics import (
 )
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
+from launcher.overlay_health import OverlayProgressMonitor
 from launcher.window_discovery import RunningGameWindow, discover_running_game_windows
 from launcher.auto_tune import TrackingAutoTuner
 from launcher.tracker_process import TrackerProcess
@@ -313,6 +314,9 @@ class MainWindow(QMainWindow):
         self._live_tracking_distances: deque[float] = deque(maxlen=30)
         self._overlay = OverlayProcess()
         self._overlay_started = False
+        self._overlay_progress = OverlayProgressMonitor()
+        self._overlay_health_current = False
+        self._overlay_health_healthy = False
         self._selected_running_target: RunningGameWindow | None = None
         self._hidden_for_overlay = False
         self._capture_loss_count = 0
@@ -1141,6 +1145,7 @@ class MainWindow(QMainWindow):
             self._start_tracking()
 
     def _start_tracking(self, *, recovery: bool = False) -> None:
+        self._overlay_progress.reset()
         if self._tracker_stop_pending:
             return
         if not recovery:
@@ -1398,7 +1403,9 @@ class MainWindow(QMainWindow):
             self._capture_tile.setText("Capture\nIdle")
             self._update_target_feedback()
             return
-        if summary is None:
+        # Process liveness and startup deadlines are independent of logs.
+        self._maybe_recover_overlay(summary)
+        if summary is None or not self._overlay_health_current:
             self._shm_tile.setText("SHM\nWaiting")
             self._depth_tile.setText("Depth\nWaiting")
             self._capture_tile.setText("Capture\nWaiting")
@@ -1410,9 +1417,9 @@ class MainWindow(QMainWindow):
         if self._tracking_status == "tracking" and self._tracker_is_running():
             self._recovery.mark_healthy("tracker")
 
-        self._maybe_recover_overlay(summary)
         if (
-            summary.has_frame
+            self._overlay_health_healthy
+            and summary.has_frame
             and summary.capture_state == "running"
             and summary.depth_hz > 0
             and self._overlay.is_running()
@@ -1478,7 +1485,7 @@ class MainWindow(QMainWindow):
     def _tracker_is_running(self) -> bool:
         return bool(self._thread is not None and self._thread.isRunning())
 
-    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
+    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary | None) -> None:
         if (
             not self._runtime_requested
             and self._overlay_started
@@ -1487,8 +1494,11 @@ class MainWindow(QMainWindow):
             # Repair intent after legacy state restoration/tests or a launcher
             # transition that already owns both active children.
             self._runtime_requested = True
+        self._overlay_health_current = False
+        self._overlay_health_healthy = False
         if not self._overlay_started or not self._tracker_is_running():
             self._capture_loss_count = 0
+            self._overlay_progress.reset()
             return
 
         if self._overlay.is_transitioning() is True:
@@ -1499,6 +1509,19 @@ class MainWindow(QMainWindow):
             self._restart_overlay_from_health("process exited")
             return
 
+        instance_reader = getattr(self._overlay, "instance_id", None)
+        instance = instance_reader() if callable(instance_reader) else None
+        instance = instance if isinstance(instance, str) else None
+        decision = self._overlay_progress.observe(summary, instance)
+        self._overlay_health_current = decision.current
+        self._overlay_health_healthy = decision.healthy
+        if decision.restart_reason:
+            self._restart_overlay_from_health(decision.restart_reason)
+            return
+        if summary is None or not decision.current:
+            return
+        if instance is not None and summary.instance_id != instance:
+            return
         if summary.capture_state in {"unavailable", "rebinding", "device_recovery"}:
             self._capture_loss_count = 0
             return

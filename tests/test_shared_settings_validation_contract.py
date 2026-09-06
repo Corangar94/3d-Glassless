@@ -92,9 +92,9 @@ def test_frozen_package_includes_validation_module():
 
 
 def test_documentation_records_strict_types_and_transaction_order():
-    docs = _source("docs/SHARED_SETTINGS_VALIDATION.md")
+    docs = " ".join(_source("docs/SHARED_SETTINGS_VALIDATION.md").split())
 
     assert "booleans are never accepted as numbers" in docs
     assert "fractional values are never truncated" in docs
     assert "before the mapping is marked odd" in docs
-    assert "88-byte ABI is unchanged" in docs
+    assert "88-byte ABI are unchanged" in docs

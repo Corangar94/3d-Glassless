@@ -64,8 +64,8 @@ def test_original_camera_frame_is_not_reassigned_by_preparation():
 
 
 def test_docs_record_default_pixel_reduction_and_opt_out():
-    docs = _source("docs/MEDIAPIPE_INPUT_RESOLUTION.md")
+    docs = " ".join(_source("docs/MEDIAPIPE_INPUT_RESOLUTION.md").split())
 
     assert "43.75%" in docs
     assert "Set the cap to `0`" in docs
-    assert "before BGR-to-RGB conversion" in docs
+    assert docs.index("optional BGR resize") < docs.index("BGR-to-RGB conversion")

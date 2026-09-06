@@ -214,7 +214,7 @@ See [Troubleshooting](docs/TROUBLESHOOTING.md) for active runtime guidance. The 
 ## Development
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m scripts.locked_environment
 python -m compileall -q launcher tracker scripts tests
 python -m pytest -q
 python -m PyInstaller --clean --noconfirm Glassless3D.spec
@@ -244,3 +244,10 @@ See [Head-coupled 3D direction](docs/HEAD_COUPLED_3D_DIRECTION.md), [architectur
 ## Release governance
 
 A project license has not yet been selected, and default-branch protection plus the first prerelease are tracked in [issue #3](https://github.com/Corangar94/3d-Glassless/issues/3). The release workflow fails closed until the legal files are reviewed and committed. Do not assume redistribution terms from the public repository or CI artifacts.
+
+## Audit remediation and evidence
+
+See [the September 2026 remediation map](docs/AUDIT_REMEDIATION_2026_09.md).
+Release publication requires successful checks for the exact source commit, and
+the frozen native files must match that commit?s SHA-256 build manifest. A clean
+checkout requires bootstrap; generated executable binaries are not kept in Git.

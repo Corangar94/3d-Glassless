@@ -1,3 +1,5 @@
+import numpy as np
+from tracker.camera_reconnect_retry import CameraReconnectPolicy
 from unittest.mock import MagicMock, call, patch
 
 import tracker.main as tracker_main
@@ -99,7 +101,7 @@ def test_tracking_loop_rotates_backend_after_each_stalled_capture_session():
         opened=True,
         reads=[(False, None), (False, None), (False, None)],
     )
-    default = _capture(opened=True, reads=[(True, MagicMock())])
+    default = _capture(opened=True, reads=[(True, np.zeros((8, 8, 3), dtype=np.uint8))])
     tracker = MagicMock()
     tracker.process_frame.return_value = None
     writer = MagicMock()
@@ -110,6 +112,7 @@ def test_tracking_loop_rotates_backend_after_each_stalled_capture_session():
         writer=writer,
         smoother=smoother,
         hold_ms=0,
+        camera_reconnect_policy=CameraReconnectPolicy(max_failures=3, base_delay_s=0, max_delay_s=0),
     )
 
     with (
@@ -141,7 +144,7 @@ def test_failed_preferred_backend_does_not_break_future_rotation():
         opened=True,
         reads=[(False, None), (False, None), (False, None)],
     )
-    default = _capture(opened=True, reads=[(True, MagicMock())])
+    default = _capture(opened=True, reads=[(True, np.zeros((8, 8, 3), dtype=np.uint8))])
     tracker = MagicMock()
     tracker.process_frame.return_value = None
 
