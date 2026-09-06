@@ -15,6 +15,7 @@ from launcher.tracker_backend_diagnostics import (
     tracker_backend_tile_text,
 )
 from tracker.backend_status_shared_memory import TrackerBackendStatus
+from tracker.shared_settings import SharedSettingsWriter
 
 
 _NO_TIMESTAMP = object()
@@ -75,6 +76,8 @@ class MainWindow(_BaseMainWindow):
         config: dict,
         config_path: str,
         parent: Optional[object] = None,
+        *,
+        settings_writer: SharedSettingsWriter | None = None,
     ) -> None:
         # Base initialization invokes virtual status/health methods, so establish
         # these fields before delegating to it.
@@ -84,7 +87,11 @@ class MainWindow(_BaseMainWindow):
         self._tracker_backend_tooltip = ""
         self._auto_tune_sample_timeline = AutoTuneSampleTimeline()
         self._auto_tune_publication_writer: AutoTunePublicationWriter | None = None
-        super().__init__(config=config, config_path=config_path, parent=parent)
+        if settings_writer is None:
+            super().__init__(config=config, config_path=config_path, parent=parent)
+        else:
+            super().__init__(config=config, config_path=config_path, parent=parent,
+                             settings_writer=settings_writer)
         self._install_timestamped_auto_tuner()
         self._install_auto_tune_publication_writer()
 

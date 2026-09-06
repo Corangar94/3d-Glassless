@@ -14,6 +14,13 @@ mediapipe_data, mediapipe_libs, mediapipe_hiddenimports = collect_all(
     "mediapipe"
 )
 opencv_data = collect_data_files("cv2", includes=["data/*.xml"])
+# Import success does not imply the fallback model assets exist in a wheel.
+from pathlib import Path
+required_cascades = {"haarcascade_frontalface_default.xml", "haarcascade_eye.xml"}
+collected_cascades = {Path(source).name for source, _destination in opencv_data}
+if not required_cascades.issubset(collected_cascades):
+    raise RuntimeError("OpenCV fallback cascade assets missing; install the verified release lock")
+
 
 runtime_datas = [
     # Standalone non-injecting native runtime and required models.
@@ -82,6 +89,7 @@ hidden_imports = [
     "launcher.status_emission",
     "launcher.tracker_poll_admission",
     "launcher.runtime_mainwindow",
+    "launcher.self_test",
     "launcher.tracker_backend_diagnostics",
     "launcher.camera_calibration_process",
     "launcher.camera_calibration_wizard",

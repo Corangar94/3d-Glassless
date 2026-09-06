@@ -1,3 +1,5 @@
 mediapipe==0.10.33
 numpy>=1.26.4,<3.0
 pyyaml==6.0.1
+# OpenCV 5.0.0.93 Windows wheel omits the fallback Haar cascades.
+opencv-contrib-python>=4.14.0.94,<5

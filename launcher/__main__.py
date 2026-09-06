@@ -15,6 +15,18 @@ def _ensure_child_streams() -> None:
 
 
 def _select_main(argv: list[str]) -> Callable[[], None]:
+    if "--self-test" in argv:
+        # Select before any interactive dispatch. The strict self-test parser
+        # rejects conflicting modes rather than falling through to the camera.
+        argv.remove("--self-test")
+        _ensure_child_streams()
+        from launcher.self_test import main as self_test_main
+
+        def _run_self_test() -> None:
+            raise SystemExit(self_test_main(argv[1:]))
+
+        return _run_self_test
+
     if "--tracker-child" in argv:
         argv.remove("--tracker-child")
         from tracker.pose_stability_runtime import main

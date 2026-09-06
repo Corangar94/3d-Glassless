@@ -304,7 +304,11 @@ class MainWindow(QMainWindow):
         config: dict,
         config_path: str,
         parent: Optional[object] = None,
+        *,
+        settings_writer: SharedSettingsWriter | None = None,
     ) -> None:
+        # The window owns/closes the supplied transport, just like its default.
+        # A caller can isolate an offline instance without touching G3D_Settings.
         super().__init__(parent)  # type: ignore[call-overload]
         self._config = config
         self._config_path = config_path
@@ -346,7 +350,9 @@ class MainWindow(QMainWindow):
         self._drag_pos: Optional[QPoint] = None
         self._initialize_game_profiles()
 
-        self._settings_writer = SharedSettingsWriter()
+        self._settings_writer = (
+            SharedSettingsWriter() if settings_writer is None else settings_writer
+        )
         trk = config.get("tracking", {})
         self._auto_tune_enabled = bool(trk.get("auto_tune", True))
         self._auto_tuner = TrackingAutoTuner()
