@@ -1,6 +1,7 @@
 """Install the reviewed Windows dependency closure without resolving new versions."""
 from __future__ import annotations
 import json
+import os
 import platform
 from pathlib import Path
 import subprocess
@@ -9,6 +10,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> int:
+    # pip inspect can include non-ASCII package metadata on Windows runners.
+    # Force UTF-8 for subprocess output even when the caller uses a legacy code page.
+    os.environ["PYTHONUTF8"] = "1"
     if sys.platform != "win32" or sys.version_info[:2] not in ((3, 11), (3, 12)) or sys.maxsize <= 2**32:
         raise SystemExit("Release locks support Windows x64 Python 3.11/3.12 only")
     lock = ROOT / "requirements" / f"windows-py{sys.version_info.major}{sys.version_info.minor}.lock"
