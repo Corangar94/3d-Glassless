@@ -37,6 +37,12 @@ if(BUILD_TESTING)
     )
     target_compile_features(depth_mode_policy_tests PRIVATE cxx_std_17)
     add_test(NAME depth_mode_policy_tests COMMAND depth_mode_policy_tests)
+
+    add_executable(settings_policy_tests
+        settings_policy_tests.cpp
+    )
+    target_compile_features(settings_policy_tests PRIVATE cxx_std_17)
+    add_test(NAME settings_policy_tests COMMAND settings_policy_tests)
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
@@ -59,17 +65,17 @@ if(NOT EXISTS "${DML_DIR}/lib/DirectML.dll")
         "Run: python scripts/bootstrap.py")
 endif()
 
-# overlay.cpp is intentionally kept as the readable monolithic Windows source.
-# Configure one build copy with the centralized depth-mode policy. Each code
-# anchor must occur exactly once: if the source changes, configuration fails
-# instead of silently losing automatic mode or rewriting another expression.
+# overlay.cpp remains the readable monolithic Windows source. Configure one
+# build copy with the centralized depth-mode and settings-consumer policies.
+# Each source anchor must occur exactly once: source drift fails configuration
+# instead of silently dropping a runtime safety boundary.
 function(g3d_replace_overlay_once variable needle replacement description)
     set(before "${${variable}}")
     string(LENGTH "${before}" before_length)
     string(LENGTH "${needle}" needle_length)
     if(needle_length EQUAL 0)
         message(FATAL_ERROR
-            "Could not configure overlay depth mode: empty ${description}")
+            "Could not configure overlay source: empty ${description}")
     endif()
     string(REPLACE "${needle}" "" without_needle "${before}")
     string(LENGTH "${without_needle}" without_length)
@@ -77,7 +83,7 @@ function(g3d_replace_overlay_once variable needle replacement description)
         "(${before_length} - ${without_length}) / ${needle_length}")
     if(NOT match_count EQUAL 1)
         message(FATAL_ERROR
-            "Could not configure overlay depth mode: expected one ${description}, found ${match_count}")
+            "Could not configure overlay source: expected one ${description}, found ${match_count}")
     endif()
     string(REPLACE "${needle}" "${replacement}" after "${before}")
     set(${variable} "${after}" PARENT_SCOPE)
@@ -88,17 +94,84 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 )
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp" G3D_OVERLAY_SOURCE_TEXT)
 
-# Prepending the small policy header avoids a line-ending-sensitive multi-line
-# include anchor. cstdint is the only transitive include, so WIN32_LEAN_AND_MEAN
-# still precedes windows.h in the original source body.
+# Prepending small dependency-free policy headers avoids line-ending-sensitive
+# multi-line include anchors. cstdint/cmath do not disturb the original Windows
+# include ordering in the source body.
 set(G3D_OVERLAY_SOURCE_TEXT
-    "#include \"depth_mode_policy.h\"\n${G3D_OVERLAY_SOURCE_TEXT}"
+    "#include \"depth_mode_policy.h\"\n#include \"settings_policy.h\"\n${G3D_OVERLAY_SOURCE_TEXT}"
 )
 g3d_replace_overlay_once(
     G3D_OVERLAY_SOURCE_TEXT
     "uint32_t dm = 1;"
     "uint32_t dm = g3d::depth_mode::DefaultRequestedMode();"
     "default requested mode anchor"
+)
+g3d_replace_overlay_once(
+    G3D_OVERLAY_SOURCE_TEXT
+    "if (!ReadStableSettings(g_setView, &s)) return;"
+    [=[if (!ReadStableSettings(g_setView, &s)) return;
+        const auto settingsValidation = g3d::settings::ValidateSharedSettings({
+            s.strengthX,
+            s.strengthY,
+            s.virtualDepthCm,
+            s.screenWCm,
+            s.screenHCm,
+            s.depthCurve,
+            s.depthGamma,
+            s.focusRadius,
+            s.ipdMm,
+            s.deadzoneM,
+            s.displayBackend,
+            s.depthMode,
+            s.stereoLayout,
+            s.eyeOrder,
+            s.panelWidthPx,
+            s.panelHeightPx,
+            s.focusPlaneCm,
+            s.trackingMode,
+        });
+        if (!settingsValidation.accepted()) {
+            static uint32_t lastRejectedSettingsVersion = 0xFFFFFFFFu;
+            if (lastRejectedSettingsVersion != s.version) {
+                Log("Rejected G3D_Settings version=%u invalid_fields=0x%08X",
+                    s.version, settingsValidation.rejected_fields);
+                lastRejectedSettingsVersion = s.version;
+            }
+            return;
+        }
+        if (settingsValidation.normalized_fields != 0u) {
+            static uint32_t lastNormalizedSettingsVersion = 0xFFFFFFFFu;
+            if (lastNormalizedSettingsVersion != s.version) {
+                Log("Normalized G3D_Settings version=%u fields=0x%08X",
+                    s.version, settingsValidation.normalized_fields);
+                lastNormalizedSettingsVersion = s.version;
+            }
+        }]=]
+    "native settings validation anchor"
+)
+g3d_replace_overlay_once(
+    G3D_OVERLAY_SOURCE_TEXT
+    "if (s.strengthX    > 0.0f)    sx = s.strengthX;"
+    "if (s.strengthX    >= 0.0f)   sx = s.strengthX;"
+    "zero horizontal strength anchor"
+)
+g3d_replace_overlay_once(
+    G3D_OVERLAY_SOURCE_TEXT
+    "if (s.strengthY    > 0.0f)    sy = s.strengthY;"
+    "if (s.strengthY    >= 0.0f)   sy = s.strengthY;"
+    "zero vertical strength anchor"
+)
+g3d_replace_overlay_once(
+    G3D_OVERLAY_SOURCE_TEXT
+    "dc = s.depthCurve;"
+    "dc = g3d::settings::NormalizeDepthCurve(s.depthCurve);"
+    "depth curve normalization anchor"
+)
+g3d_replace_overlay_once(
+    G3D_OVERLAY_SOURCE_TEXT
+    "db = s.displayBackend;"
+    "db = g3d::settings::NormalizeDisplayBackend(s.displayBackend);"
+    "display backend normalization anchor"
 )
 g3d_replace_overlay_once(
     G3D_OVERLAY_SOURCE_TEXT
