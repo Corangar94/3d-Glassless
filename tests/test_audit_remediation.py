@@ -178,3 +178,13 @@ def test_launcher_session_clock_is_independent_of_python_monotonic_epoch(monkeyp
     assert events == [(1.0, 2.0, 60.0, 5001)]
     tracker._close_readers()
     tracker._proc = None
+
+
+def test_locked_environment_rejects_unlocked_runner_packages(tmp_path):
+    from scripts.locked_environment import validate_locked_versions
+    lock = tmp_path / "environment.lock"
+    lock.write_text("Some_Package==1.2 --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8")
+    validate_locked_versions(lock, {"some-package": "1.2", "glassless3d": "0.1.0"})
+    for installed in ({"some-package": "1.2", "extra": "1"}, {"some-package": "1.3"}, {}):
+        with pytest.raises(RuntimeError):
+            validate_locked_versions(lock, installed)
