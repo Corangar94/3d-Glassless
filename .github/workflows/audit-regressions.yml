@@ -77,11 +77,15 @@ jobs:
           "$cxx" "${common[@]}" overlay/pose_prediction_tests.cpp -o /tmp/pose_prediction_tests
           "$cxx" "${common[@]}" overlay/depth_result_freshness_tests.cpp -o /tmp/depth_result_freshness_tests
           "$cxx" "${common[@]}" overlay/depth_mode_policy_tests.cpp -o /tmp/depth_mode_policy_tests
+          "$cxx" "${common[@]}" overlay/settings_policy_tests.cpp -o /tmp/settings_policy_tests
+          "$cxx" "${common[@]}" overlay/depth_cohesion_tests.cpp -o /tmp/depth_cohesion_tests
           /tmp/capture_recovery_tests
           /tmp/parallax_health_tests
           /tmp/pose_prediction_tests
           /tmp/depth_result_freshness_tests
           /tmp/depth_mode_policy_tests
+          /tmp/settings_policy_tests
+          /tmp/depth_cohesion_tests
 
   python-dependency-audit:
     runs-on: windows-2025
