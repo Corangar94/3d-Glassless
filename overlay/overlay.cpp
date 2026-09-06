@@ -41,6 +41,7 @@
 
 #include "capture_recovery.h"
 #include "depth_infer.h"
+#include "depth_cohesion_shader.h"
 #include "parallax_health.h"
 #include "pose_prediction.h"
 
@@ -298,7 +299,7 @@ VS_OUT main(uint id : SV_VertexID) {
 }
 )hlsl";
 
-static const char PS_SRC[] = R"hlsl(
+static const char PS_SRC[] = G3D_DEPTH_COHESION_HLSL R"hlsl(
 cbuffer CB : register(b0) {
     float headX;           // cm, right = positive
     float headY;           // cm, up    = positive
@@ -377,9 +378,7 @@ DepthSample SampleDepthCohesive(float2 screenUV, float dCropW, float2 sceneDdx, 
     float dMin = min(d0, min(min(dl, dr), min(du, dd)));
     float dMax = max(d0, max(max(dl, dr), max(du, dd)));
     float edge = smoothstep(kDepthCohesionLow, kDepthCohesionHigh, dMax - dMin);
-    float localMin = min(d0, min(min(dl, dr), min(du, dd)));
-    float localMax = max(d0, max(max(dl, dr), max(du, dd)));
-    float trimmedMean = max(0.0f, (d0 + dl + dr + du + dd - localMin - localMax) * 0.25f);
+    float trimmedMean = G3DTrimmedMean5(d0, dl, dr, du, dd);
     float localDepth = saturate(trimmedMean);
     DepthSample sample;
     sample.depth = lerp(d0, localDepth, edge * kDepthCohesionBlend);
