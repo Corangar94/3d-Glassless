@@ -21,7 +21,7 @@ def test_overlay_show_is_gated_until_first_depth_result_is_uploaded():
 def test_show_window_guard_is_scoped_to_overlay_translation_unit():
     cmake = _source("overlay/CMakeLists.txt")
 
-    assert "set_source_files_properties(overlay.cpp PROPERTIES" in cmake
+    assert 'set_source_files_properties("${G3D_CONFIGURED_OVERLAY_SOURCE}" PROPERTIES' in cmake
     assert "COMPILE_DEFINITIONS G3D_OVERLAY_SHOWWINDOW_GUARD" in cmake
     assert "target_compile_definitions(Glassless3DOverlay PRIVATE" in cmake
     assert "G3D_OVERLAY_SHOWWINDOW_GUARD" not in cmake.split(
