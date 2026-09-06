@@ -12,6 +12,8 @@ def test_required_windows_matrix_and_portable_policy_job_exist():
     assert "portable-native-policies:" in audit
     assert "overlay/parallax_health_tests.cpp" in audit
     assert "overlay/depth_mode_policy_tests.cpp" in audit
+    assert "overlay/settings_policy_tests.cpp" in audit
+    assert "overlay/depth_cohesion_tests.cpp" in audit
 
 
 def test_required_native_and_package_workflows_are_never_path_skipped():

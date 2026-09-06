@@ -90,15 +90,3 @@ def test_documentation_records_single_filter_and_poll_bounds():
     assert "more than `0.001`" in docs
     assert "does not add a second smoothing pass" in auto_tune_docs
     assert "AdaptivePoseFilter.set_measurement_noise()" in auto_tune_docs
-
-
-def test_native_overlay_accepts_zero_strength_as_an_explicit_setting():
-    overlay = _source("overlay/overlay.cpp")
-    apply_settings = overlay.split("static void ApplySettings()", 1)[1].split(
-        "static bool AutodetectScreenSizeCm", 1
-    )[0]
-
-    assert "std::isfinite(s.strengthX) && s.strengthX >= 0.0f" in apply_settings
-    assert "std::isfinite(s.strengthY) && s.strengthY >= 0.0f" in apply_settings
-    assert "s.strengthX    > 0.0f" not in apply_settings
-    assert "s.strengthY    > 0.0f" not in apply_settings

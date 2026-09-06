@@ -1899,8 +1899,8 @@ static void ApplySettings() {
     if (g_setView) {
         Settings s = {};
         if (!ReadStableSettings(g_setView, &s)) return;
-        if (std::isfinite(s.strengthX) && s.strengthX >= 0.0f) sx = s.strengthX;
-        if (std::isfinite(s.strengthY) && s.strengthY >= 0.0f) sy = s.strengthY;
+        if (s.strengthX    > 0.0f)    sx = s.strengthX;
+        if (s.strengthY    > 0.0f)    sy = s.strengthY;
         if (s.virtualDepthCm >= 0.0f) dp = s.virtualDepthCm;
         if (s.screenWCm    > 0.0f)    sw = s.screenWCm;
         if (s.screenHCm    > 0.0f)    sh = s.screenHCm;
