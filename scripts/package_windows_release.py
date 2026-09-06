@@ -58,7 +58,9 @@ def _git_output(*args: str) -> str | None:
 
 
 def _source_commit(explicit: str | None) -> str:
-    value = explicit or os.environ.get("GITHUB_SHA") or _git_output("rev-parse", "HEAD")
+    # PR workflows may check out the head while GITHUB_SHA names a synthetic merge.
+    # The actual checkout must match the native executable's embedded source identity.
+    value = explicit or _git_output("rev-parse", "HEAD") or os.environ.get("GITHUB_SHA")
     return value or "unknown"
 
 

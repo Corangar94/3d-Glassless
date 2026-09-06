@@ -188,3 +188,13 @@ def test_locked_environment_rejects_unlocked_runner_packages(tmp_path):
     for installed in ({"some-package": "1.2", "extra": "1"}, {"some-package": "1.3"}, {}):
         with pytest.raises(RuntimeError):
             validate_locked_versions(lock, installed)
+
+
+def test_package_provenance_prefers_actual_checkout_over_event_merge_sha(monkeypatch):
+    from scripts import package_windows_release as package
+    monkeypatch.setenv("GITHUB_SHA", "synthetic-merge")
+    monkeypatch.setattr(package, "_git_output", lambda *args: "actual-checkout")
+    assert package._source_commit(None) == "actual-checkout"
+    assert package._source_commit("explicit") == "explicit"
+    monkeypatch.setattr(package, "_git_output", lambda *args: None)
+    assert package._source_commit(None) == "synthetic-merge"
