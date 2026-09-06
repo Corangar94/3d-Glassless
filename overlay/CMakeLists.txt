@@ -43,6 +43,29 @@ if(BUILD_TESTING)
     )
     target_compile_features(settings_policy_tests PRIVATE cxx_std_17)
     add_test(NAME settings_policy_tests COMMAND settings_policy_tests)
+
+    add_executable(depth_cohesion_tests
+        depth_cohesion_tests.cpp
+    )
+    target_compile_features(depth_cohesion_tests PRIVATE cxx_std_17)
+    add_test(NAME depth_cohesion_tests COMMAND depth_cohesion_tests)
+
+    if(WIN32)
+        add_executable(shader_numeric_tests
+            shader_numeric_tests.cpp
+        )
+        target_compile_features(shader_numeric_tests PRIVATE cxx_std_17)
+        target_link_libraries(shader_numeric_tests PRIVATE
+            d3d11
+            d3dcompiler
+            dxgi
+        )
+        add_test(
+            NAME shader_numeric_tests
+            COMMAND shader_numeric_tests "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp"
+        )
+        set_tests_properties(shader_numeric_tests PROPERTIES TIMEOUT 30)
+    endif()
 endif()
 
 set(CMAKE_CXX_STANDARD 17)
