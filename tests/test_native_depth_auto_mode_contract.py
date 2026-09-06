@@ -31,14 +31,16 @@ def test_configured_overlay_uses_policy_for_default_and_shared_request():
         in cmake
     )
     assert (
-        '"#include \\"depth_mode_policy.h\\"\\n${G3D_OVERLAY_SOURCE_TEXT}"'
+        '"#include \\"depth_mode_policy.h\\"\\n'
+        '#include \\"settings_policy.h\\"\\n'
+        '${G3D_OVERLAY_SOURCE_TEXT}"'
         in cmake
     )
     assert "CMAKE_CONFIGURE_DEPENDS" in cmake
     assert "overlay.configured.cpp" in cmake
 
 
-def test_overlay_build_fails_unless_each_mode_anchor_is_unique():
+def test_overlay_build_fails_unless_each_policy_anchor_is_unique():
     cmake = _source("overlay/CMakeLists.txt")
     helper = cmake.split(
         "function(g3d_replace_overlay_once",
@@ -50,7 +52,7 @@ def test_overlay_build_fails_unless_each_mode_anchor_is_unique():
     assert "if(NOT match_count EQUAL 1)" in helper
     assert "message(FATAL_ERROR" in helper
     assert "PARENT_SCOPE" in helper
-    assert cmake.count("g3d_replace_overlay_once(") == 2
+    assert cmake.count("g3d_replace_overlay_once(") == 7
 
 
 def test_policy_header_injection_does_not_depend_on_source_line_endings():
@@ -60,8 +62,9 @@ def test_policy_header_injection_does_not_depend_on_source_line_endings():
         1,
     )[1].split("g3d_replace_overlay_once(", 1)[0]
 
-    assert "Prepending the small policy header" in setup
+    assert "Prepending small dependency-free policy headers" in setup
     assert '#include \\"depth_mode_policy.h\\"' in setup
+    assert '#include \\"settings_policy.h\\"' in setup
     assert "capture_recovery.h" not in setup
     assert "depth_infer.h" not in setup
 
