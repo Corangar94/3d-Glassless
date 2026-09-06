@@ -1,0 +1,45 @@
+name: Audit remediation workspace
+
+on:
+  push:
+    branches: ['fix/audit-2026-09-06']
+    paths: ['.github/workflows/audit-workspace.yml', '.audit-remediation.patch']
+
+permissions:
+  contents: write
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - name: Apply reviewed one-time source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f .audit-remediation.patch; then
+            git apply --check .audit-remediation.patch
+            git apply .audit-remediation.patch
+            git rm .audit-remediation.patch .github/workflows/audit-workspace.yml
+            git config user.name 'glassless-audit'
+            git config user.email 'glassless-audit@users.noreply.github.com'
+            git add launcher overlay scripts tests .github docs pyproject.toml README.md requirements* AGENTS.md CLAUDE.md Glassless3D.spec
+            git commit -m 'Fix audited runtime, depth, build and validation defects'
+            git push origin HEAD:fix/audit-2026-09-06
+          fi
+      - name: Export exact source workspace
+        shell: bash
+        run: |
+          git rev-parse HEAD > workspace-commit.txt
+          git archive --format=zip HEAD -o workspace-source.zip
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: audit-source-workspace
+          path: |
+            workspace-source.zip
+            workspace-commit.txt
+          if-no-files-found: error
+          retention-days: 3
