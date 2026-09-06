@@ -2,29 +2,9 @@ name: Standalone Windows package
 
 on:
   pull_request:
-    paths:
-      - 'launcher/**'
-      - 'tracker/**'
-      - 'scripts/**'
-      - 'overlay/**'
-      - 'profiles/**'
-      - 'Glassless3D.spec'
-      - 'Glassless3DOverlay.exe'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-package.yml'
   push:
     branches:
       - master
-    paths:
-      - 'launcher/**'
-      - 'tracker/**'
-      - 'scripts/**'
-      - 'overlay/**'
-      - 'profiles/**'
-      - 'Glassless3D.spec'
-      - 'Glassless3DOverlay.exe'
-      - 'pyproject.toml'
-      - '.github/workflows/windows-package.yml'
   workflow_dispatch:
 
 permissions:
