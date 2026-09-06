@@ -109,11 +109,7 @@ def test_install_selects_matching_architecture(tmp_path, arch, api, proxy, addon
     assert (game / proxy).is_file()
     assert pe_architecture(game / proxy) == arch
     assert (game / addon).is_file()
-    assert steps == [
-        "Copying verified ReShade assets",
-        "Writing section-safe configuration",
-        "Recording rollback manifest",
-    ]
+    assert steps == ["Installed verified assets and configuration; ownership manifest committed"]
 
 
 def test_install_copies_complete_shader_include_set(tmp_path):
@@ -132,7 +128,7 @@ def test_missing_shader_include_fails_before_writing(tmp_path):
     with patch("launcher.reshade_install._bundle_dir", return_value=str(bundle)):
         with pytest.raises(InstallError, match="required asset is missing"):
             install(str(game), **_kwargs(executable))
-    assert {p.name for p in game.iterdir()} == {"Story.exe"}
+    assert {p.name for p in game.iterdir() if not p.name.startswith(".glassless3d-")} == {"Story.exe"}
 
 
 def test_checksum_tampering_fails_before_writing(tmp_path):
@@ -239,7 +235,7 @@ def test_transaction_rolls_back_when_configuration_fails(tmp_path):
     ):
         with pytest.raises(InstallError, match="disk full"):
             install(str(game), **_kwargs(executable))
-    assert {p.name for p in game.iterdir()} == {"Story.exe"}
+    assert {p.name for p in game.iterdir() if not p.name.startswith(".glassless3d-")} == {"Story.exe"}
 
 
 def test_addon_registers_lifecycle_and_neutralizes_stale_tracking():
@@ -265,3 +261,114 @@ def test_mingw_build_is_statically_linked_and_arch_named():
     assert "-static-libgcc" in source
     assert "-static-libstdc++" in source
     assert "-static" in source
+
+
+@pytest.mark.parametrize("bad", [
+    r"\outside\file", "/outside/file", "C:dxgi.dll", "C:/dxgi.dll",
+    "../dxgi.dll", "dxgi.dll:stream", "./dxgi.dll", "dxgi.dll.",
+    "dxgi.dll ", "", "Story.exe", "reshade-shaders//Shaders/Glassless3D.fx",
+])
+def test_a2_manifest_rejects_unmanaged_or_windows_escaping_paths(bad):
+    from launcher.reshade_install import _safe_relative
+    with pytest.raises(InstallError):
+        _safe_relative(bad)
+
+
+def test_a2_backup_failure_never_deletes_original(tmp_path, monkeypatch):
+    import launcher.reshade_install as module
+    bundle = _make_bundle(tmp_path)
+    game, executable = _make_game(tmp_path)
+    original = b"[GENERAL]\nKeep=original\n"
+    (game / "ReShade.ini").write_bytes(original)
+    real_write = module.atomic_write
+    def fail_backup(path, data):
+        if module._BACKUP_DIR in Path(path).parts:
+            raise OSError("injected incomplete backup")
+        return real_write(path, data)
+    monkeypatch.setattr(module, "atomic_write", fail_backup)
+    monkeypatch.setattr(module, "_bundle_dir", lambda: str(bundle))
+    with pytest.raises(InstallError, match="incomplete backup"):
+        install(str(game), **_kwargs(executable))
+    assert (game / "ReShade.ini").read_bytes() == original
+    assert not (game / "dxgi.dll").exists()
+    assert not (game / module._INSTALL_MANIFEST).exists()
+
+
+def test_a2_repeated_repair_keeps_created_proxy_unowned_by_original_backup(tmp_path, monkeypatch):
+    import launcher.reshade_install as module
+    bundle = _make_bundle(tmp_path)
+    game, executable = _make_game(tmp_path)
+    original = b"[GENERAL]\nKeep=original\n"
+    (game / "ReShade.ini").write_bytes(original)
+    monkeypatch.setattr(module, "_bundle_dir", lambda: str(bundle))
+    install(str(game), **_kwargs(executable))
+    for _ in range(3):
+        install(str(game), **_kwargs(executable), repair=True)
+        manifest = json.loads((game / module._INSTALL_MANIFEST).read_text(encoding="utf-8"))
+        proxy = next(record for record in manifest["files"] if record["path"] == "dxgi.dll")
+        assert proxy["backup"] is False and proxy["original_sha256"] is None
+    uninstall(str(game))
+    assert not (game / "dxgi.dll").exists()
+    assert not (game / "Glassless3D.addon64").exists()
+    assert (game / "ReShade.ini").read_bytes() == original
+
+
+def test_a2_missing_original_backup_aborts_entire_uninstall(tmp_path, monkeypatch):
+    import launcher.reshade_install as module
+    bundle = _make_bundle(tmp_path)
+    game, executable = _make_game(tmp_path)
+    (game / "ReShade.ini").write_bytes(b"original")
+    monkeypatch.setattr(module, "_bundle_dir", lambda: str(bundle))
+    install(str(game), **_kwargs(executable))
+    live = {p: p.read_bytes() for p in game.iterdir() if p.is_file()}
+    (game / module._BACKUP_DIR / "ReShade.ini").unlink()
+    with pytest.raises(InstallError, match="backup absent or damaged"):
+        uninstall(str(game))
+    assert all(p.read_bytes() == data for p, data in live.items())
+
+
+def test_a2_failed_repair_restores_pre_repair_install_and_manifest(tmp_path, monkeypatch):
+    import launcher.reshade_install as module
+    bundle = _make_bundle(tmp_path)
+    game, executable = _make_game(tmp_path)
+    (game / "ReShade.ini").write_bytes(b"original")
+    monkeypatch.setattr(module, "_bundle_dir", lambda: str(bundle))
+    install(str(game), **_kwargs(executable))
+    before = {p: p.read_bytes() for p in game.rglob("*") if p.is_file()}
+    real_write = module.atomic_write
+    injected = [False]
+    def fail_once(path, data):
+        if Path(path) == game / "ReShade.ini" and not injected[0]:
+            injected[0] = True
+            raise OSError("injected publication failure")
+        return real_write(path, data)
+    monkeypatch.setattr(module, "atomic_write", fail_once)
+    with pytest.raises(InstallError, match="old files restored"):
+        install(str(game), **_kwargs(executable), repair=True)
+    assert injected[0]
+    assert all(p.read_bytes() == data for p, data in before.items())
+    assert list(game.glob(".glassless3d-recovery-*/journal.json"))
+
+
+def test_a2_legacy_manifest_is_not_silently_reinterpreted(tmp_path):
+    game, _ = _make_game(tmp_path)
+    (game / "dxgi.dll").write_bytes(b"unknown ownership")
+    (game / ".glassless3d-reshade.json").write_text(
+        json.dumps({"format": 1, "files": [{"path": "dxgi.dll", "backup": True}]}), encoding="utf-8")
+    with pytest.raises(InstallError, match="manual review"):
+        uninstall(str(game))
+    assert (game / "dxgi.dll").read_bytes() == b"unknown ownership"
+
+
+def test_a2_reparse_directory_is_refused_before_touching_destination(tmp_path):
+    from launcher.reshade_install import _inside
+    game = tmp_path / "game"
+    outside = tmp_path / "outside"
+    game.mkdir(); outside.mkdir()
+    try:
+        (game / "reshade-shaders").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("this account cannot create directory symlinks")
+    with pytest.raises((OSError, InstallError)):
+        _inside(game, Path("reshade-shaders/Shaders/Glassless3D.fx"))
+    assert list(outside.iterdir()) == []

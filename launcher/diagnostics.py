@@ -90,6 +90,10 @@ class OverlayRuntimeSummary:
     instance_id: str | None = None
     depth_published: int | None = None
     depth_failures: int | None = None
+    capture_revision: int | None = None
+    depth_revision: int | None = None
+    capture_poll_age_ms: int | None = None
+    depth_pending: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -280,11 +284,13 @@ def collect_diagnostics(
                 warnings.append("vendor-managed tracking configured; Glassless3D tracker SHM is not required")
             else:
                 problems.append("tracker shared memory stale")
-        if 0 < overlay_summary.depth_hz < _DEPTH_HZ_READY_MIN:
+        from launcher.overlay_health import coherent_idle_scene
+        scene_idle = coherent_idle_scene(overlay_summary)
+        if not scene_idle and 0 < overlay_summary.depth_hz < _DEPTH_HZ_READY_MIN:
             problems.append(f"depth inference too slow: {overlay_summary.depth_hz}Hz")
-        elif overlay_summary.depth_hz <= 0:
+        elif not scene_idle and overlay_summary.depth_hz <= 0:
             problems.append("overlay log reports no active depth inference")
-        if overlay_summary.depth_age_ms is not None and overlay_summary.depth_age_ms > 750:
+        if not scene_idle and overlay_summary.depth_age_ms is not None and overlay_summary.depth_age_ms > 750:
             message = f"depth result is stale: {overlay_summary.depth_age_ms}ms old"
             if require_live_runtime:
                 problems.append(message)
@@ -937,6 +943,10 @@ def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object]
         "instance_id": summary.instance_id,
         "depth_published": summary.depth_published,
         "depth_failures": summary.depth_failures,
+        "capture_revision": summary.capture_revision,
+        "depth_revision": summary.depth_revision,
+        "capture_poll_age_ms": summary.capture_poll_age_ms,
+        "depth_pending": summary.depth_pending,
         "frame_count": summary.frame_count,
         "acq_ok": summary.acq_ok,
         "acq_timeout": summary.acq_timeout,
@@ -982,7 +992,14 @@ def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:
         r"depth_published=(?P<published>\d+)\s+depth_failures=(?P<failures>\d+)",
         line,
     )
+    scene = re.search(
+        r"capture_revision=(\d+)\s+depth_revision=(\d+)\s+"
+        r"capture_poll_age_ms=(\d+)\s+depth_pending=([01])", line)
     return OverlayRuntimeSummary(
+        capture_revision=int(scene[1]) if scene else None,
+        depth_revision=int(scene[2]) if scene else None,
+        capture_poll_age_ms=int(scene[3]) if scene else None,
+        depth_pending=scene[4] == "1" if scene else None,
         instance_id=telemetry.group("instance") if telemetry else None,
         depth_published=int(telemetry.group("published")) if telemetry else None,
         depth_failures=int(telemetry.group("failures")) if telemetry else None,

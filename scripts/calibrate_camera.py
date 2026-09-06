@@ -1,5 +1,6 @@
 """Calibrate webcam intrinsics and camera-to-screen alignment."""
 from __future__ import annotations
+from tracker.calibration_cancel import CalibrationCancelled, check_cancelled
 
 import argparse
 from pathlib import Path
@@ -71,6 +72,7 @@ def _intrinsics_command(args: argparse.Namespace) -> int:
         extrinsics=extrinsics,
         mirror_x=not args.no_mirror_x,
     )
+    check_cancelled()
     update_config_camera_geometry(args.config, geometry, calibration_result=result)
     synchronize_runtime_projection(args.config, geometry)
     print(
@@ -169,6 +171,7 @@ def _center_command(args: argparse.Namespace) -> int:
             camera_geometry=measurement_geometry,
         ) as tracker:
             while len(samples) < args.samples and time.monotonic() - started < args.timeout:
+                check_cancelled()
                 ok, frame = cap.read()
                 if not ok:
                     continue
@@ -195,6 +198,7 @@ def _center_command(args: argparse.Namespace) -> int:
         samples,
         viewer_distance_cm=args.viewer_distance_cm,
     )
+    check_cancelled()
     update_config_camera_geometry(args.config, aligned)
     synchronize_runtime_projection(
         args.config,
@@ -273,8 +277,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        check_cancelled()
         return int(args.func(args))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, CalibrationCancelled):
         print("Calibration cancelled.", file=sys.stderr)
         return 130
     except Exception as error:

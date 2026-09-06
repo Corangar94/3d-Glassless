@@ -1,5 +1,6 @@
 """Validated config updates for display backend selection."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import argparse
 from pathlib import Path
@@ -11,14 +12,8 @@ from tracker.display_backends import DisplayBackend, DisplayBackendRegistry, bui
 
 
 def set_display_backend(config_path: str | Path, backend_id: str) -> DisplayBackend:
-    registry = DisplayBackendRegistry(built_in_backends())
-    backend = _find_backend(registry, backend_id)
-    path = Path(config_path)
-    cfg = _load_config(path)
-    overlay = _ensure_mapping_child(cfg, "overlay")
-    overlay["display_backend"] = backend.id
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(yaml.safe_dump(cfg, sort_keys=False)), encoding="utf-8")
+    backend = _find_backend(DisplayBackendRegistry(built_in_backends()), backend_id)
+    merge_config(config_path, {"overlay": {"display_backend": backend.id}})
     return backend
 
 

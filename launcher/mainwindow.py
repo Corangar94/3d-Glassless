@@ -1,6 +1,10 @@
 """Always-on-top two-mode tracker window."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
+import uuid
+from tracker.runtime_channels import child_environment
+from launcher.utility_commands import build_utility_command
 import subprocess
 import sys
 import threading
@@ -16,7 +20,7 @@ import dataclasses
 import logging
 import re
 import yaml
-from PySide6.QtCore import Qt, QPoint, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal, QSignalBlocker
 from PySide6.QtGui import QPixmap
 
 _log = logging.getLogger(__name__)
@@ -44,6 +48,7 @@ from PySide6.QtWidgets import (
 from tracker.shared_settings import OverlaySettings, SharedSettingsWriter
 from tracker.tilt import _save_tilt_to_config
 from tracker.display_backends import backend_code, normalize_backend_id
+from launcher.preset_validation import validated_preset
 from launcher.presets import (
     PresetConfigError,
     delete_preset,
@@ -59,7 +64,7 @@ from launcher.diagnostics import (
 )
 
 from launcher.overlay_process import OverlayProcess, OverlayStartError
-from launcher.overlay_health import OverlayProgressMonitor
+from launcher.overlay_health import OverlayProgressMonitor, coherent_idle_scene
 from launcher.window_discovery import RunningGameWindow, discover_running_game_windows
 from launcher.auto_tune import TrackingAutoTuner
 from launcher.tracker_process import TrackerProcess
@@ -317,6 +322,11 @@ class MainWindow(QMainWindow):
         self._tracker_stop_pending = False
         self._live_tracking_distances: deque[float] = deque(maxlen=30)
         self._overlay = OverlayProcess()
+        self._utility_jobs = {}
+        self._utility_timer = QTimer(self)
+        self._utility_timer.setInterval(500)
+        self._utility_timer.timeout.connect(self._poll_utility_jobs)
+
         self._overlay_started = False
         self._overlay_progress = OverlayProgressMonitor()
         self._overlay_health_current = False
@@ -1133,12 +1143,10 @@ class MainWindow(QMainWindow):
 
     def _save_compact_pref(self) -> None:
         try:
-            cfg = _load_yaml_mapping(self._config_path)
-            _ensure_mapping_child(cfg, "gui")["compact_mode"] = self._compact
-            with open(self._config_path, "w") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
-        except (ConfigMappingError, OSError, yaml.YAMLError):
-            pass
+            merge_config(self._config_path, {"gui": {"compact_mode": self._compact}})
+        except (ValueError, OSError, yaml.YAMLError) as error:
+            _log.warning("Could not save compact preference: %s", error)
+            self._status_label.setToolTip(f"Could not save configuration: {error}")
 
     # ── Tracking control ───────────────────────────────────────────────────────
 
@@ -1178,6 +1186,7 @@ class MainWindow(QMainWindow):
         self._overlay_started = False
 
         tracker = TrackerProcess(config_path=self._config_path)
+        self._overlay.set_tracking_session(tracker.tracking_session())
         tracker.position_updated.connect(self._on_position)
         tracker.frame_ready.connect(self._on_frame)
         tracker.status_changed.connect(self._on_status)
@@ -1427,7 +1436,7 @@ class MainWindow(QMainWindow):
             self._overlay_health_healthy
             and summary.has_frame
             and summary.capture_state == "running"
-            and summary.depth_hz > 0
+            and (summary.depth_hz > 0 or coherent_idle_scene(summary))
             and self._overlay.is_running()
             and self._overlay.is_transitioning() is not True
         ):
@@ -1461,8 +1470,8 @@ class MainWindow(QMainWindow):
                 self._profile_target_label.setStyleSheet("color:#f0c15a;font-size:10px;")
 
         self._shm_tile.setText(f"SHM\n{summary.shm_status} {summary.shm_changes_per_sec}/s")
-        depth_status = f"{summary.depth_hz} Hz"
-        if summary.depth_hz < _DEPTH_HZ_WARN:
+        depth_status = "Scene unchanged" if coherent_idle_scene(summary) else f"{summary.depth_hz} Hz"
+        if not coherent_idle_scene(summary) and summary.depth_hz < _DEPTH_HZ_WARN:
             depth_status = f"LOW {depth_status}"
         self._depth_tile.setText(f"Depth\n{depth_status}")
         if summary.capture_state == "unavailable":
@@ -1477,13 +1486,13 @@ class MainWindow(QMainWindow):
             )
             self._capture_tile.setToolTip("")
 
-        if summary.depth_hz < _DEPTH_HZ_WARN:
+        if not coherent_idle_scene(summary) and summary.depth_hz < _DEPTH_HZ_WARN:
             self._comfort_status.setText(
                 f"Depth LOW: {summary.depth_hz} Hz, keeping current preset"
             )
             return
 
-        if summary.depth_hz >= _DEPTH_HZ_WARN and hasattr(self, "_comfort_status"):
+        if (coherent_idle_scene(summary) or summary.depth_hz >= _DEPTH_HZ_WARN) and hasattr(self, "_comfort_status"):
             self._comfort_status.setText(
                 f"Depth OK: {summary.depth_hz} Hz, SHM {summary.shm_changes_per_sec}/s"
             )
@@ -2000,13 +2009,11 @@ class MainWindow(QMainWindow):
         self._auto_tune_enabled = bool(checked)
         self._auto_tuner = TrackingAutoTuner()
         self._apply_auto_tune_control_state()
-        cfg = _load_yaml_mapping(self._config_path)
-        _ensure_mapping_child(cfg, "tracking")["auto_tune"] = self._auto_tune_enabled
         try:
-            with open(self._config_path, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(cfg, handle, default_flow_style=False, sort_keys=False)
-        except OSError:
-            _log.warning("could not save automatic tracking preference")
+            merge_config(self._config_path, {"tracking": {"auto_tune": self._auto_tune_enabled}})
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            _log.warning("Could not save automatic tracking preference: %s", error)
+            self._status_label.setToolTip(f"Preference not saved: {error}")
         if hasattr(self, "_auto_tune_status"):
             self._auto_tune_status.setText(
                 "Auto tuning will calibrate when tracking starts"
@@ -2150,52 +2157,73 @@ class MainWindow(QMainWindow):
 
     def _on_preset_load(self) -> None:
         name = self._preset_combo.currentText().strip()
+        sliders = {
+            "strength_x": self._strength_x_slider, "strength_y": self._strength_y_slider,
+            "virtual_depth_cm": self._virtual_depth_slider, "focus_radius": self._focus_radius_slider,
+            "smoothing_alpha": self._smoothing_slider, "deadzone_mm": self._deadzone_slider,
+        }
+        spins = {
+            "depth_gamma": self._depth_gamma_spin, "ipd_mm": self._ipd_spin,
+            "screen_w_cm": self._screen_w_spin, "screen_h_cm": self._screen_h_spin,
+            "head_dist_cm": self._head_dist_spin,
+        }
         try:
-            data = load_preset(self._config_path, name)
-        except KeyError:
+            old = self._snapshot_settings()
+            candidate = validated_preset(load_preset(self._config_path, name), old)
+            for field, widget in sliders.items():
+                value = getattr(candidate, field)
+                lower, step = float(widget.property("_lo")), float(widget.property("_step"))
+                upper = lower + (widget.maximum() - widget.minimum()) * step
+                if not lower <= value <= upper:
+                    raise ValueError(f"{field} must be between {lower} and {upper}")
+            for field, widget in spins.items():
+                if not widget.minimum() <= getattr(candidate, field) <= widget.maximum():
+                    raise ValueError(f"{field} is outside the supported range")
+            if not 1.0 <= candidate.camera_fov_deg < 180.0:
+                raise ValueError("Camera field of view must be between 1 and 180 degrees")
+        except (KeyError, OSError, ValueError, TypeError, OverflowError, PresetConfigError) as error:
+            self._comfort_status.setText(f"Preset not loaded: {error}")
             return
-        widgets = [
-            self._strength_x_slider, self._strength_y_slider,
-            self._virtual_depth_slider, self._focus_radius_slider,
-            self._smoothing_slider, self._deadzone_slider,
-            self._depth_gamma_spin, self._ipd_spin,
-            self._screen_w_spin, self._screen_h_spin,
-            self._head_dist_spin, self._depth_curve_combo, self._fov_combo,
-            self._depth_mode_combo,
-        ]
-        for w in widgets:
-            w.blockSignals(True)
-        self._set_slider_value(self._strength_x_slider,    data.get("strength_x",      1.0))
-        self._set_slider_value(self._strength_y_slider,    data.get("strength_y",      1.0))
-        self._set_slider_value(self._virtual_depth_slider, data.get("virtual_depth_cm", 30.0))
-        self._set_slider_value(self._focus_radius_slider,  data.get("focus_radius",    0.1))
-        self._set_slider_value(self._smoothing_slider,     data.get("smoothing_alpha", 0.1))
-        self._set_slider_value(self._deadzone_slider,      data.get("deadzone_mm",     5.0))
-        self._depth_gamma_spin.setValue(data.get("depth_gamma", 1.0))
-        self._ipd_spin.setValue(data.get("ipd_mm", 64.0))
-        self._screen_w_spin.setValue(data.get("screen_w_cm", 0.0))
-        self._screen_h_spin.setValue(data.get("screen_h_cm", 0.0))
-        self._head_dist_spin.setValue(data.get("head_dist_cm", 60.0))
-        self._depth_curve_combo.setCurrentIndex(int(data.get("depth_curve", 1)))
-        fov_val = data.get("camera_fov_deg", 90)
-        idx = self._fov_combo.findText(f"{round(fov_val)}\u00b0")
-        if idx >= 0:
-            self._fov_combo.setCurrentIndex(idx)
-        else:
-            self._fov_combo.setCurrentText(str(fov_val))
-        depth_mode = _depth_mode_code(data.get("depth_performance_mode", data.get("depth_mode", 1)))
-        depth_mode_idx = self._depth_mode_combo.findData(depth_mode)
-        if depth_mode_idx >= 0:
-            self._depth_mode_combo.setCurrentIndex(depth_mode_idx)
-        for w in widgets:
-            w.blockSignals(False)
-        self._on_settings_change()
+
+        widgets = [*sliders.values(), *spins.values(), self._depth_curve_combo,
+                   self._fov_combo, self._depth_mode_combo]
+        blockers = [QSignalBlocker(widget) for widget in widgets]
+
+        def apply_ui(settings):
+            for field, widget in sliders.items():
+                self._set_slider_value(widget, getattr(settings, field))
+            for field, widget in spins.items():
+                widget.setValue(getattr(settings, field))
+            self._depth_curve_combo.setCurrentIndex(settings.depth_curve)
+            text = f"{settings.camera_fov_deg:g}\u00b0"
+            index = self._fov_combo.findText(text)
+            if index >= 0:
+                self._fov_combo.setCurrentIndex(index)
+            else:
+                self._fov_combo.setCurrentText(f"{settings.camera_fov_deg:g}")
+            self._depth_mode_combo.setCurrentIndex(self._depth_mode_combo.findData(settings.depth_mode))
+
+        try:
+            apply_ui(candidate)
+            applied = self._snapshot_settings()
+            self._settings_writer.write(applied)
+            self._settings = applied
+        except Exception as error:
+            apply_ui(old)
+            self._comfort_status.setText(f"Preset not applied: {error}")
+        finally:
+            for blocker in reversed(blockers):
+                blocker.unblock()  # Restores the original signal state, even on failure.
 
     def _on_preset_delete(self) -> None:
         name = self._preset_combo.currentText().strip()
         if not name:
             return
-        delete_preset(self._config_path, name)
+        try:
+            delete_preset(self._config_path, name)
+        except (OSError, ValueError, PresetConfigError) as error:
+            self._comfort_status.setText(f"Preset was not deleted: {error}")
+            return
         self._refresh_presets()
 
     def _on_save_config(self) -> None:
@@ -2204,7 +2232,7 @@ class MainWindow(QMainWindow):
             return
         s = self._snapshot_settings()
         try:
-            cfg = _load_yaml_mapping(self._config_path, fallback=self._config)
+            cfg = {}  # Owned fields only; merged with the current file under lock.
             overlay = _ensure_mapping_child(cfg, "overlay")
             values = dataclasses.asdict(s)
             values.pop("display_backend", None)
@@ -2228,53 +2256,90 @@ class MainWindow(QMainWindow):
             display_calibration = _ensure_mapping_child(overlay, "display_calibration")
             display_calibration["ipd_mm"] = s.ipd_mm
             self._persist_game_profiles(base_config=cfg)
-        except (ConfigMappingError, OSError, yaml.YAMLError):
-            pass
+        except (ConfigMappingError, ValueError, OSError, yaml.YAMLError) as error:
+            self._comfort_status.setText(f"Configuration was not saved: {error}")
+
+    def _launch_utility(self, kind: str) -> None:
+        if kind in self._utility_jobs:
+            self._status_label.setToolTip(f"{kind} is already running")
+            return
+        output = Path(self._config_path).resolve().parent / "diagnostics" / (kind + "-" + uuid.uuid4().hex[:12])
+        stream = None
+        try:
+            output.mkdir(parents=True, exist_ok=False)
+            arguments = []
+            if kind != "debug-monitor":
+                arguments = ["--config", str(Path(self._config_path).resolve())]
+            if kind == "diagnostics":
+                arguments += ["--format", "json", "--output", str(output / "diagnostics.json")]
+            elif kind == "support-bundle":
+                arguments += ["--output-dir", str(output / "bundle"), "--require-live-runtime"]
+            session = self._thread.tracking_session() if self._thread is not None else None
+            env = child_environment(session)
+            env["PYTHONUTF8"] = "1"
+            stream = (output / "run.log").open("wb")
+            proc = subprocess.Popen(build_utility_command(kind, arguments),
+                cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                stdin=subprocess.DEVNULL, stdout=stream, stderr=stream)
+            self._utility_jobs[kind] = (proc, stream, output, time.monotonic())
+            self._utility_timer.start()
+            if kind == "debug-monitor":
+                self._debug_monitor_proc = proc
+            self._status_label.setToolTip(f"{kind} started; output: {output}")
+        except (OSError, ValueError) as error:
+            if stream is not None:
+                stream.close()
+            self._status_label.setToolTip(f"Could not start {kind}: {error}")
+
+    def _poll_utility_jobs(self) -> None:
+        for kind, (proc, stream, output, started) in list(self._utility_jobs.items()):
+            code = proc.poll()
+            timed_out = kind != "debug-monitor" and time.monotonic() - started > 120
+            if code is None and timed_out:
+                try:
+                    proc.kill()  # Only the exact child handle we created.
+                except OSError as error:
+                    _log.warning("Could not stop timed-out utility: %s", error)
+                self._status_label.setToolTip(f"{kind} timed out; log: {output}")
+                continue
+            if code is None:
+                continue
+            stream.close()
+            del self._utility_jobs[kind]
+            self._status_label.setToolTip(f"{kind} exited {code}; output: {output}")
+            if hasattr(self, "_comfort_status"):
+                self._comfort_status.setText(f"{kind}: {'completed' if code == 0 else 'failed'}; {output}")
+        if not self._utility_jobs:
+            self._utility_timer.stop()
+
+    def _stop_utility_jobs(self) -> None:
+        self._utility_timer.stop()
+        for proc, stream, _output, _started in list(self._utility_jobs.values()):
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1.0)
+            except (OSError, subprocess.TimeoutExpired):
+                _log.warning("Utility child did not finish during shutdown")
+            finally:
+                stream.close()
+        self._utility_jobs.clear()
 
     def _open_debug_monitor(self) -> None:
-        proc = self._debug_monitor_proc
-        if proc is not None and proc.poll() is None:
-            return
-
-        try:
-            self._debug_monitor_proc = subprocess.Popen(
-                [sys.executable, "-m", "tracker.debug_monitor"],
-                cwd=str(Path(__file__).resolve().parent.parent),
-            )
-        except OSError as e:
-            self._on_status("error")
-            self._status_label.setToolTip(f"Could not launch debug monitor: {e}")
+        self._launch_utility("debug-monitor")
 
     def _run_diagnostics(self) -> None:
-        try:
-            subprocess.Popen(
-                [sys.executable, "-m", "launcher.diagnostics", "--config", self._config_path],
-                cwd=str(Path(__file__).resolve().parent.parent),
-            )
-        except OSError as e:
-            self._on_status("error")
-            self._status_label.setToolTip(f"Could not launch diagnostics: {e}")
+        self._launch_utility("diagnostics")
 
     def _collect_support_bundle(self) -> None:
-        try:
-            subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "scripts.collect_support",
-                    "--output-dir",
-                    "support_bundle",
-                    "--config",
-                    self._config_path,
-                    "--require-live-runtime",
-                ],
-                cwd=str(Path(__file__).resolve().parent.parent),
-            )
-        except OSError as e:
-            self._on_status("error")
-            self._status_label.setToolTip(f"Could not collect support bundle: {e}")
+        self._launch_utility("support-bundle")
 
     def closeEvent(self, event: object) -> None:
+        self._stop_utility_jobs()
         if self._thread and self._thread.isRunning():
             self._thread.stop()
         # The interpreter can exit as soon as this event is accepted. Reap the

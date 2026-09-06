@@ -1,5 +1,6 @@
 """Safe YAML persistence for game-profile policy configuration."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import os
 import tempfile
@@ -94,39 +95,32 @@ def save_profiles(
     base_config: Mapping[str, Any] | None = None,
 ) -> None:
     """Atomically store profiles without modifying unrelated configuration keys."""
-    if base_config is None:
-        root = _load_root(config_path, fallback)
-    else:
-        if config_path.exists():
-            _load_root(config_path)
-        root = dict(base_config)
-    root["game_profiles"] = {
-        profile_id: {
-            "display_name": profile.display_name,
-            "executable_path": profile.executable_path,
-            "play_context": profile.play_context.value,
-            "requested_mode": profile.requested_mode.value,
-            "advanced_acknowledged": profile.advanced_acknowledged,
-            "approval_id": profile.approval_id,
+    def mutate(root):
+        if base_config is not None:
+            def merge(target, patch):
+                for key, value in patch.items():
+                    if isinstance(value, Mapping):
+                        child = target.setdefault(key, {})
+                        if not isinstance(child, dict):
+                            raise ProfileStoreError(f"Configuration section {key} must be a mapping")
+                        merge(child, value)
+                    else:
+                        target[key] = value
+            merge(root, base_config)
+        root["game_profiles"] = {
+            profile_id: {
+                "display_name": profile.display_name,
+                "executable_path": profile.executable_path,
+                "play_context": profile.play_context.value,
+                "requested_mode": profile.requested_mode.value,
+                "advanced_acknowledged": profile.advanced_acknowledged,
+                "approval_id": profile.approval_id,
+            }
+            for profile_id, profile in profiles.items()
         }
-        for profile_id, profile in profiles.items()
-    }
-    root["active_game_profile"] = active_profile_id
+        root["active_game_profile"] = active_profile_id
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=config_path.parent,
-        ) as temp_file:
-            yaml.safe_dump(root, temp_file, sort_keys=False)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-            temp_path = Path(temp_file.name)
-        os.replace(temp_path, config_path)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
+        update_config(config_path, mutate, fallback=fallback)
+    except ConfigStoreError as error:
+        raise ProfileStoreError(str(error)) from error

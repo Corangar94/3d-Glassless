@@ -1,6 +1,7 @@
 # launcher/presets.py
 """Named preset management — stored under `presets:` key in config.yaml."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 from pathlib import Path
 import yaml
@@ -28,7 +29,8 @@ def _read(config_path: str, *, strict: bool = False) -> dict[str, object]:
 
 
 def _write(config_path: str, cfg: dict[str, object]) -> None:
-    Path(config_path).write_text(str(yaml.safe_dump(cfg, sort_keys=False)), encoding="utf-8")
+    # Compatibility helper: this module only owns the presets section.
+    update_config(config_path, lambda root: root.__setitem__("presets", cfg.get("presets", {})))
 
 
 def _ensure_mapping_child(data: dict[str, object], key: str) -> dict[str, object]:
@@ -46,9 +48,15 @@ def list_presets(config_path: str) -> list[str]:
 
 
 def save_preset(config_path: str, name: str, settings: dict) -> None:
-    cfg = _read(config_path, strict=True)
-    _ensure_mapping_child(cfg, "presets")[name] = settings
-    _write(config_path, cfg)
+    def mutate(root):
+        presets = root.setdefault("presets", {})
+        if not isinstance(presets, dict):
+            raise PresetConfigError("presets must be a mapping")
+        presets[name] = settings
+    try:
+        update_config(config_path, mutate)
+    except ConfigStoreError as error:
+        raise PresetConfigError(str(error)) from error
 
 
 def load_preset(config_path: str, name: str) -> dict:
@@ -62,12 +70,12 @@ def load_preset(config_path: str, name: str) -> dict:
 
 
 def delete_preset(config_path: str, name: str) -> None:
-    cfg = _read(config_path)
-    presets = cfg.get("presets")
-    if not isinstance(presets, dict):
-        return
-    if name not in presets:
-        return  # true no-op: nothing on disk changes
-    presets.pop(name)
-    cfg["presets"] = presets
-    _write(config_path, cfg)
+    def mutate(root):
+        presets = root.get("presets")
+        if isinstance(presets, dict):
+            presets.pop(name, None)
+    try:
+        if Path(config_path).exists():
+            update_config(config_path, mutate)
+    except ConfigStoreError as error:
+        raise PresetConfigError(str(error)) from error

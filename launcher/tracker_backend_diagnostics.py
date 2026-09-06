@@ -1,6 +1,7 @@
 """Read and format tracker backend recovery state for launcher diagnostics."""
 from __future__ import annotations
 
+from tracker.runtime_channels import channel_name
 from tracker.backend_status_shared_memory import (
     TrackerBackendStatus,
     TrackerBackendStatusReader,
@@ -23,9 +24,10 @@ def configured_tracker_backend(config: object) -> str:
 def read_tracker_backend_status(
     *,
     max_age_ms: int = _BACKEND_STATUS_FRESH_MS,
+    session: str | None = None,
 ) -> tuple[TrackerBackendStatus | None, bool]:
     try:
-        with TrackerBackendStatusReader() as reader:
+        with TrackerBackendStatusReader(channel_name("G3D_TrackerBackendV1", session)) as reader:
             status = reader.read()
     except Exception:
         return None, False

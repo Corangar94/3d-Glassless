@@ -1,6 +1,7 @@
 """Versioned tracker-backend diagnostics over Windows named shared memory."""
 from __future__ import annotations
 
+from tracker.runtime_channels import channel_name
 import ctypes
 from dataclasses import dataclass
 import struct
@@ -324,6 +325,7 @@ def status_from_tracker(
 
 class TrackerBackendStatusWriter:
     def __init__(self, name: str = STATUS_MAPPING_NAME) -> None:
+        name = channel_name(name)
         self._name = name
         self._k32 = _kernel32()
         self._committed_sequence = 0
@@ -417,6 +419,7 @@ class TrackerBackendStatusWriter:
 
 class TrackerBackendStatusReader:
     def __init__(self, name: str = STATUS_MAPPING_NAME) -> None:
+        name = channel_name(name)
         self._name = name
         self._k32 = _kernel32()
         self._handle: int | None = None

@@ -8,7 +8,9 @@ import shutil
 import struct
 import sys
 from collections.abc import Generator, Mapping
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import tempfile
+from tracker.file_transactions import atomic_write, path_lock, reject_link
 
 from launcher.game_profiles import Backend, PolicyDecision
 
@@ -174,48 +176,157 @@ def _write_configuration(game_dir: Path, profile_name: str, base: Path) -> None:
         _set_ini_values(preset, "Glassless3D.fx", shader_defaults)
 
 
+_MANAGED_PATHS = frozenset({
+    "dxgi.dll", "d3d11.dll", "d3d9.dll", "Glassless3D.addon32", "Glassless3D.addon64",
+    "ReShade.ini", "Glassless3D.ini", "reshade-shaders/Shaders/Glassless3D.fx",
+    "reshade-shaders/Shaders/Glassless3D.fxh", "reshade-shaders/Shaders/ReShade.fxh",
+})
+
+
 def _safe_relative(path: str) -> Path:
-    relative = Path(path)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise InstallError("Reading install manifest", f"unsafe managed path: {path!r}")
-    return relative
+    if not isinstance(path, str) or not path:
+        raise InstallError("Reading install manifest", "managed path must be nonempty text")
+    windows = PureWindowsPath(path)
+    parts = path.replace("\\", "/").split("/")
+    if (windows.drive or windows.root or ":" in path or "\0" in path
+            or any(part in {"", ".", ".."} or part.endswith((" ", ".")) for part in parts)
+            or "/".join(parts) not in _MANAGED_PATHS):
+        raise InstallError("Reading install manifest", f"unsafe or unmanaged path: {path!r}")
+    return Path(*parts)
 
 
-def _load_install_manifest(game_dir: Path) -> dict | None:
-    path = game_dir / _INSTALL_MANIFEST
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise InstallError("Reading install manifest", str(exc)) from exc
-    if data.get("format") != 1 or not isinstance(data.get("files"), list):
-        raise InstallError("Reading install manifest", "unsupported manifest format")
+def _inside(root: Path, relative: Path) -> Path:
+    """Reject reparse points at every existing component, not just the leaf."""
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        raise InstallError("Path check", "path escapes the selected directory")
+    path = root
+    reject_link(path)
+    for component in relative.parts:
+        path = path / component
+        reject_link(path)
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise InstallError("Path check", "resolved path escapes the selected directory")
+    if path.exists() and not path.is_file() and path != root:
+        raise InstallError("Path check", f"managed destination is not a file: {path}")
+    return path
+
+
+def _read_bytes(path: Path) -> bytes:
+    reject_link(path)
+    with path.open("rb") as stream:
+        data = stream.read(256 * 1024 * 1024 + 1)
+    if len(data) > 256 * 1024 * 1024:
+        raise InstallError("Preflight", f"managed file exceeds size limit: {path}")
     return data
 
 
-def _restore(game_dir: Path, records: list[dict]) -> None:
-    backup_root = game_dir / _BACKUP_DIR
-    for record in reversed(records):
-        relative = _safe_relative(record["path"])
-        destination = game_dir / relative
-        backup = backup_root / relative
-        if record.get("backup") and backup.exists():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup, destination)
-        elif destination.exists():
-            destination.unlink()
-        parent = destination.parent
-        while parent != game_dir:
+def _load_install_manifest(game_dir: Path) -> dict | None:
+    path = _inside(game_dir, Path(_INSTALL_MANIFEST))
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(_read_bytes(path).decode("utf-8"))
+    except (OSError, ValueError) as error:
+        raise InstallError("Reading install manifest", str(error)) from error
+    if not isinstance(data, dict) or data.get("format") != 2 or not isinstance(data.get("files"), list):
+        raise InstallError("Reading install manifest", "legacy/invalid ownership metadata; preserve backups for manual review")
+    seen = set()
+    for record in data["files"]:
+        if not isinstance(record, dict):
+            raise InstallError("Reading install manifest", "file record must be an object")
+        relative = _safe_relative(record.get("path"))
+        if relative in seen or type(record.get("backup")) is not bool:
+            raise InstallError("Reading install manifest", "duplicate path or invalid original ownership")
+        seen.add(relative)
+        for key in ("installed_sha256", "original_sha256"):
+            value = record.get(key)
+            if key == "original_sha256" and not record["backup"] and value is None:
+                continue
+            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise InstallError("Reading install manifest", f"invalid {key}")
+        _inside(game_dir, relative)
+        _inside(game_dir, Path(_BACKUP_DIR) / relative)
+    if not seen:
+        raise InstallError("Reading install manifest", "empty ownership manifest")
+    return data
+
+
+def _publish_files(game_dir: Path, changes: dict[Path, bytes | None]) -> None:
+    """Snapshot and journal all old bytes before the first destination change.
+
+    Journal and snapshots remain available on failure. A required missing
+    backup always stops restoration; it never turns into a delete operation.
+    """
+    before = {}
+    for relative in changes:
+        destination = _inside(game_dir, relative)
+        before[relative] = _read_bytes(destination) if destination.exists() else None
+    journal_dir = Path(tempfile.mkdtemp(prefix=".glassless3d-recovery-", dir=game_dir))
+    records = []
+    for index, (relative, original) in enumerate(before.items()):
+        snapshot = str(index) if original is not None else None
+        if original is not None:
+            atomic_write(journal_dir / snapshot, original)
+        records.append({"path": relative.as_posix(), "snapshot": snapshot,
+                        "sha256": hashlib.sha256(original).hexdigest() if original is not None else None})
+    atomic_write(journal_dir / "journal.json", json.dumps({"files": records}, indent=2).encode("utf-8"))
+    touched = []
+    try:
+        for relative, value in changes.items():
+            destination = _inside(game_dir, relative)
+            current = _read_bytes(destination) if destination.exists() else None
+            if current != before[relative]:
+                raise InstallError("Publishing", f"file changed since preflight: {relative}")
+            touched.append(relative)
+            if value is None:
+                destination.unlink(missing_ok=True)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _inside(game_dir, relative)
+                atomic_write(destination, value)
+    except BaseException as original_error:
+        failures = []
+        for relative in reversed(touched):
             try:
-                parent.rmdir()
-            except OSError:
-                break
-            parent = parent.parent
-    shutil.rmtree(backup_root, ignore_errors=True)
+                destination = _inside(game_dir, relative)
+                original = before[relative]
+                if original is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    atomic_write(destination, original)
+            except Exception as error:
+                failures.append(f"{relative}: {error}")
+        raise InstallError("Publishing", f"operation failed; recovery retained in {journal_dir.name}; "
+                           + ("rollback incomplete: " + "; ".join(failures) if failures else "old files restored")) from original_error
+    # Remove only our own journal files after a fully successful commit.
+    for record in records:
+        if record["snapshot"] is not None:
+            (journal_dir / record["snapshot"]).unlink()
+    (journal_dir / "journal.json").unlink()
+    journal_dir.rmdir()
 
 
-def install_steps(
+def _restore(game_dir: Path, records: list[dict]) -> None:
+    changes = {}
+    for record in records:
+        relative = _safe_relative(record["path"])
+        destination = _inside(game_dir, relative)
+        if destination.exists() and _sha256(destination) != record["installed_sha256"]:
+            raise InstallError("Uninstall", f"managed file was edited; preserve/review it first: {relative}")
+        if record["backup"]:
+            backup = _inside(game_dir, Path(_BACKUP_DIR) / relative)
+            if not backup.is_file() or _sha256(backup) != record["original_sha256"]:
+                raise InstallError("Uninstall", f"original backup absent or damaged: {relative}; nothing changed")
+            changes[relative] = _read_bytes(backup)
+        else:
+            changes[relative] = None
+    changes[Path(_INSTALL_MANIFEST)] = None
+    _publish_files(game_dir, changes)
+    # Keep immutable originals after uninstall as recovery material. Never
+    # recursively delete a directory supplied by a manifest or game layout.
+
+
+def _install_steps_locked(
     game_dir: str,
     profile_name: str = "default",
     *,
@@ -274,48 +385,91 @@ def install_steps(
     if collisions:
         raise InstallError("Preflight", "refusing to overwrite unowned files: " + ", ".join(collisions))
 
-    backup_root = target / _BACKUP_DIR
-    records: list[dict] = []
+    if previous is not None and (
+        previous.get("architecture") != arch or previous.get("graphics_api") != api
+        or previous.get("proxy") != selected_proxy
+        or managed != set(planned)
+    ):
+        raise InstallError("Repair", "layout changed; uninstall the old layout before installing another")
+    for relative in planned:
+        _inside(target, relative)
+        _inside(target, Path(_BACKUP_DIR) / relative)
+    # Preparation occurs only in a fresh directory. The live game is untouched
+    # until every asset, configuration, backup and ownership record is ready.
+    staging = Path(tempfile.mkdtemp(prefix=".glassless3d-stage-", dir=target))
+    for relative, source in source_files.items():
+        atomic_write(staging / relative, _read_bytes(source))
+    for relative in configurable:
+        destination = _inside(target, relative)
+        if destination.exists():
+            atomic_write(staging / relative, _read_bytes(destination))
+    _write_configuration(staging, profile_name, base)
+    previous_records = {_safe_relative(item["path"]): item for item in (previous or {}).get("files", [])}
+    records = []
+    changes = {}
+    for relative in planned:
+        destination = _inside(target, relative)
+        prior = previous_records.get(relative)
+        # The first install's ownership is immutable, even when our installed
+        # proxy now exists. Repair snapshots never become uninstall originals.
+        had_original = prior["backup"] if prior is not None else destination.exists()
+        backup = _inside(target, Path(_BACKUP_DIR) / relative)
+        original_sha = prior.get("original_sha256") if prior is not None else None
+        if prior is not None and relative not in configurable and destination.exists():
+            if _sha256(destination) != prior["installed_sha256"]:
+                raise InstallError("Repair", f"managed asset has been changed: {relative}; staging retained")
+        if had_original:
+            if prior is None:
+                original = _read_bytes(destination)
+                original_sha = hashlib.sha256(original).hexdigest()
+                if backup.exists() and _sha256(backup) != original_sha:
+                    raise InstallError("Backup", f"conflicting recovery backup: {relative}; nothing changed")
+                if not backup.exists():
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    _inside(target, Path(_BACKUP_DIR) / relative)
+                    atomic_write(backup, original)
+            if not backup.is_file() or _sha256(backup) != original_sha:
+                raise InstallError("Backup", f"required original backup missing or incomplete: {relative}")
+        value = _read_bytes(staging / relative)
+        records.append({"path": relative.as_posix(), "backup": had_original,
+                        "original_sha256": original_sha,
+                        "installed_sha256": hashlib.sha256(value).hexdigest()})
+        changes[relative] = value
+    installed = {"format": 2, "offline_only": True, "architecture": arch,
+                 "graphics_api": api, "proxy": selected_proxy, "files": records}
+    changes[Path(_INSTALL_MANIFEST)] = (json.dumps(installed, indent=2) + "\n").encode("utf-8")
+    _publish_files(target, changes)
     try:
-        previous_records = {
-            _safe_relative(item["path"]): item for item in (previous or {}).get("files", [])
-        }
         for relative in planned:
-            destination = target / relative
-            had_original = destination.exists()
-            prior = previous_records.get(relative)
-            original_was_backed_up = bool(prior and prior.get("backup"))
-            record = {"path": relative.as_posix(), "backup": original_was_backed_up or had_original}
-            records.append(record)
-            if had_original and not original_was_backed_up:
-                backup = backup_root / relative
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(destination, backup)
+            _inside(staging, relative).unlink(missing_ok=True)
+        parents = {parent for relative in planned for parent in (staging / relative).parents
+                   if parent != staging and parent.is_relative_to(staging)}
+        for parent in sorted(parents, key=lambda value: len(value.parts), reverse=True):
+            reject_link(parent)
+            parent.rmdir()
+        staging.rmdir()
+    except OSError:
+        pass  # Committed installation is sound; retain any remaining staging.
+    yield "Installed verified assets and configuration; ownership manifest committed"
 
-        for relative, source in source_files.items():
-            destination = target / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-        yield "Copying verified ReShade assets"
 
-        _write_configuration(target, profile_name, base)
-        yield "Writing section-safe configuration"
-
-        installed = {
-            "format": 1,
-            "offline_only": True,
-            "architecture": arch,
-            "graphics_api": api,
-            "proxy": selected_proxy,
-            "files": records,
-        }
-        (target / _INSTALL_MANIFEST).write_text(json.dumps(installed, indent=2) + "\n", encoding="utf-8")
-        yield "Recording rollback manifest"
-    except Exception as exc:
-        _restore(target, records)
-        if isinstance(exc, InstallError):
-            raise
-        raise InstallError("Installing ReShade", str(exc)) from exc
+def install_steps(game_dir: str, profile_name: str = "default", *, policy: PolicyDecision,
+                  game_executable: str, graphics_api: str, proxy_name: str | None = None,
+                  repair: bool = False) -> Generator[str, None, None]:
+    if not policy.allows(Backend.RESHADE_ADDON):
+        raise InstallError("Policy check", "ReShade add-ons are permitted only for acknowledged offline single-player profiles")
+    try:
+        target = Path(game_dir).resolve(strict=True)
+        reject_link(target)
+        _inside(target, Path(_INSTALL_MANIFEST + ".lock"))
+        with path_lock(target / _INSTALL_MANIFEST):
+            yield from _install_steps_locked(str(target), profile_name, policy=policy,
+                game_executable=game_executable, graphics_api=graphics_api,
+                proxy_name=proxy_name, repair=repair)
+    except InstallError:
+        raise
+    except (OSError, ValueError, TypeError) as error:
+        raise InstallError("Installing ReShade", str(error)) from error
 
 
 def install(
@@ -341,15 +495,14 @@ def install(
 
 
 def uninstall(game_dir: str) -> None:
-    """Remove only managed files and restore pre-install backups."""
-    target = Path(game_dir).resolve()
-    manifest = _load_install_manifest(target)
-    if manifest is None:
-        raise InstallError("Uninstall", "no Glassless3D ReShade installation manifest found")
-    records = manifest["files"]
-    _restore(target, records)
-    (target / _INSTALL_MANIFEST).unlink(missing_ok=True)
-    shutil.rmtree(target / _BACKUP_DIR, ignore_errors=True)
+    """Restore reviewed originals; never guess when metadata/backups are missing."""
+    target = Path(game_dir).resolve(strict=True)
+    _inside(target, Path(_INSTALL_MANIFEST + ".lock"))
+    with path_lock(target / _INSTALL_MANIFEST):
+        manifest = _load_install_manifest(target)
+        if manifest is None:
+            raise InstallError("Uninstall", "no installation manifest found")
+        _restore(target, manifest["files"])
 
 
 def _write_reshade_ini(game_dir: str, profile_name: str, base: str) -> None:

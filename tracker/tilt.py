@@ -1,6 +1,7 @@
 # tracker/tilt.py
 """Tilt-calibration helpers — pure math + stdlib only; no cv2 or mediapipe."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import math
 import os
@@ -52,33 +53,9 @@ def _apply_camera_tilt(x: float, y: float, z: float, tilt_deg: float) -> tuple[f
 
 
 def _save_tilt_to_config(config_path: str, tilt_deg: float) -> bool:
-    """Persist tilt atomically, refusing to replace malformed configuration."""
     try:
-        path = Path(config_path)
-        with path.open(encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        if not isinstance(data, dict):
-            raise ValueError("configuration root must be a mapping")
-        tracking = data.setdefault("tracking", {})
-        if not isinstance(tracking, dict):
-            raise ValueError("tracking configuration must be a mapping")
-        tracking["camera_tilt_deg"] = round(tilt_deg, 2)
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent), text=True
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_name, path)
-        except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+        merge_config(config_path, {"tracking": {"camera_tilt_deg": round(tilt_deg, 2)}})
         return True
-    except (OSError, ValueError, yaml.YAMLError) as e:
-        print(f"[tracker] Warning: could not save tilt to config: {e}")
+    except (OSError, ValueError, yaml.YAMLError) as error:
+        print(f"[tracker] Warning: could not save tilt to config: {error}")
         return False

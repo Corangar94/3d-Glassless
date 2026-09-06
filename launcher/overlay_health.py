@@ -23,6 +23,20 @@ class Summary(Protocol):
     capture_reason: str | None
 
 
+def coherent_idle_scene(summary: Summary) -> bool:
+    revision = getattr(summary, "capture_revision", None)
+    poll_age = getattr(summary, "capture_poll_age_ms", None)
+    return (
+        summary.capture_state == "running" and summary.has_frame
+        and isinstance(revision, int) and revision > 0
+        and getattr(summary, "depth_revision", None) == revision
+        and isinstance(poll_age, int) and 0 <= poll_age <= 1000
+        and getattr(summary, "depth_pending", None) is False
+        and (getattr(summary, "depth_failures", None) or 0) == 0
+        and (summary.depth_published or 0) > 0
+    )
+
+
 @dataclass(frozen=True)
 class HealthDecision:
     current: bool = False
@@ -87,6 +101,13 @@ class OverlayProgressMonitor:
             elif now - self._depth_progress >= self.depth_timeout_s:
                 return HealthDecision(True, False, "depth recovery stalled")
             return HealthDecision(current=True)
+
+        if coherent_idle_scene(summary):
+            # Only an advancing current-child heartbeat plus a successful capture
+            # poll and exact ALL-tile scene identity can suspend depth deadlines.
+            self._depth = summary.depth_published
+            self._depth_progress = now
+            return HealthDecision(current=True, healthy=True)
 
         published = summary.depth_published
         if published is None and instance_id is None:

@@ -6,6 +6,7 @@ segment each frame, so slider changes take effect instantly.
 Run:   python -m launcher.settings_gui
 """
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import sys
 import os
@@ -55,35 +56,12 @@ def _ensure_mapping_child(data: dict[str, object], key: str) -> dict[str, object
 
 
 def _save_overlay_settings(s: OverlaySettings) -> None:
-    cfg = _load_config()
-    overlay = _ensure_mapping_child(cfg, "overlay")
-    overlay.update(
-        strength_x=float(s.strength_x),
-        strength_y=float(s.strength_y),
-        virtual_depth_cm=float(s.virtual_depth_cm),
-        screen_w_cm=float(s.screen_w_cm),
-        screen_h_cm=float(s.screen_h_cm),
-        depth_curve=int(s.depth_curve),
-        depth_gamma=float(s.depth_gamma),
-        focus_radius=float(s.focus_radius),
-    )
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=CONFIG_PATH.parent,
-        ) as handle:
-            yaml.safe_dump(cfg, handle, sort_keys=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_path = Path(handle.name)
-        os.replace(temp_path, CONFIG_PATH)
-    finally:
-        if temp_path is not None and temp_path.exists():
-            temp_path.unlink()
+    merge_config(CONFIG_PATH, {"overlay": {
+        "strength_x": float(s.strength_x), "strength_y": float(s.strength_y),
+        "virtual_depth_cm": float(s.virtual_depth_cm), "screen_w_cm": float(s.screen_w_cm),
+        "screen_h_cm": float(s.screen_h_cm), "depth_curve": int(s.depth_curve),
+        "depth_gamma": float(s.depth_gamma), "focus_radius": float(s.focus_radius),
+    }})
 
 
 def _float_value(data: dict[str, object], key: str, default: float) -> float:
@@ -335,7 +313,11 @@ class SettingsWindow(QWidget):
         self._status.setText("live")
 
     def _on_save(self) -> None:
-        _save_overlay_settings(self._snapshot())
+        try:
+            _save_overlay_settings(self._snapshot())
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            self._status.setText(f"Configuration not saved: {error}")
+            return
         self._status.setText(f"saved to {CONFIG_PATH.name}")
 
     def _on_reset(self) -> None:

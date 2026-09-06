@@ -1,4 +1,5 @@
 # tracker/shared_memory.py
+from tracker.runtime_channels import channel_name
 import ctypes
 from enum import IntEnum
 import struct
@@ -52,6 +53,7 @@ class SharedMemoryWriter:
     """Writes head pose {x, y, z, timestamp} to a Windows Named Shared Memory segment."""
 
     def __init__(self, name: str = "G3D") -> None:
+        name = channel_name(name)
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None
@@ -140,6 +142,7 @@ class SharedMemoryReader:
     """
 
     def __init__(self, name: str = "G3D") -> None:
+        name = channel_name(name)
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None
@@ -250,6 +253,7 @@ class TrackingStateWriter:
     """Publish face validity without changing the legacy ``G3D`` ABI."""
 
     def __init__(self, name: str = "G3D_State") -> None:
+        name = channel_name(name)
         self._handle: int | None = _k32.CreateFileMappingW(
             _INVALID_HANDLE, None, _PAGE_READWRITE, 0, STATE_STRUCT_SIZE, name,
         )
@@ -301,6 +305,7 @@ class TrackingStateReader:
     """Read face validity from ``G3D_State``; attach lazily."""
 
     def __init__(self, name: str = "G3D_State") -> None:
+        name = channel_name(name)
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None

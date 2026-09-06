@@ -1,5 +1,6 @@
 """4-page first-run setup wizard focused on overlay onboarding."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import os
 from typing import Optional
@@ -266,7 +267,12 @@ class DonePage(QWizardPage):
         return 0
 
     def validatePage(self) -> bool:
-        self._write_config()
+        try:
+            self._write_config()
+        except (OSError, ValueError, yaml.YAMLError) as error:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Configuration not saved", str(error))
+            return False
         return True
 
     def _write_config(self) -> None:
@@ -299,11 +305,11 @@ class DonePage(QWizardPage):
             "game_profiles": _DEFAULT_GAME_PROFILES,
             "active_game_profile": "default",
         }
-        dirname = os.path.dirname(self._config_path)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
-        with open(self._config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False)
+        def initialize(root):
+            if root:
+                raise ConfigStoreError("Configuration already exists; refusing to overwrite setup")
+            root.update(config)
+        update_config(self._config_path, initialize)
 
 
 # ── SetupWizard ────────────────────────────────────────────────────────────────

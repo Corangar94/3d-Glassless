@@ -9,6 +9,7 @@ namespace g3d::depth {
 struct SourceIdentity {
     uint64_t generation = 0;
     uint64_t captured_ms = 0;
+    uint64_t scene_revision = 0; // zero means mixed/unknown scene; never eligible for reuse
 };
 
 enum class PublishDecision : uint8_t {
@@ -52,7 +53,8 @@ public:
     explicit ResultFreshnessGate(FreshnessPolicy policy = {})
         : policy_(policy) {}
 
-    PublishDecision consider(SourceIdentity source, uint64_t now_ms) {
+    PublishDecision consider(SourceIdentity source, uint64_t now_ms,
+                             uint64_t current_scene_revision = 0) {
         if (source.generation == 0) {
             ++invalid_drop_count_;
             remember_rejection(source.generation, 0);
@@ -67,7 +69,10 @@ public:
         }
 
         const uint64_t age_ms = SourceAgeMs(now_ms, source.captured_ms);
-        if (policy_.max_source_age_ms > 0
+        const bool unchanged_scene = current_scene_revision != 0
+            && source.scene_revision == current_scene_revision
+            && source.captured_ms <= now_ms;
+        if (!unchanged_scene && policy_.max_source_age_ms > 0
             && age_ms > policy_.max_source_age_ms) {
             ++stale_drop_count_;
             remember_rejection(source.generation, age_ms);

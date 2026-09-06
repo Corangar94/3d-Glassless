@@ -19,6 +19,7 @@ import sys
 import threading
 import logging
 import uuid
+from tracker.runtime_channels import child_environment, validate_session
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
@@ -249,6 +250,7 @@ class OverlayProcess:
         self._restart_requested = False
         self._worker_owner: object | None = None
         self._instance_id: str | None = None
+        self._tracking_session: str | None = None
         self._last_start_error: str | None = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -291,6 +293,19 @@ class OverlayProcess:
             self._proc = proc
             self._exe_path = exe
         return exe
+
+    def set_tracking_session(self, session: str | None) -> None:
+        session = validate_session(session)
+        with self._lock:
+            if session == self._tracking_session:
+                return
+            self.stop_async()
+            self._tracking_session = session
+            self._request_generation += 1
+
+    def tracking_session(self) -> str | None:
+        with self._lock:
+            return self._tracking_session
 
     def _spawn(
         self, target_executable: Optional[str], target_pid: Optional[int] = None
@@ -338,7 +353,8 @@ class OverlayProcess:
             if target_pid is not None:
                 args.extend(["--target-pid", str(target_pid)])
             instance_id = uuid.uuid4().hex
-            environment = os.environ.copy()
+            with self._lock:
+                environment = child_environment(self._tracking_session)
             environment["G3D_INSTANCE_ID"] = instance_id
             proc = subprocess.Popen(
                 args,

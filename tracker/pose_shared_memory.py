@@ -7,6 +7,7 @@ publish-to-render delay without filtering or predicting the same interval twice.
 """
 from __future__ import annotations
 
+from tracker.runtime_channels import channel_name
 import ctypes
 from dataclasses import dataclass
 from enum import IntFlag
@@ -88,6 +89,7 @@ def _prediction_lead_ms(pose: FilteredPose, publish_timestamp_ms: int) -> int:
 
 class PoseStateWriter:
     def __init__(self, name: str = POSE_V2_NAME) -> None:
+        name = channel_name(name)
         self._name = name
         self._committed_sequence = 0
         self._write_lock = threading.RLock()
@@ -223,6 +225,7 @@ class PoseStateWriter:
 
 class PoseStateReader:
     def __init__(self, name: str = POSE_V2_NAME) -> None:
+        name = channel_name(name)
         self._name = name
         self._handle: int | None = None
         self._view: int | None = None

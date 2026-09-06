@@ -6,6 +6,8 @@ interpreter, so it's completely isolated from Qt's GPU/COM state.
 """
 from __future__ import annotations
 
+import uuid
+from tracker.runtime_channels import channel_name, child_environment
 import subprocess
 import sys
 import threading
@@ -66,6 +68,7 @@ class TrackerProcess(QObject):
     ) -> None:
         super().__init__(parent)  # type: ignore[call-overload]
         self._config_path = config_path
+        self._tracking_session = uuid.uuid4().hex
         self._stale_restart_ms = stale_restart_ms
         self._max_restarts = max_restarts
         self._restart_count = 0
@@ -86,6 +89,9 @@ class TrackerProcess(QObject):
         self._termination_finished.connect(self._on_termination_finished)
         self._retiring_proc: Optional[subprocess.Popen[bytes]] = None
         self._desired_running = False
+        self._retirement_watch = QTimer(self)
+        self._retirement_watch.setInterval(500)
+        self._retirement_watch.timeout.connect(self._check_retirement)
 
     def _emit_status(self, status: object, *, force: bool = False) -> bool:
         """Publish one state transition and suppress exact consecutive repeats."""
@@ -130,6 +136,9 @@ class TrackerProcess(QObject):
         self._emit_status("initializing")
         return True
 
+    def tracking_session(self) -> str:
+        return self._tracking_session
+
     def _tracker_command(self) -> list[str]:
         if getattr(sys, "frozen", False):
             return [
@@ -156,13 +165,14 @@ class TrackerProcess(QObject):
             proc = subprocess.Popen(
                 self._tracker_command(),
                 cwd=str(_project_root()),
+                env=child_environment(self._tracking_session),
             )
         except OSError:
             return False
 
         self._proc = proc
-        self._shm = SharedMemoryReader("G3D")
-        self._state_shm = TrackingStateReader("G3D_State")
+        self._shm = SharedMemoryReader(channel_name("G3D", self._tracking_session))
+        self._state_shm = TrackingStateReader(channel_name("G3D_State", self._tracking_session))
         self._last_ts = None
         self._start_time = launch_started_s
         self._last_ts_time = launch_started_s
@@ -247,11 +257,24 @@ class TrackerProcess(QObject):
     ) -> None:
         if proc is not self._retiring_proc:
             return
+        if proc.poll() is None:
+            self._desired_running = False
+            self._emit_status("error")
+            self._retirement_watch.start()
+            return  # Keep ownership; never create a competing producer.
         self._retiring_proc = None
         if self._desired_running:
             self._launch_after_retirement()
         else:
             self.stopped.emit()
+
+    def _check_retirement(self) -> None:
+        proc = self._retiring_proc
+        if proc is None:
+            self._retirement_watch.stop()
+        elif proc.poll() is not None:
+            self._retirement_watch.stop()
+            self._on_termination_finished(proc, False)
 
     def _launch_after_retirement(self) -> None:
         if self._launch_process():

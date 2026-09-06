@@ -4,10 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import threading
+import tempfile
 from typing import Any
 
 import yaml
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QProcess, QProcessEnvironment, QTimer
+from tracker.calibration_cancel import CANCEL_ENV
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -34,7 +36,14 @@ class CameraCalibrationDialog(QDialog):
 
     def __init__(self, config_path: str = CONFIG_PATH) -> None:
         super().__init__()
-        self._config_path = Path(config_path)
+        self._config_path = Path(config_path).resolve()
+        self._process = None
+        self._job_workspace = None
+        self._cancel_path = None
+        self._closing = False
+        self._cancel_requested = False
+        self._stdout_tail = b""
+        self._stderr_tail = b""
         self._job_running = False
         self._buttons: list[QPushButton] = []
         self.setWindowTitle("Glassless3D Camera Calibration")
@@ -42,6 +51,9 @@ class CameraCalibrationDialog(QDialog):
         self._build_ui()
         self._job_finished.connect(self._on_job_finished)
         self._refresh_summary()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_child)
 
     def _load_config(self) -> dict[str, Any]:
         if not self._config_path.exists():
@@ -168,29 +180,113 @@ class CameraCalibrationDialog(QDialog):
             button.setEnabled(not busy)
 
     def _run_child(self, command: list[str], label: str) -> None:
-        if self._job_running:
+        if self._process is not None:
             return
+        self._job_workspace = tempfile.TemporaryDirectory(prefix="glassless-calibration-")
+        self._cancel_path = Path(self._job_workspace.name) / "cancel"
+        self._cancel_requested = False
+        self._stdout_tail = b""
+        self._stderr_tail = b""
+        proc = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert(CANCEL_ENV, str(self._cancel_path))
+        env.insert("PYTHONUTF8", "1")
+        proc.setProcessEnvironment(env)
+        proc.setWorkingDirectory(str(Path(__file__).resolve().parent.parent))
+        proc.readyReadStandardOutput.connect(lambda owner=proc: self._read_child_output(owner))
+        proc.readyReadStandardError.connect(lambda owner=proc: self._read_child_output(owner))
+        proc.finished.connect(lambda code, status, owner=proc: self._finish_child(owner, code))
+        proc.errorOccurred.connect(lambda error, owner=proc: self._child_error(owner, error))
+        self._process = proc
         self._set_busy(True)
         self._status.setText(label)
+        proc.start(command[0], command[1:])
 
-        def worker() -> None:
-            try:
-                result = subprocess.run(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                payload = {
-                    "returncode": int(result.returncode),
-                    "stdout": result.stdout.strip(),
-                    "stderr": result.stderr.strip(),
-                }
-            except Exception as exc:  # noqa: BLE001
-                payload = {"returncode": -1, "stdout": "", "stderr": str(exc)}
-            self._job_finished.emit(payload)
+    def _read_child_output(self, proc) -> None:
+        if proc is not self._process:
+            return
+        self._stdout_tail = (self._stdout_tail + bytes(proc.readAllStandardOutput()))[-65536:]
+        self._stderr_tail = (self._stderr_tail + bytes(proc.readAllStandardError()))[-65536:]
 
-        threading.Thread(target=worker, daemon=True).start()
+    def _child_error(self, proc, error) -> None:
+        if proc is self._process and error == QProcess.ProcessError.FailedToStart:
+            self._stderr_tail = proc.errorString().encode("utf-8", errors="replace")
+            self._finish_child(proc, -1)
+
+    def _finish_child(self, proc, code: int) -> None:
+        if proc is not self._process:
+            return
+        self._read_child_output(proc)
+        payload = {"returncode": 130 if self._cancel_requested else int(code),
+                   "stdout": self._stdout_tail.decode("utf-8", errors="replace").strip(),
+                   "stderr": self._stderr_tail.decode("utf-8", errors="replace").strip()}
+        self._process = None
+        proc.deleteLater()
+        if self._job_workspace is not None:
+            self._job_workspace.cleanup()
+            self._job_workspace = None
+        self._cancel_path = None
+        self._job_finished.emit(payload)
+        if self._closing:
+            super().done(QDialog.DialogCode.Rejected)
+
+    def _request_cancel(self) -> None:
+        proc = self._process
+        if proc is None or self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self._status.setText("Cancelling calibration and releasing the camera...")
+        try:
+            self._cancel_path.write_bytes(b"cancel")
+        except OSError:
+            proc.terminate()
+        # Every delayed action checks the exact child object; an old timer must
+        # never terminate a replacement calibration process.
+        QTimer.singleShot(2000, lambda owner=proc: self._terminate_child(owner))
+
+    def _terminate_child(self, proc) -> None:
+        if proc is not self._process:
+            return
+        proc.terminate()
+        QTimer.singleShot(2000, lambda owner=proc: self._kill_child(owner))
+
+    def _kill_child(self, proc) -> None:
+        if proc is self._process:
+            proc.kill()
+
+    def done(self, result: int) -> None:
+        if self._process is not None:
+            self._closing = True
+            self._request_cancel()
+            return
+        super().done(result)
+
+    def accept(self) -> None:
+        self.done(QDialog.DialogCode.Accepted)
+
+    def reject(self) -> None:
+        self.done(QDialog.DialogCode.Rejected)
+
+    def closeEvent(self, event) -> None:
+        if self._process is not None:
+            event.ignore()
+            self._closing = True
+            self._request_cancel()
+        else:
+            super().closeEvent(event)
+
+    def _shutdown_child(self) -> None:
+        proc = self._process
+        if proc is None:
+            return
+        self._request_cancel()
+        # aboutToQuit cannot rely on further timer callbacks. Reap this exact
+        # owned child before Qt destroys its controller.
+        if not proc.waitForFinished(1500):
+            proc.terminate()
+            if not proc.waitForFinished(1000):
+                proc.kill()
+                proc.waitForFinished(1000)
 
     def _save_board(self) -> None:
         output, _selected_filter = QFileDialog.getSaveFileName(

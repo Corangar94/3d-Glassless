@@ -9,11 +9,13 @@ inline SourceIdentity OldestCompositeSource(
     const SourceIdentity* tiles, std::size_t count, uint64_t generation) {
     if (!tiles || count == 0 || generation == 0) return {};
     uint64_t oldest = std::numeric_limits<uint64_t>::max();
+    uint64_t revision = tiles[0].scene_revision;
     for (std::size_t i = 0; i < count; ++i) {
         if (tiles[i].generation == 0) return {};
         oldest = std::min(oldest, tiles[i].captured_ms);
+        if (tiles[i].scene_revision != revision) revision = 0;
     }
-    return {generation, oldest};
+    return {generation, oldest, revision};
 }
 
 inline bool CompositeNeedsRefresh(

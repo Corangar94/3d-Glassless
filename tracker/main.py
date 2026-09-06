@@ -1,4 +1,6 @@
 # tracker/main.py
+from contextlib import nullcontext
+from tracker.runtime_channels import ProducerLease, tracking_session
 import argparse
 import importlib
 import math
@@ -917,7 +919,7 @@ def _make_tray_image():
     return image
 
 
-def main() -> None:
+def _run_owned_main() -> None:
     parser = argparse.ArgumentParser(description="Glassless3D head tracker")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
@@ -1014,14 +1016,16 @@ def main() -> None:
 
     with (
         tracker,
-        FreetracWriter() as ft_writer,
+        (FreetracWriter() if tracking_session() is None or trk.get("publish_freetrack") is True
+         else nullcontext(None)) as ft_writer,
         SharedMemoryWriter() as g3d_writer,
         PoseStateWriter() as pose_writer,
         TrackingStateWriter() as state_writer,
     ):
         class _MultiWriter:
             def write(self, x: float, y: float, z: float) -> None:
-                ft_writer.write(x=x, y=y, z=z)
+                if ft_writer is not None:
+                    ft_writer.write(x=x, y=y, z=z)
                 g3d_writer.write(x=x, y=y, z=z)
 
             def write_pose(self, pose: FilteredPose, *, valid: bool) -> None:
@@ -1060,6 +1064,16 @@ def main() -> None:
     if tray_icon is not None:
         tray_icon.stop()
     print("\n[G3D] Tracker stopped.")
+
+
+def main() -> None:
+    # Help does not acquire producer ownership or open camera resources.
+    import sys
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        _run_owned_main()
+        return
+    with ProducerLease():
+        _run_owned_main()
 
 
 if __name__ == "__main__":

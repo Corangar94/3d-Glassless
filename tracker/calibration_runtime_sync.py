@@ -1,5 +1,7 @@
 """Synchronize full camera calibration with tracker and shader projection settings."""
 from __future__ import annotations
+from tracker.calibration_cancel import CalibrationCancelled, check_cancelled
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import math
 from pathlib import Path
@@ -28,50 +30,18 @@ def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
     return child
 
 
-def synchronize_runtime_projection(
-    config_path: str | Path,
-    geometry: CameraGeometry,
-    *,
-    viewer_distance_cm: float | None = None,
-) -> None:
-    """Keep calibrated camera geometry and runtime projection on one basis.
-
-    CameraGeometry is authoritative for the tracker. The native overlay still
-    receives horizontal camera FOV and nominal viewer distance through the live
-    settings block, so copy calibrated values into those compatibility fields
-    instead of letting the two projection models silently diverge.
-    """
-    path = Path(config_path)
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if loaded is None:
-            loaded = {}
-        if not isinstance(loaded, dict):
-            raise ValueError("config top level must be a mapping")
-    else:
-        loaded = {}
-
-    tracking = _mapping(loaded, "tracking")
-    overlay = _mapping(loaded, "overlay")
+def synchronize_runtime_projection(config_path: str | Path, geometry: CameraGeometry,
+                                   *, viewer_distance_cm: float | None = None) -> None:
+    patch = {"tracking": {}, "overlay": {}}
     fov = horizontal_fov_deg(geometry)
     if fov is not None:
-        tracking["camera_fov_deg"] = round(fov, 6)
-        overlay["camera_fov_deg"] = round(fov, 6)
-
+        patch["tracking"]["camera_fov_deg"] = round(fov, 6)
+        patch["overlay"]["camera_fov_deg"] = round(fov, 6)
     if viewer_distance_cm is not None:
         distance = float(viewer_distance_cm)
-        if not math.isfinite(distance) or distance <= 0.0:
+        if not math.isfinite(distance) or distance <= 0:
             raise ValueError("viewer_distance_cm must be finite and positive")
-        calibration = _mapping(overlay, "display_calibration")
-        calibration["viewer_distance_cm"] = distance
-        # Keep the legacy field synchronized for older launchers/config readers.
-        overlay["head_dist_cm"] = distance
-
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text(
-        yaml.safe_dump(loaded, sort_keys=False),
-        encoding="utf-8",
-        newline="\n",
-    )
-    temporary.replace(path)
+        patch["overlay"]["head_dist_cm"] = distance
+        patch["overlay"]["display_calibration"] = {"viewer_distance_cm": distance}
+    check_cancelled()
+    merge_config(config_path, patch)

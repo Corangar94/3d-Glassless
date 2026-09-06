@@ -50,7 +50,7 @@ public:
     // Returns false on a pipeline/device failure; controlled stale-result drops
     // keep the previous valid depth and return true.
     // capture_timestamp_ms uses GetTickCount64; zero is invocation time for synthetic callers.
-    bool run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms = 0);
+    bool run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms = 0, uint64_t scene_revision = 0);
 
     // Runtime performance/quality mode from G3D_Settings:
     // 0=quality, 1=balanced, 2=fast, 3=auto.
@@ -79,6 +79,9 @@ public:
 
     // Source-aware publication diagnostics.
     uint64_t depth_updates_published() const;
+    uint64_t published_scene_revision() const;
+    bool depth_matches_scene(uint64_t revision) const;
+    bool depth_work_pending() const;
     uint64_t stale_depth_results_dropped() const;
     uint64_t nonmonotonic_depth_results_dropped() const;
     uint64_t invalid_depth_results_dropped() const;

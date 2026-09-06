@@ -27,7 +27,18 @@ def _select_main(argv: list[str]) -> Callable[[], None]:
 
         return _run_self_test
 
+    if "--utility-child" in argv:
+        argv.remove("--utility-child")
+        _ensure_child_streams()
+        from launcher.utility_commands import main as utility_main
+
+        def _run_utility_child() -> None:
+            raise SystemExit(utility_main(argv[1:]))
+
+        return _run_utility_child
+
     if "--tracker-child" in argv:
+        _ensure_child_streams()
         argv.remove("--tracker-child")
         from tracker.pose_stability_runtime import main
 

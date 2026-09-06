@@ -1,5 +1,6 @@
 """Display backend calibration metadata for stereo/quilt targets."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -92,16 +93,13 @@ def save_calibration(
         focus_plane_cm=float(focus_plane_cm),
         tracking_mode=tracking_mode_value,  # type: ignore[arg-type]
     )
-    path = Path(config_path)
-    cfg = _load_config(path)
-    overlay = cfg.setdefault("overlay", {})
-    if not isinstance(overlay, dict):
-        overlay = {}
-        cfg["overlay"] = overlay
-    overlay["display_backend"] = backend_id
-    overlay["display_calibration"] = asdict(calibration)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(yaml.safe_dump(cfg, sort_keys=False)), encoding="utf-8")
+    def mutate(root):
+        overlay = root.setdefault("overlay", {})
+        if not isinstance(overlay, dict):
+            raise ConfigStoreError("overlay config must be a mapping")
+        overlay["display_backend"] = backend_id
+        overlay["display_calibration"] = asdict(calibration)
+    update_config(config_path, mutate)
     return calibration
 
 

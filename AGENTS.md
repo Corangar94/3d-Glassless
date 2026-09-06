@@ -1,5 +1,14 @@
 # Glassless3D — Project Reference
 
+## Second audit remediation (source-only)
+
+See `docs/AUDIT_2_REMEDIATION.md`. Internal tracking transports are now per-run
+namespaces for launcher-owned children. Idle-scene depth uses scene identity,
+not timestamp renewal. Every live configuration writer uses
+`tracker.config_store`; do not reintroduce direct YAML file truncation.
+Optional installer ownership is format 2; ambiguous legacy manifests fail closed.
+Validation is deferred for this branch; earlier CI success does not cover it.
+
 ## September 2026 audit remediation
 
 The native build now compiles `overlay/overlay.cpp` directly. No CMake source

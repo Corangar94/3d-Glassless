@@ -1,5 +1,7 @@
 """Checkerboard intrinsics and guided camera-to-screen alignment."""
 from __future__ import annotations
+from tracker.calibration_cancel import CalibrationCancelled, check_cancelled
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 from dataclasses import dataclass
 import math
@@ -274,6 +276,7 @@ def capture_checkerboard_observations(
     window_name = "Glassless3D camera calibration"
     try:
         while len(accepted) < sample_count and time.monotonic() - started < timeout_seconds:
+            check_cancelled()
             ok, frame = cap.read()
             if not ok:
                 continue
@@ -332,25 +335,8 @@ def center_align_geometry(
     )
 
 
-def update_config_camera_geometry(
-    config_path: str | Path,
-    geometry: CameraGeometry,
-    *,
-    calibration_result: CalibrationResult | None = None,
-) -> None:
-    path = Path(config_path)
-    if path.exists():
-        with path.open(encoding="utf-8") as stream:
-            loaded = yaml.safe_load(stream)
-        if loaded is None:
-            loaded = {}
-        if not isinstance(loaded, dict):
-            raise ValueError("config top level must be a mapping")
-    else:
-        loaded = {}
-    tracking = loaded.setdefault("tracking", {})
-    if not isinstance(tracking, dict):
-        raise ValueError("tracking config must be a mapping")
+def update_config_camera_geometry(config_path: str | Path, geometry: CameraGeometry,
+                                  *, calibration_result: CalibrationResult | None = None) -> None:
     mapping = geometry.to_mapping()
     if calibration_result is not None:
         mapping["quality"] = {
@@ -358,12 +344,13 @@ def update_config_camera_geometry(
             "mean_reprojection_error_px": calibration_result.mean_reprojection_error_px,
             "max_reprojection_error_px": calibration_result.max_reprojection_error_px,
         }
-    tracking["camera_calibration"] = mapping
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        yaml.safe_dump(loaded, stream, sort_keys=False)
-    temporary.replace(path)
+    def mutate(root):
+        check_cancelled()
+        tracking = root.setdefault("tracking", {})
+        if not isinstance(tracking, dict):
+            raise ConfigStoreError("tracking config must be a mapping")
+        tracking["camera_calibration"] = mapping
+    update_config(config_path, mutate)
 
 
 def generated_checkerboard_image(

@@ -279,7 +279,7 @@ class MainWindow(_BaseMainWindow):
             self._clear_tracker_backend_tile()
             return
         try:
-            status, fresh = read_tracker_backend_status()
+            status, fresh = read_tracker_backend_status(session=self._thread.tracking_session())
             label, tooltip = tracker_backend_tile_text(
                 status,
                 fresh=fresh,

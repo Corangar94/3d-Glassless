@@ -1,5 +1,6 @@
 """Run deterministic tracker replay acceptance and optional auto-tuning."""
 from __future__ import annotations
+from tracker.config_store import ConfigStoreError, read_config, update_config, merge_config
 
 import argparse
 from pathlib import Path
@@ -30,29 +31,11 @@ def _load_settings(path: Path | None) -> FilterSettings:
 
 
 def _write_settings(path: Path, settings: FilterSettings) -> None:
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if loaded is None:
-            loaded = {}
-        if not isinstance(loaded, dict):
-            raise ValueError("config top level must be a mapping")
-    else:
-        loaded = {}
-    tracking = loaded.setdefault("tracking", {})
-    if not isinstance(tracking, dict):
-        raise ValueError("tracking config must be a mapping")
-    tracking["smoothing_q"] = settings.process_noise
-    tracking["smoothing_r"] = settings.measurement_noise
-    tracking["prediction_horizon_ms"] = settings.prediction_horizon_ms
-    tracking["max_prediction_ms"] = settings.max_prediction_ms
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.parent.mkdir(parents=True, exist_ok=True)
-    temporary.write_text(
-        yaml.safe_dump(loaded, sort_keys=False),
-        encoding="utf-8",
-        newline="\n",
-    )
-    temporary.replace(path)
+    merge_config(path, {"tracking": {
+        "smoothing_q": settings.process_noise, "smoothing_r": settings.measurement_noise,
+        "prediction_horizon_ms": settings.prediction_horizon_ms,
+        "max_prediction_ms": settings.max_prediction_ms,
+    }})
 
 
 def _print_report(report: ReplayReport) -> None:

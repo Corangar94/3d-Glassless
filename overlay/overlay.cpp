@@ -45,6 +45,7 @@
 #include "depth_cohesion_shader.h"
 #include "parallax_health.h"
 #include "pose_prediction.h"
+#include "pose_packet_validation.h"
 
 namespace g3d::wgc {
 
@@ -224,6 +225,32 @@ static const wchar_t* SHM_STATE     = L"G3D_State";      // face-validity state 
 static const wchar_t* SHM_SETTINGS  = L"G3D_Settings";   // live tuning (settings GUI -> us)
 static const wchar_t* SHM_POSE_V2   = L"G3D_PoseV2";     // predicted pose + velocity/orientation
 static const wchar_t* SHM_POSE_V2_SEQ = L"G3D_PoseV2_Seq";
+static std::wstring g_runtimePoseName, g_runtimeSeqName, g_runtimeStateName;
+static std::wstring g_runtimeV2Name, g_runtimeV2SeqName;
+
+static bool InitializeTrackingNamespace() {
+    wchar_t nonce[33] = {};
+    SetLastError(ERROR_SUCCESS);
+    const DWORD length = GetEnvironmentVariableW(L"G3D_TRACKING_SESSION", nonce, 33);
+    if (length == 0 && GetLastError() == ERROR_ENVVAR_NOT_FOUND) return true;
+    if (length != 32) return false;
+    for (DWORD i = 0; i < length; ++i)
+        if (!((nonce[i] >= L'0' && nonce[i] <= L'9') || (nonce[i] >= L'a' && nonce[i] <= L'f')))
+            return false;
+    const std::wstring prefix = std::wstring(L"Local\\Glassless3D_") + nonce + L"_";
+    g_runtimePoseName = prefix + L"G3D";
+    g_runtimeSeqName = g_runtimePoseName + L"_Seq";
+    g_runtimeStateName = prefix + L"G3D_State";
+    g_runtimeV2Name = prefix + L"G3D_PoseV2";
+    g_runtimeV2SeqName = g_runtimeV2Name + L"_Seq";
+    SHM_NAME = g_runtimePoseName.c_str();
+    SHM_SEQ = g_runtimeSeqName.c_str();
+    SHM_STATE = g_runtimeStateName.c_str();
+    SHM_POSE_V2 = g_runtimeV2Name.c_str();
+    SHM_POSE_V2_SEQ = g_runtimeV2SeqName.c_str();
+    return true;
+}
+
 static constexpr uint32_t POSE_V2_MAGIC = 0x32443347u;
 static constexpr uint32_t POSE_V2_VERSION = 2u;
 static constexpr uint32_t POSE_V2_VALID = 1u << 0;
@@ -755,6 +782,8 @@ static UINT                      g_wgcWidth = 0;
 static UINT                      g_wgcHeight = 0;
 static uint64_t                  g_captureFrameSerial = 0;
 static uint64_t                  g_lastCaptureFrameMs = 0;
+    g_lastCapturePollMs = 0;
+static uint64_t                  g_lastCapturePollMs = 0;
 static bool                      g_presentRetryPending = false;
 
 static void CloseWinRtObject(IUnknown* object) {
@@ -1813,7 +1842,7 @@ static bool ReadStablePose(HeadPose* out) {
 
 
 static void TryAttachPoseV2() {
-    if (g_poseV2View) return;
+    if (g_poseV2View && g_poseV2SeqView) return;
     if (!g_poseV2H) {
         g_poseV2H = OpenFileMappingW(FILE_MAP_READ, FALSE, SHM_POSE_V2);
         if (g_poseV2H) Log("SHM: OpenFileMapping(G3D_PoseV2) succeeded, handle=%p", g_poseV2H);
@@ -1833,32 +1862,35 @@ static void TryAttachPoseV2() {
     }
 }
 
+static bool ValidatePoseV2(const PoseV2& snapshot) {
+    return g3d::pose::ValidatePacket(snapshot, POSE_V2_MAGIC, POSE_V2_VERSION);
+}
+
 static bool ReadStablePoseV2(PoseV2* out) {
     if (!g_poseV2View || !out) return false;
-    if (!g_poseV2SeqView) return ReadStableSnapshot(g_poseV2View, out);
-    for (int attempt = 0; attempt < 8; ++attempt) {
-        uint32_t before = 0, after = 0;
-        memcpy(&before, g_poseV2SeqView, sizeof(before));
-        if (before & 1u) continue;
-        MemoryBarrier();
-        PoseV2 snapshot = {};
-        memcpy(&snapshot, g_poseV2View, sizeof(snapshot));
-        MemoryBarrier();
-        memcpy(&after, g_poseV2SeqView, sizeof(after));
-        if (before == after && (after & 1u) == 0) {
-            if (snapshot.magic != POSE_V2_MAGIC || snapshot.version != POSE_V2_VERSION) return false;
-            const float values[] = {
-                snapshot.x, snapshot.y, snapshot.z,
-                snapshot.vx, snapshot.vy, snapshot.vz,
-                snapshot.yaw, snapshot.pitch, snapshot.roll,
-                snapshot.confidence,
-            };
-            for (float value : values) if (!std::isfinite(value)) return false;
-            *out = snapshot;
-            return true;
+    PoseV2 snapshot = {};
+    bool acquired = false;
+    if (!g_poseV2SeqView) {
+        acquired = ReadStableSnapshot(g_poseV2View, &snapshot);
+    } else {
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            uint32_t before = 0, after = 0;
+            memcpy(&before, g_poseV2SeqView, sizeof(before));
+            if (before & 1u) continue;
+            MemoryBarrier();
+            memcpy(&snapshot, g_poseV2View, sizeof(snapshot));
+            MemoryBarrier();
+            memcpy(&after, g_poseV2SeqView, sizeof(after));
+            if (before == after && (after & 1u) == 0) {
+                acquired = true;
+                break;
+            }
         }
     }
-    return false;
+    // Snapshot stability does not imply protocol or numeric validity.
+    if (!acquired || !ValidatePoseV2(snapshot)) return false;
+    *out = snapshot;
+    return true;
 }
 
 // Optional face-validity channel. Older trackers do not publish it, so the
@@ -2122,6 +2154,18 @@ static const char* CaptureStateName(CaptureState state) {
     return "unavailable";
 }
 
+static bool CaptureSessionHealthy() {
+    const uint64_t now = GetTickCount64();
+    return g_captureState == CaptureState::Running && !g_bindingDirty && g_hasFrame
+        && g_lastCapturePollMs != 0 && now - g_lastCapturePollMs <= 1000
+        && g_dev && SUCCEEDED(g_dev->GetDeviceRemovedReason());
+}
+
+static bool CoherentSceneDepth() {
+    return CaptureSessionHealthy() && g_depth
+        && g_depth->depth_matches_scene(g_captureFrameSerial);
+}
+
 static void UpdateOverlayVisibility() {
     if (!g_hwnd) return;
     bool targetForeground = true;
@@ -2137,16 +2181,13 @@ static void UpdateOverlayVisibility() {
         targetForeground = selectedPid != 0 && foregroundPid == selectedPid;
     }
 
-    const uint64_t nowMs = GetTickCount64();
-    static constexpr uint64_t kCaptureFrameStaleMs = 1000;
-    const bool captureFresh = g_lastCaptureFrameMs != 0
-        && nowMs - g_lastCaptureFrameMs <= kCaptureFrameStaleMs;
+    const bool captureFresh = CaptureSessionHealthy();
     const bool visible = g_captureState == CaptureState::Running
         && g_hasFrame
         && g_depth != nullptr
         && g_depth->depth_updates_published() > 0
-        && g_depth->depth_age_ms() <= 750
-        && (g_targetExePath.empty() || (targetForeground && captureFresh));
+        && (CoherentSceneDepth() || g_depth->depth_age_ms() <= 750)
+        && captureFresh && (g_targetExePath.empty() || targetForeground);
     if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
     g_overlayVisible = visible;
@@ -2164,6 +2205,7 @@ static void SetCaptureState(CaptureState state, const char* reason) {
 static void DestroyCaptureResources() {
     g_hasFrame = false;
     g_lastCaptureFrameMs = 0;
+    g_lastCapturePollMs = 0;
     g_presentRetryPending = false;
     if (g_depth) { delete g_depth; g_depth = nullptr; }
     ReleaseWgcResources();
@@ -2461,6 +2503,7 @@ static bool RecreateWgcFramePool(UINT width, UINT height) {
     }
     g_hasFrame = false;
     g_lastCaptureFrameMs = 0;
+    g_lastCapturePollMs = 0;
     if (g_depth) { delete g_depth; g_depth = nullptr; }
     if (!CreateWgcCaptureTextures(width, height)) return false;
     g_wgcWidth = width;
@@ -2490,6 +2533,7 @@ static void UpdateWgcCapture() {
             SafeRelease(latestFrame);
             return;
         }
+        g_lastCapturePollMs = GetTickCount64();
         if (!nextFrame) break;
         CloseWinRtObject(latestFrame);
         SafeRelease(latestFrame);
@@ -2566,6 +2610,7 @@ static void UpdateCapture() {
     DesktopFrameLease frame(g_dup);
     const HRESULT hr = frame.Acquire(16, &info);
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        g_lastCapturePollMs = GetTickCount64();
         ++g_acquireTimeout;
         return;
     }
@@ -2606,6 +2651,7 @@ static void UpdateCapture() {
         }
     }
 
+    g_lastCapturePollMs = GetTickCount64();
     ++g_acquireOk;
     if (!NormalizeCapturedFrame(frame.texture())) {
         QueueCaptureSignal(CaptureSignal::RebindRetry, "normalize_failed");
@@ -3027,6 +3073,7 @@ static void Frame() {
     // Lazy (re)connect to both shared-memory channels — either side may start late
     TryAttachShm();
     TryAttachPoseSequence();
+    TryAttachPoseV2();
     TryAttachTrackerState();
     TryAttachSettings();
     ApplySettings();   // CLI > GUI > autodetect → publishes to g_screenW, g_strength, etc.
@@ -3103,30 +3150,41 @@ static void Frame() {
         nativePredictDy = nativePrediction.delta_y_cm;
         nativePredictDz = nativePrediction.delta_z_cm;
     } else if (g_shmView) {
-        HeadPose p;
-        if (!ReadStablePose(&p)) return;
-        hx = p.x; hy = p.y; hz = p.z; ts = p.ts;
-        shmReads++;
-        if (!seenPose || ts != lastShmTs) {
-            newPoseSample = true;
-            shmChanges++;
-            lastShmTs = ts;
-            lastPoseChangeMs = nowMs;
-            seenPose = true;
+        HeadPose p = {};
+        if (ReadStablePose(&p) && std::isfinite(p.x) && std::isfinite(p.y)
+            && std::isfinite(p.z) && p.z > 0.0f) {
+            hx = p.x; hy = p.y; hz = p.z; ts = p.ts;
+            shmReads++;
+            if (!seenPose || ts != lastShmTs) {
+                newPoseSample = true;
+                shmChanges++;
+                lastShmTs = ts;
+                lastPoseChangeMs = nowMs;
+                seenPose = true;
+            }
+            poseAgeMs = nowMs - p.ts;
+            poseFresh = seenPose && poseAgeMs <= kPoseStaleMs;
         }
-        poseAgeMs = seenPose ? (nowMs - lastPoseChangeMs) : kPoseStaleMs + 1;
-        poseFresh = seenPose && (poseAgeMs <= kPoseStaleMs);
+        // Invalid/odd/interrupted input is an invalid pose, not an early return
+        // that skips capture, visibility, neutral fade, telemetry and shutdown.
+    }
+    static bool previousUsingPoseV2 = false;
+    if (usingPoseV2 != previousUsingPoseV2) {
+        g_oeX = {}; g_oeY = {}; g_oeZ = {};
+        lastFilteredWallMs = 0;
+        newPoseSample = poseFresh;
+        previousUsingPoseV2 = usingPoseV2;
     }
 
     uint32_t trackerStateTs = 0;
     uint32_t trackerState = 1;
     bool trackerStateFresh = true;
     if (g_stateView) {
-        TrackerState stateSnapshot;
-        if (!ReadStableSnapshot(g_stateView, &stateSnapshot)) return;
-        trackerState = stateSnapshot.state;
-        trackerStateTs = stateSnapshot.ts;
-        trackerStateFresh = (nowMs - trackerStateTs) <= kPoseStaleMs;
+        TrackerState stateSnapshot = {};
+        const bool stateReadable = ReadStableSnapshot(g_stateView, &stateSnapshot);
+        trackerState = stateReadable ? stateSnapshot.state : 0;
+        trackerStateTs = stateReadable ? stateSnapshot.ts : 0;
+        trackerStateFresh = stateReadable && (nowMs - trackerStateTs) <= kPoseStaleMs;
         poseFresh = poseFresh && trackerStateFresh && trackerState == 1;
     }
 
@@ -3201,7 +3259,7 @@ static void Frame() {
     // Pump completion once per frame, independently of new capture arrivals.
     // Passing the acquisition timestamp prevents cached pixels being relabelled fresh.
     if (g_captureState == CaptureState::Running && g_hasFrame && g_depth
-        && !g_depth->run(g_capTex, g_lastCaptureFrameMs)) {
+        && !g_depth->run(g_capTex, g_lastCaptureFrameMs, g_captureFrameSerial)) {
         Log("Depth pipeline failed: %s", g_depth->last_error());
         g_hasFrame = false;
         SetCaptureState(CaptureState::Unavailable, "depth_pipeline_failed");
@@ -3222,7 +3280,7 @@ static void Frame() {
         usingPoseV2,
         usingPoseV2 ? poseConfidence : 1.0f,
         poseAgeMs,
-        depthAgeMs,
+        CoherentSceneDepth() ? 0u : depthAgeMs, // validity, not a relabeled capture timestamp
     };
     g_parallaxHealthTarget = g3d::parallax::TargetScale(healthInputs);
     const uint64_t healthNowMs = GetTickCount64();
@@ -3264,7 +3322,7 @@ static void Frame() {
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
             "depth[total=%llu %dHz mode=%s active=%s profile=%dx%d tiles=%d inference_ms=%.2f blend_ms=%.1f age_ms=%u] timing[capture_cpu=%.3f draw_gpu=%.3f present_cpu=%.3f frame_cpu=%.3f] backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
             "head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f "
-            "hasFrame=%d capture=%s capture_reason=%s instance=%s depth_published=%llu depth_failures=%u",
+            "hasFrame=%d capture=%s capture_reason=%s instance=%s depth_published=%llu depth_failures=%u capture_revision=%llu depth_revision=%llu capture_poll_age_ms=%llu depth_pending=%u",
             frameCount, g_acquireOk, g_acquireTimeout, g_acquireLost, g_acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
             (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode),
@@ -3280,7 +3338,11 @@ static void Frame() {
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
             g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason,
             g_instanceId, static_cast<unsigned long long>(pubNow),
-            g_depth ? g_depth->consecutive_worker_failures() : 0u);
+            g_depth ? g_depth->consecutive_worker_failures() : 0u,
+            static_cast<unsigned long long>(g_captureFrameSerial),
+            static_cast<unsigned long long>(g_depth ? g_depth->published_scene_revision() : 0),
+            static_cast<unsigned long long>(CaptureSessionHealthy() ? summaryNowMs - g_lastCapturePollMs : UINT32_MAX),
+            g_depth && g_depth->depth_work_pending() ? 1u : 0u);
         Log("ParallaxHealth scale=%.3f target=%.3f pose_fresh=%d pose_source=%s pose_confidence=%.3f pose_age_ms=%u depth_ready=%d depth_age_ms=%u",
             g_parallaxHealthScale,
             g_parallaxHealthTarget,
@@ -3540,6 +3602,7 @@ static void Cleanup() {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
+    if (!InitializeTrackingNamespace()) return 73; // invalid owned namespace must not fall back
     // Acquire singleton ownership before opening/truncating overlay.log. A stale
     // instance must not let a rejected replacement corrupt the active log or
     // display a focus-stealing modal over the game.

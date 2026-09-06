@@ -355,6 +355,9 @@ struct DepthInferImpl {
     uint32_t scheduled_profile_mode = 1;
     std::atomic<uint32_t> consecutive_worker_failures{0};
     std::atomic<bool> gpu_transfer_failed{false};
+    std::atomic<uint64_t> published_scene_revision{0};
+    uint64_t last_staged_scene_revision = 0;
+
     uint64_t                             scheduler_cycle = 0;
     uint64_t                             completion_generation = 0;
     uint64_t                             next_source_generation = 0;
@@ -460,10 +463,10 @@ struct DepthInferImpl {
         return GetTickCount64();
     }
 
-    DepthSourceIdentity next_source_identity(uint64_t captured_ms) {
+    DepthSourceIdentity next_source_identity(uint64_t captured_ms, uint64_t revision) {
         ++next_source_generation;
         if (next_source_generation == 0) ++next_source_generation;
-        return {next_source_generation, captured_ms};
+        return {next_source_generation, captured_ms, revision};
     }
 
     void publish_freshness_snapshot() {
@@ -1518,7 +1521,7 @@ float4 main(I i):SV_Target {
     // Doing the readback+map every frame (60fps) while the worker only consumes
     // at ~10fps stalls the GPU pipeline 60×/s for nothing. By skipping the
     // readback when busy, we reduce the D3D11_MAP_READ stalls to ~10×/s.
-    bool run_once(ID3D11Texture2D* captured, uint64_t captured_ms) {
+    bool run_once(ID3D11Texture2D* captured, uint64_t captured_ms, uint64_t revision) {
         std::vector<uint16_t> drained_upload;
         DepthSourceIdentity drained_source{};
         bool worker_busy = false;
@@ -1545,8 +1548,9 @@ float4 main(I i):SV_Target {
         if (!drained_upload.empty()) {
             const auto decision = result_freshness.consider(
                 drained_source,
-                now_ms);
+                now_ms, revision);
             if (decision == g3d::depth::PublishDecision::Accept) {
+                published_scene_revision.store(drained_source.scene_revision, std::memory_order_relaxed);
                 const int N = DepthInferencer::kModelSize;
                 const bool previous_fresh = has_valid_depth
                     && g3d::depth::SourceAgeMs(now_ms,
@@ -1585,7 +1589,6 @@ float4 main(I i):SV_Target {
             publish_freshness_snapshot();
         }
         if (worker_busy) return true;
-        if (stage_count == 0 && captured_ms == last_staged_capture_ms) return true;
 
         const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
         const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
@@ -1593,6 +1596,13 @@ float4 main(I i):SV_Target {
         if (scheduled_profile_mode != resolved_mode) {
             reset_temporal_depth_history_after_rejection();
             scheduled_profile_mode = resolved_mode;
+        }
+        const bool same_capture = captured_ms == last_staged_capture_ms
+            && revision == last_staged_scene_revision;
+        if (stage_count == 0 && same_capture
+            && (revision == 0 || published_scene_revision.load(std::memory_order_relaxed) == revision)
+            && !g3d::depth::CompositeNeedsRefresh(tile_sources.data(), tile_sources.size(), captured_ms)) {
+            return true;
         }
         if (last_submit.time_since_epoch().count() != 0) {
             const uint32_t elapsed_ms = static_cast<uint32_t>(
@@ -1602,12 +1612,19 @@ float4 main(I i):SV_Target {
         }
 
         if (stage_count == 0) {
-            const std::vector<int> selected = select_tiles(requested);
+            std::vector<int> selected = select_tiles(requested);
+            if (same_capture && revision != 0) {
+                // Once input stops changing, fill every tile from that exact
+                // scene. Old peripheral tiles cannot claim coherent reuse.
+                selected.resize(tile_count);
+                for (int tile = 0; tile < tile_count; ++tile) selected[tile] = tile;
+            }
             if (!render_compact(captured, requested)) return false;
             ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
             stage_profiles[stage_write] = requested;
-            stage_sources[stage_write] = next_source_identity(captured_ms);
+            stage_sources[stage_write] = next_source_identity(captured_ms, revision);
             last_staged_capture_ms = captured_ms;
+            last_staged_scene_revision = revision;
             stage_tiles[stage_write] = selected;
             stage_pending[stage_write] = true;
             stage_write = (stage_write + 1) % kReadbackRingSize;
@@ -2016,6 +2033,8 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
         impl_->set_error("");
     }
     impl_->stop.store(false, std::memory_order_relaxed);
+    impl_->published_scene_revision.store(0, std::memory_order_relaxed);
+    impl_->last_staged_scene_revision = 0;
     impl_->last_staged_capture_ms = 0;
     impl_->consecutive_worker_failures.store(0, std::memory_order_relaxed);
     impl_->gpu_transfer_failed.store(false, std::memory_order_relaxed);
@@ -2067,13 +2086,14 @@ bool DepthInferencer::init(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     return true;
 }
 
-bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms) {
+bool DepthInferencer::run(ID3D11Texture2D* captured_bgra8, uint64_t capture_timestamp_ms,
+                          uint64_t scene_revision) {
     if (!impl_ || !impl_->env || !impl_->fixed_session(1).session) {
         if (impl_) impl_->set_error("DepthInferencer not initialized");
         return false;
     }
     return impl_->run_once(captured_bgra8, capture_timestamp_ms
-        ? capture_timestamp_ms : DepthInferImpl::steady_milliseconds());
+        ? capture_timestamp_ms : DepthInferImpl::steady_milliseconds(), scene_revision);
 }
 
 void DepthInferencer::set_performance_mode(uint32_t mode) {
@@ -2225,4 +2245,20 @@ float DepthInferencer::depth_crop_w_uv() const {
 
 uint32_t DepthInferencer::consecutive_worker_failures() const {
     return impl_ ? impl_->consecutive_worker_failures.load(std::memory_order_relaxed) : 0;
+}
+
+uint64_t DepthInferencer::published_scene_revision() const {
+    return impl_ && depth_updates_published() > 0
+        ? impl_->published_scene_revision.load(std::memory_order_relaxed) : 0;
+}
+
+bool DepthInferencer::depth_matches_scene(uint64_t revision) const {
+    return revision != 0 && published_scene_revision() == revision;
+}
+
+bool DepthInferencer::depth_work_pending() const {
+    if (!impl_) return false;
+    std::lock_guard<std::mutex> lock(impl_->m);
+    return impl_->input_pending || impl_->worker_running || impl_->output_ready
+        || impl_->stage_count != 0;
 }
