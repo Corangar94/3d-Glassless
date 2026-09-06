@@ -58,7 +58,9 @@ def _git_output(*args: str) -> str | None:
 
 
 def _source_commit(explicit: str | None) -> str:
-    value = explicit or os.environ.get("GITHUB_SHA") or _git_output("rev-parse", "HEAD")
+    # PR workflows may check out the head while GITHUB_SHA names a synthetic merge.
+    # The actual checkout must match the native executable's embedded source identity.
+    value = explicit or _git_output("rev-parse", "HEAD") or os.environ.get("GITHUB_SHA")
     return value or "unknown"
 
 
@@ -270,6 +272,8 @@ def package_windows_release(
     sbom_path: Path | None = None,
 ) -> dict[str, object]:
     _verify_bundle(bundle_dir)
+    from launcher.native_provenance import verify_native_build
+    verify_native_build(bundle_dir / "_internal", expected_commit=commit)
     package_name = f"Glassless3D-{_safe_label(version)}-windows-x64"
     staging = output_dir / package_name
     if staging.exists():

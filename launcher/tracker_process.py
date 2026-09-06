@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from tracker.pose import monotonic_ms as wire_now_ms
 from pathlib import Path
 from typing import Optional
 
@@ -150,6 +151,7 @@ class TrackerProcess(QObject):
         # soon as it starts, and any retained mapping older than this boundary
         # belongs to a previous tracker session.
         launch_started_s = time.monotonic()
+        launch_started_wire_ms = wire_now_ms()
         try:
             proc = subprocess.Popen(
                 self._tracker_command(),
@@ -166,7 +168,7 @@ class TrackerProcess(QObject):
         self._last_ts_time = launch_started_s
         self._session_pose_published = False
         self._poll_admission.reset_session(
-            wire_timestamp_ms(launch_started_s)
+            launch_started_wire_ms
         )
         return True
 
@@ -324,7 +326,7 @@ class TrackerProcess(QObject):
 
         pose_decision = self._poll_admission.evaluate_pose(
             ts,
-            wire_timestamp_ms(now),
+            wire_now_ms(),
         )
         if not pose_decision.accepted:
             self._handle_no_fresh_pose(now)

@@ -388,6 +388,33 @@ def _tilt_filtered_pose(pose: FilteredPose, tilt_deg: float) -> FilteredPose:
     )
 
 
+class MeasurementAdmission:
+    """Explicit validation boundary, extended by packaged jump confirmation.
+
+    Direct integrations retain historical validation. The packaged runtime also
+    requires confidence and capture-age limits before accepting a measurement.
+    """
+    maximum_age_ms: int | None = None
+    minimum_confidence: float = 0.0
+
+    def accept(self, position: HeadPosition | None) -> HeadPosition | None:
+        try:
+            pose = _validated_pose(position)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if pose is None or pose.confidence < self.minimum_confidence:
+            return None
+        if self.maximum_age_ms is not None:
+            age = elapsed_u32_ms(monotonic_ms(), pose.capture_timestamp_ms)
+            if age > self.maximum_age_ms:
+                return None
+        return pose
+
+    def reset(self) -> None:
+        # Stateless; the confirmation decorator owns episode state.
+        pass
+
+
 class TrackingLoop:
     def __init__(
         self,
@@ -405,6 +432,7 @@ class TrackingLoop:
     ) -> None:
         self._tracker = tracker
         self._frame_processor = FrameProcessorAdapter.from_tracker(tracker)
+        self._measurement_admission = MeasurementAdmission()
         self._writer = writer
         self._smoother = smoother
         self._hold_ms = hold_ms
@@ -609,6 +637,8 @@ class TrackingLoop:
 
     def _reset_capture_session(self) -> int:
         """Clear every stateful input derived from the retired webcam handle."""
+        self._frame_processor.reset_result_timeline()
+        self._measurement_admission.reset()
         reset_tracker = getattr(self._tracker, "reset_session", None)
         if callable(reset_tracker):
             reset_tracker()
@@ -795,7 +825,7 @@ class TrackingLoop:
                 self._smoother.set_measurement_noise(
                     _measurement_noise(settings)
                 )
-                measured = _validated_pose(
+                measured = self._measurement_admission.accept(
                     self._process_frame(frame, capture_timestamp_ms)
                 )
                 self._synchronize_tracker_backend_transition()
@@ -815,6 +845,11 @@ class TrackingLoop:
                         or now_ms - self._last_face_ms > self._hold_ms
                     )
                     if expired:
+                        if self._last_face_ms is not None:
+                            self._measurement_admission.reset()
+                            self._pose_step_limiter.reset()
+                            self._last_raw_pos = None
+                            self._last_face_ms = None
                         output = self._neutral_pose()
                         status = "paused"
                     else:

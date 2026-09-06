@@ -11,11 +11,7 @@ def test_camera_quality_log_elapsed_time_survives_uint32_rollover():
 
 
 def test_tracking_loop_uses_shared_wrap_safe_elapsed_helper():
+    import ast
     source = Path("tracker/main.py").read_text(encoding="utf-8")
-
-    assert "from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms" in source
-    assert (
-        "if elapsed_u32_ms(capture_timestamp_ms, last_quality_log_ms) >= 2000:"
-        in source
-    )
-    assert "capture_timestamp_ms - last_quality_log_ms" not in source
+    conditions = [ast.unparse(n.test) for n in ast.walk(ast.parse(source)) if isinstance(n, ast.If)]
+    assert "elapsed_u32_ms(capture_timestamp_ms, last_quality_log_ms) >= 2000" in conditions

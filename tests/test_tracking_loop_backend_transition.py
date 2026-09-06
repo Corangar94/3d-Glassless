@@ -123,7 +123,7 @@ def test_repeated_sync_for_same_generation_is_a_noop():
 def test_tracking_loop_checks_transition_after_backend_processing():
     source = open("tracker/main.py", encoding="utf-8").read()
     measured_block = source.split(
-        "measured = _validated_pose(",
+        "measured = self._measurement_admission.accept(",
         1,
     )[1].split("if measured is not None:", 1)[0]
 

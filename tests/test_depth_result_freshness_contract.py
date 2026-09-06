@@ -33,7 +33,8 @@ def test_depth_source_identity_crosses_every_async_state():
 
     # The worker then transfers the same identity with its tensor and output.
     running = worker.index("running_source = pending_source")
-    ready = worker.index("ready_source = running_source")
+    ready = worker.index("ready_source = g3d::depth::OldestCompositeSource(")
+    assert "tile_sources[tile] = running_source" in worker
     assert running < ready
 
 
@@ -146,10 +147,11 @@ def test_stale_result_does_not_relabel_upload_time_as_source_time():
 
 
 def test_first_window_visibility_requires_accepted_publication():
-    header = _source("overlay/depth_infer.h")
-
-    assert "depth->depth_updates_published() > 0" in header
-    assert "has_frame = false" in header
+    source = _source("overlay/overlay.cpp")
+    visibility = source.split("static void UpdateOverlayVisibility() {", 1)[1].split("\nstatic ", 1)[0]
+    assert "g_depth->depth_updates_published() > 0" in visibility
+    assert "g_depth->depth_age_ms() <= 750" in visibility
+    assert visibility.index("depth_updates_published()") < visibility.index("ShowWindow(")
 
 
 def test_native_freshness_suite_is_registered_with_ctest():

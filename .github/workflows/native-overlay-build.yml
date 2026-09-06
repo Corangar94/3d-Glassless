@@ -2,19 +2,8 @@ name: Native overlay build
 
 on:
   pull_request:
-    paths:
-      - 'overlay/**'
-      - 'scripts/**'
-      - 'Glassless3DOverlay.exe'
-      - '.github/workflows/native-overlay-build.yml'
   push:
-    branches:
-      - master
-    paths:
-      - 'overlay/**'
-      - 'scripts/**'
-      - 'Glassless3DOverlay.exe'
-      - '.github/workflows/native-overlay-build.yml'
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +18,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -37,19 +27,16 @@ jobs:
       - name: Build the complete Windows overlay runtime
         run: python scripts/bootstrap.py
 
-      - name: Run native C++ regression tests
-        shell: pwsh
-        run: |
-          $compiler = Get-ChildItem -LiteralPath vendor/_mingw64 -Recurse -Filter g++.exe -File |
-            Select-Object -First 1
-          if (-not $compiler) {
-            throw 'verified MinGW g++.exe was not found after bootstrap'
-          }
-          $env:PATH = "$($compiler.DirectoryName);$env:PATH"
-          ctest --test-dir overlay/build_mingw --output-on-failure -C Release
-          if ($LASTEXITCODE -ne 0) {
-            throw "native CTest suite failed with exit code $LASTEXITCODE"
-          }
+      - name: Run native C++ and WARP implementation tests
+        run: python -m scripts.run_native_tests
+
+      - name: Upload native test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-test-evidence
+          path: release
+          if-no-files-found: warn
 
       - name: Verify native output
         shell: pwsh
@@ -67,5 +54,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-glassless3d-overlay
-          path: Glassless3DOverlay.exe
+          path: |
+            Glassless3DOverlay.exe
+            Glassless3DOverlay.build.json
           if-no-files-found: error

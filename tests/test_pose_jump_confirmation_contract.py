@@ -25,7 +25,7 @@ def test_jump_confirmation_is_after_existing_measurement_admission():
 
     admission_call = source.index("accepted = method(*args, **kwargs)")
     confirmation_call = source.index(
-        "return self._confirmation.filter(accepted)"
+        "confirmed = self._confirmation.filter(accepted)"
     )
     assert admission_call < confirmation_call
 

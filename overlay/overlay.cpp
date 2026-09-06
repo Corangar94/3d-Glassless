@@ -41,6 +41,8 @@
 
 #include "capture_recovery.h"
 #include "depth_infer.h"
+#include "depth_mode_policy.h"
+#include "depth_cohesion_shader.h"
 #include "parallax_health.h"
 #include "pose_prediction.h"
 
@@ -127,6 +129,8 @@ __CRT_UUID_DECL(g3d::wgc::IDirect3D11CaptureFramePoolStatics2,
 // ── Logging ───────────────────────────────────────────────────────────────
 // Writes to overlay.log next to the exe. One FILE* held open for lifetime.
 static FILE* g_log = nullptr;
+static std::wstring g_logPath;
+static char g_instanceId[96] = {};
 
 static void LogInit() {
     // Write log next to the exe, regardless of the process CWD.
@@ -136,6 +140,7 @@ static void LogInit() {
     if (slash) *(slash + 1) = L'\0';
     wchar_t logPath[MAX_PATH];
     swprintf_s(logPath, MAX_PATH, L"%soverlay.log", exePath);
+    g_logPath = logPath;
     g_log = _wfsopen(logPath, L"w", _SH_DENYNO);  // shared read/write
     if (g_log) {
         setvbuf(g_log, nullptr, _IONBF, 0);  // unbuffered — survives crashes
@@ -144,6 +149,15 @@ static void LogInit() {
 
 static void Log(const char* fmt, ...) {
     if (!g_log) return;
+    if (ftell(g_log) >= 4 * 1024 * 1024) {
+        fclose(g_log);
+        const std::wstring rotated = g_logPath + L".1";
+        _wremove(rotated.c_str());
+        _wrename(g_logPath.c_str(), rotated.c_str());
+        g_log = _wfsopen(g_logPath.c_str(), L"w", _SH_DENYNO);
+        if (!g_log) return;
+        setvbuf(g_log, nullptr, _IONBF, 0);
+    }
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_log, "[%02d:%02d:%02d.%03d] ",
             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
@@ -298,7 +312,7 @@ VS_OUT main(uint id : SV_VertexID) {
 }
 )hlsl";
 
-static const char PS_SRC[] = R"hlsl(
+static const char PS_SRC[] = G3D_DEPTH_COHESION_HLSL R"hlsl(
 cbuffer CB : register(b0) {
     float headX;           // cm, right = positive
     float headY;           // cm, up    = positive
@@ -377,9 +391,7 @@ DepthSample SampleDepthCohesive(float2 screenUV, float dCropW, float2 sceneDdx, 
     float dMin = min(d0, min(min(dl, dr), min(du, dd)));
     float dMax = max(d0, max(max(dl, dr), max(du, dd)));
     float edge = smoothstep(kDepthCohesionLow, kDepthCohesionHigh, dMax - dMin);
-    float localMin = min(d0, min(min(dl, dr), min(du, dd)));
-    float localMax = max(d0, max(max(dl, dr), max(du, dd)));
-    float trimmedMean = max(0.0f, (d0 + dl + dr + du + dd - localMin - localMax) * 0.25f);
+    float trimmedMean = G3DTrimmedMean5(d0, dl, dr, du, dd);
     float localDepth = saturate(trimmedMean);
     DepthSample sample;
     sample.depth = lerp(d0, localDepth, edge * kDepthCohesionBlend);
@@ -1886,7 +1898,7 @@ static void ApplySettings() {
     float sx = 1.0f, sy = 1.0f, dp = 30.0f;
     uint32_t dc = 1;
     uint32_t db = 0;
-    uint32_t dm = 1;
+    uint32_t dm = g3d::depth_mode::DefaultRequestedMode();
     uint32_t stereoLayout = 0;
     uint32_t eyeOrder = 0;
     uint32_t panelWidthPx = 0;
@@ -1911,7 +1923,7 @@ static void ApplySettings() {
         if (s.ipdMm       > 0.0f)     ipdCm = s.ipdMm * 0.1f;
         if (s.deadzoneM   >= 0.0f)    dz_cm = s.deadzoneM * 0.1f;  // mm → cm
         db = s.displayBackend;
-        dm = s.depthMode <= 2 ? s.depthMode : 1;
+        dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);
         stereoLayout = s.stereoLayout <= 1 ? s.stereoLayout : 0;
         eyeOrder = s.eyeOrder <= 1 ? s.eyeOrder : 0;
         panelWidthPx = s.panelWidthPx;
@@ -2132,6 +2144,8 @@ static void UpdateOverlayVisibility() {
     const bool visible = g_captureState == CaptureState::Running
         && g_hasFrame
         && g_depth != nullptr
+        && g_depth->depth_updates_published() > 0
+        && g_depth->depth_age_ms() <= 750
         && (g_targetExePath.empty() || (targetForeground && captureFresh));
     if (visible == g_overlayVisible) return;
     ShowWindow(g_hwnd, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
@@ -2524,13 +2538,6 @@ static void UpdateWgcCapture() {
                 g_hasFrame = true;
                 g_lastCaptureFrameMs = GetTickCount64();
                 ++g_captureFrameSerial;
-                UpdateOverlayVisibility();
-                if (g_depth && !g_depth->run(g_capTex)) {
-                    static int depthFails = 0;
-                    if (++depthFails < 5 || depthFails % 120 == 0) {
-                        Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
-                    }
-                }
             }
         } else {
             LogHR("WGC GetInterface(ID3D11Texture2D)", hr);
@@ -2610,13 +2617,6 @@ static void UpdateCapture() {
     g_hasFrame = true;
     g_lastCaptureFrameMs = GetTickCount64();
     ++g_captureFrameSerial;
-    UpdateOverlayVisibility();
-    if (g_depth && !g_depth->run(g_capTex)) {
-        static int depthFails = 0;
-        if (++depthFails < 5 || depthFails % 120 == 0) {
-            Log("DepthInferencer::run failed (#%d): %s", depthFails, g_depth->last_error());
-        }
-    }
 }
 
 static DWORD CaptureIdleWaitMs() {
@@ -3198,13 +3198,24 @@ static void Frame() {
         TickCaptureRebind();
         UpdateCapture();
     }
+    // Pump completion once per frame, independently of new capture arrivals.
+    // Passing the acquisition timestamp prevents cached pixels being relabelled fresh.
+    if (g_captureState == CaptureState::Running && g_hasFrame && g_depth
+        && !g_depth->run(g_capTex, g_lastCaptureFrameMs)) {
+        Log("Depth pipeline failed: %s", g_depth->last_error());
+        g_hasFrame = false;
+        SetCaptureState(CaptureState::Unavailable, "depth_pipeline_failed");
+        UpdateOverlayVisibility();
+        PostQuitMessage(72);  // bounded restart budget belongs to the launcher
+        return;
+    }
     UpdateOverlayVisibility();
 
     // Convert upstream tracking/depth health into a continuous comfort
     // envelope. Pose confidence/age degrades parallax before the hard stale
     // cutoff, while recovery ramps back more slowly to avoid a visible pop.
     const uint32_t depthAgeMs = g_depth ? g_depth->depth_age_ms() : 0u;
-    const bool depthReady = g_depth && g_depth->inferences_completed() > 0;
+    const bool depthReady = g_depth && g_depth->depth_updates_published() > 0;
     const g3d::parallax::HealthInputs healthInputs = {
         poseFresh,
         depthReady,
@@ -3229,7 +3240,7 @@ static void Frame() {
     // Periodic summary based on wall time. Capture recovery can intentionally
     // throttle the loop, so frame counts are not a reliable one-second clock.
     static int lastChanges = 0;
-    static uint64_t lastInferences = 0;
+    static uint64_t lastPublications = 0;
     static uint64_t lastSummaryMs = GetTickCount64();
     const uint64_t summaryNowMs = GetTickCount64();
     const uint64_t summaryElapsedMs = summaryNowMs - lastSummaryMs;
@@ -3239,12 +3250,12 @@ static void Frame() {
             (static_cast<uint64_t>(changesSinceSummary) * 1000u) / summaryElapsedMs);
         lastChanges = shmChanges;
         uint64_t infNow = g_depth ? g_depth->inferences_completed() : 0;
-        const uint64_t inferenceDelta = infNow >= lastInferences
-            ? infNow - lastInferences
-            : infNow;  // DepthInferencer was recreated during recovery.
+        const uint64_t pubNow = g_depth ? g_depth->depth_updates_published() : 0;
+        const uint64_t publicationDelta = pubNow >= lastPublications
+            ? pubNow - lastPublications : pubNow;
         const int depthHz = static_cast<int>(
-            (inferenceDelta * 1000u) / summaryElapsedMs);
-        lastInferences = infNow;
+            (publicationDelta * 1000u) / summaryElapsedMs);
+        lastPublications = pubNow;
         lastSummaryMs = summaryNowMs;
         const char* shmStatus;
         if (!g_shmView)                 shmStatus = "NO_SHM (tracker not running?)";
@@ -3253,7 +3264,7 @@ static void Frame() {
         Log("Frame#%d acq[ok=%d timeout=%d lost=%d other=%d] shm[%s reads=%d changes=%d (%d/s) ts=%u] "
             "depth[total=%llu %dHz mode=%s active=%s profile=%dx%d tiles=%d inference_ms=%.2f blend_ms=%.1f age_ms=%u] timing[capture_cpu=%.3f draw_gpu=%.3f present_cpu=%.3f frame_cpu=%.3f] backend=%u layout=%u eye_order=%u ipd=%.2f focus=%.2f panel=%ux%u tracking=%u "
             "head=(%.2f,%.2f,%.2f) rest=(%.2f,%.2f) rel=(%.2f,%.2f) wobble=%.2f strength=%.2f depth=%.2f "
-            "hasFrame=%d capture=%s capture_reason=%s",
+            "hasFrame=%d capture=%s capture_reason=%s instance=%s depth_published=%llu depth_failures=%u",
             frameCount, g_acquireOk, g_acquireTimeout, g_acquireLost, g_acquireOther,
             shmStatus, shmReads, shmChanges, changesThisSec, ts,
             (unsigned long long)infNow, depthHz, DepthModeName(g_depthMode),
@@ -3267,7 +3278,9 @@ static void Frame() {
             g_lastCaptureCpuMs, g_lastGpuMs, g_lastPresentCpuMs, g_lastFrameCpuMs, g_displayBackend,
             g_stereoLayout, g_eyeOrder, g_ipdCm, g_focusPlaneCm, g_panelWidthPx, g_panelHeightPx, g_trackingMode,
             hx, hy, hz, g_restX, g_restY, dx, dy, wobble, g_strength, g_virtualDepth,
-            g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason);
+            g_hasFrame ? 1 : 0, CaptureStateName(g_captureState), g_captureReason,
+            g_instanceId, static_cast<unsigned long long>(pubNow),
+            g_depth ? g_depth->consecutive_worker_failures() : 0u);
         Log("ParallaxHealth scale=%.3f target=%.3f pose_fresh=%d pose_source=%s pose_confidence=%.3f pose_age_ms=%u depth_ready=%d depth_age_ms=%u",
             g_parallaxHealthScale,
             g_parallaxHealthTarget,
@@ -3537,8 +3550,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
         return 2;
     }
 
+    const DWORD idLength = GetEnvironmentVariableA("G3D_INSTANCE_ID", g_instanceId, sizeof(g_instanceId));
+    bool validId = idLength > 0 && idLength < sizeof(g_instanceId);
+    if (validId) for (DWORD i = 0; i < idLength; ++i) {
+        const char c = g_instanceId[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+            || (c >= '0' && c <= '9') || c == '-' || c == '_')) validId = false;
+    }
+    if (!validId) snprintf(g_instanceId, sizeof(g_instanceId), "%lu-%llu",
+        GetCurrentProcessId(), static_cast<unsigned long long>(GetTickCount64()));
     LogInit();
     Log("=== Glassless3D Overlay starting ===");
+    Log("Build source=%s instance=%s", G3D_SOURCE_COMMIT, g_instanceId);
     Log("cmdline: '%s'", cmd ? cmd : "");
     Log("CreateMutex: handle=%p GLE=%lu", mutex, mutexError);
     EnablePerMonitorV2DpiAwareness();
@@ -3597,6 +3620,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
             DispatchMessageW(&msg);
             if (msg.message == WM_QUIT) { Log("Main loop: WM_QUIT"); g_running = false; }
         }
+        if (!g_running) break;
         if (g_frameLatencyWaitable && g_captureState == CaptureState::Running) {
             MsgWaitForMultipleObjectsEx(1, &g_frameLatencyWaitable, 16,
                 QS_ALLINPUT, MWMO_INPUTAVAILABLE);
@@ -3615,5 +3639,5 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR cmd, int) {
     if (mutex) CloseHandle(mutex);
     if (SUCCEEDED(hrCo)) CoUninitialize();
     LogClose();
-    return 0;
+    return static_cast<int>(msg.wParam);
 }

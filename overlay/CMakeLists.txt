@@ -2,8 +2,13 @@ cmake_minimum_required(VERSION 3.16)
 project(Glassless3DOverlay CXX)
 
 include(CTest)
+option(G3D_BUILD_OVERLAY "Build the Windows desktop overlay" ${WIN32})
+option(G3D_BUILD_GPU_TESTS "Build real Windows D3D shader/inference tests" ${WIN32})
 
 if(BUILD_TESTING)
+    add_executable(audit_policy_tests audit_policy_tests.cpp)
+    target_compile_features(audit_policy_tests PRIVATE cxx_std_17)
+    add_test(NAME audit_policy_tests COMMAND audit_policy_tests)
     add_executable(capture_recovery_tests
         capture_recovery.cpp
         capture_recovery_tests.cpp
@@ -42,6 +47,10 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT G3D_BUILD_OVERLAY)
+    return()  # Portable policy tests need no Windows SDK or downloaded models.
+endif()
+
 # Vendor paths populated by scripts/bootstrap.py (steps 4/7 and 5/7).
 set(ORT_DIR "${CMAKE_SOURCE_DIR}/../vendor/onnxruntime"
     CACHE PATH "ONNX Runtime (DirectML) root")
@@ -59,71 +68,21 @@ if(NOT EXISTS "${DML_DIR}/lib/DirectML.dll")
         "Run: python scripts/bootstrap.py")
 endif()
 
-# overlay.cpp is intentionally kept as the readable monolithic Windows source.
-# Configure one build copy with the centralized depth-mode policy. Each code
-# anchor must occur exactly once: if the source changes, configuration fails
-# instead of silently losing automatic mode or rewriting another expression.
-function(g3d_replace_overlay_once variable needle replacement description)
-    set(before "${${variable}}")
-    string(LENGTH "${before}" before_length)
-    string(LENGTH "${needle}" needle_length)
-    if(needle_length EQUAL 0)
-        message(FATAL_ERROR
-            "Could not configure overlay depth mode: empty ${description}")
-    endif()
-    string(REPLACE "${needle}" "" without_needle "${before}")
-    string(LENGTH "${without_needle}" without_length)
-    math(EXPR match_count
-        "(${before_length} - ${without_length}) / ${needle_length}")
-    if(NOT match_count EQUAL 1)
-        message(FATAL_ERROR
-            "Could not configure overlay depth mode: expected one ${description}, found ${match_count}")
-    endif()
-    string(REPLACE "${needle}" "${replacement}" after "${before}")
-    set(${variable} "${after}" PARENT_SCOPE)
-endfunction()
-
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp"
-)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp" G3D_OVERLAY_SOURCE_TEXT)
-
-# Prepending the small policy header avoids a line-ending-sensitive multi-line
-# include anchor. cstdint is the only transitive include, so WIN32_LEAN_AND_MEAN
-# still precedes windows.h in the original source body.
-set(G3D_OVERLAY_SOURCE_TEXT
-    "#include \"depth_mode_policy.h\"\n${G3D_OVERLAY_SOURCE_TEXT}"
-)
-g3d_replace_overlay_once(
-    G3D_OVERLAY_SOURCE_TEXT
-    "uint32_t dm = 1;"
-    "uint32_t dm = g3d::depth_mode::DefaultRequestedMode();"
-    "default requested mode anchor"
-)
-g3d_replace_overlay_once(
-    G3D_OVERLAY_SOURCE_TEXT
-    "dm = s.depthMode <= 2 ? s.depthMode : 1;"
-    "dm = g3d::depth_mode::NormalizeRequestedMode(s.depthMode);"
-    "shared settings mode normalization anchor"
-)
-
-set(G3D_CONFIGURED_OVERLAY_SOURCE
-    "${CMAKE_CURRENT_BINARY_DIR}/overlay.configured.cpp"
-)
-file(WRITE "${G3D_CONFIGURED_OVERLAY_SOURCE}" "${G3D_OVERLAY_SOURCE_TEXT}")
-
+# Compile canonical source directly: no string replacements or Win32 API macros.
 add_executable(Glassless3DOverlay WIN32
-    "${G3D_CONFIGURED_OVERLAY_SOURCE}"
+    overlay.cpp
     depth_infer.cpp
     capture_recovery.cpp
 )
-
-# Only the configured overlay source owns g_depth/g_capTex/g_hasFrame. Enable
-# the visibility guard there without leaking its ShowWindow wrapper into
-# depth_infer.cpp.
-set_source_files_properties("${G3D_CONFIGURED_OVERLAY_SOURCE}" PROPERTIES
-    COMPILE_DEFINITIONS G3D_OVERLAY_SHOWWINDOW_GUARD
-)
+execute_process(COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    OUTPUT_VARIABLE G3D_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT G3D_SOURCE_COMMIT MATCHES "^[0-9a-f]+$")
+    set(G3D_SOURCE_COMMIT "unknown")
+endif()
+target_compile_definitions(Glassless3DOverlay PRIVATE
+    G3D_SOURCE_COMMIT="${G3D_SOURCE_COMMIT}")
 
 target_compile_definitions(Glassless3DOverlay PRIVATE UNICODE _UNICODE)
 
@@ -155,12 +114,47 @@ else()
     target_compile_options(Glassless3DOverlay PRIVATE $<$<CONFIG:Release>:-O2>)
 endif()
 
-# Copy exe + runtime DLLs to project root after build.
-# Runtime DLLs must sit next to the exe: onnxruntime.dll, DirectML.dll.
-# `exit 0` keeps the build green even if the target exe is running (locked).
+# Deployment is part of build success; locked/stale destinations must fail.
 add_custom_command(TARGET Glassless3DOverlay POST_BUILD
-    COMMAND cmd /c "copy /Y \"$<TARGET_FILE:Glassless3DOverlay>\" \"${CMAKE_SOURCE_DIR}\\..\\Glassless3DOverlay.exe\" >nul 2>&1 & exit 0"
-    COMMAND cmd /c "copy /Y \"${ORT_DIR}\\lib\\onnxruntime.dll\" \"${CMAKE_SOURCE_DIR}\\..\\onnxruntime.dll\" >nul 2>&1 & exit 0"
-    COMMAND cmd /c "copy /Y \"${DML_DIR}\\lib\\DirectML.dll\" \"${CMAKE_SOURCE_DIR}\\..\\DirectML.dll\" >nul 2>&1 & exit 0"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<TARGET_FILE:Glassless3DOverlay>"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../Glassless3DOverlay.exe"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${ORT_DIR}/lib/onnxruntime.dll"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../onnxruntime.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${DML_DIR}/lib/DirectML.dll"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../DirectML.dll"
+    COMMAND ${CMAKE_COMMAND}
+        "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}/.."
+        "-DSOURCE_COMMIT=${G3D_SOURCE_COMMIT}"
+        "-DCOMPILER=${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/write_build_manifest.cmake"
     VERBATIM
 )
+
+if(BUILD_TESTING AND G3D_BUILD_GPU_TESTS)
+    add_executable(shader_numeric_tests shader_numeric_tests.cpp)
+    target_compile_features(shader_numeric_tests PRIVATE cxx_std_17)
+    target_link_libraries(shader_numeric_tests PRIVATE d3d11 d3dcompiler dxgi)
+    add_test(NAME shader_numeric_tests
+        COMMAND shader_numeric_tests "${CMAKE_CURRENT_SOURCE_DIR}/overlay.cpp")
+    set_tests_properties(shader_numeric_tests PROPERTIES TIMEOUT 30)
+
+    add_executable(depth_integration_tests depth_integration_tests.cpp depth_infer.cpp)
+    target_compile_features(depth_integration_tests PRIVATE cxx_std_17)
+    target_compile_definitions(depth_integration_tests PRIVATE UNICODE _UNICODE)
+    target_include_directories(depth_integration_tests PRIVATE
+        "${ORT_DIR}/include" "${DML_DIR}/include")
+    target_link_libraries(depth_integration_tests PRIVATE
+        d3d11 d3d12 d3dcompiler dxgi ole32
+        "${ORT_DIR}/lib/onnxruntime.lib" "${DML_DIR}/lib/DirectML.lib")
+    add_custom_command(TARGET depth_integration_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_DIR}/lib/onnxruntime.dll"
+            "$<TARGET_FILE_DIR:depth_integration_tests>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DML_DIR}/lib/DirectML.dll"
+            "$<TARGET_FILE_DIR:depth_integration_tests>"
+        VERBATIM)
+    add_test(NAME depth_integration_tests COMMAND depth_integration_tests)
+    set_tests_properties(depth_integration_tests PROPERTIES TIMEOUT 90)
+endif()

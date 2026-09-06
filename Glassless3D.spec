@@ -18,6 +18,7 @@ opencv_data = collect_data_files("cv2", includes=["data/*.xml"])
 runtime_datas = [
     # Standalone non-injecting native runtime and required models.
     ("Glassless3DOverlay.exe", "."),
+    ("Glassless3DOverlay.build.json", "."),
     ("models/face_landmarker.task", "models"),
     ("models/depth_anything_v2_small_fp16.onnx", "models"),
     # ReShade explicitly requests that distributors link users to reshade.me

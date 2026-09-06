@@ -227,6 +227,7 @@ class FaceTracker:
             detected.box,
         )
         if not compatible:
+            self._clear_eye_memory()
             corrected_box = detected.box
         else:
             assert predicted is not None
@@ -255,6 +256,7 @@ class FaceTracker:
         )
 
     def _observe(self, gray: np.ndarray) -> FaceObservation | None:
+        self._last_motion_error = ""
         try:
             predicted = self._motion.track(gray)
         except Cv2FallbackTrackingError as error:
@@ -308,8 +310,6 @@ class FaceTracker:
         except Cv2FallbackTrackingError as error:
             self._last_motion_error = f"{type(error).__name__}: {error}"
             self._motion.reset()
-        else:
-            self._last_motion_error = ""
         return corrected
 
     def _clear_eye_memory(self) -> None:

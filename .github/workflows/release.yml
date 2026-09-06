@@ -20,6 +20,8 @@ on:
         type: boolean
 
 permissions:
+  checks: read
+  actions: read
   contents: write
   id-token: write
   attestations: write
@@ -30,6 +32,7 @@ jobs:
     timeout-minutes: 75
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
       TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
       GH_TOKEN: ${{ github.token }}
@@ -38,6 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -46,15 +50,17 @@ jobs:
           cache: pip
 
       - name: Install runtime, packaging, audit, and test dependencies
-        run: |
-          python -m pip install --disable-pip-version-check -e ".[dev]"
-          python -m pip install --disable-pip-version-check pip-audit==2.10.1
+        run: python -m scripts.locked_environment
+
+      - name: Require successful gates for the exact source SHA
+        run: python -m scripts.verify_ci_evidence
 
       - name: Run complete Python suite
         run: |
           python -m pip check
           python -m compileall -q launcher tracker scripts tests
           python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run deterministic software acceptance
         run: >-
@@ -76,6 +82,9 @@ jobs:
 
       - name: Build hash-pinned native runtime
         run: python scripts/bootstrap.py
+
+      - name: Run native production implementation tests
+        run: python -m scripts.run_native_tests
 
       - name: Build one-folder standalone launcher
         run: python -m PyInstaller --clean --noconfirm Glassless3D.spec

@@ -33,3 +33,11 @@ depth_preview.png
 reshade-assets.json
 .claude/
 .superpowers/
+
+Glassless3DOverlay.build.json
+overlay.log.1
+release/
+software_acceptance/
+
+audit-evidence/
+recovered-*.patch

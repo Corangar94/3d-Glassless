@@ -23,7 +23,9 @@ def test_launch_boundary_is_captured_before_child_creation():
     reset = launch.index("self._poll_admission.reset_session(")
 
     assert launch_time < popen < readers < reset_flag < reset
-    assert "wire_timestamp_ms(launch_started_s)" in launch
+    assert "launch_started_wire_ms = wire_now_ms()" in launch
+    assert launch.index("launch_started_wire_ms = wire_now_ms()") < popen
+    assert "launch_started_wire_ms" in launch.split("reset_session(", 1)[1]
     assert "self._start_time = launch_started_s" in launch
 
 

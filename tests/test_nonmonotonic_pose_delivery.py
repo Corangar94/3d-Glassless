@@ -219,5 +219,6 @@ def test_repeated_duplicate_results_cannot_keep_tracking_alive(monkeypatch):
 
     assert writer.states == ["tracking", "hold", "paused", "paused"]
     assert filter_.inputs == [first]
-    assert loop._last_face_ms == 1000.0
+    # Expired faces clear the episode; duplicates must not retain a live anchor.
+    assert loop._last_face_ms is None
     assert capture.release_count == 1

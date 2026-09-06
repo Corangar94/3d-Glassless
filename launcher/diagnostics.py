@@ -38,6 +38,7 @@ from tracker.display_backends import (
     built_in_backends,
 )
 from tracker.shared_memory import TrackingStateReader
+from tracker.pose import monotonic_ms, elapsed_u32_ms
 
 _DEPTH_HZ_READY_MIN = 3
 _OVERLAY_LOG_FRESH_SECONDS = 30.0
@@ -86,6 +87,9 @@ class OverlayRuntimeSummary:
     tracking_mode: int | None = None
     capture_state: str | None = None
     capture_reason: str | None = None
+    instance_id: str | None = None
+    depth_published: int | None = None
+    depth_failures: int | None = None
 
 
 @dataclass(frozen=True)
@@ -740,8 +744,7 @@ def _read_tracking_state() -> tuple[str | None, bool]:
     if sample is None:
         return None, False
     state, timestamp_ms = sample
-    now_ms = int(time.monotonic_ns() // 1_000_000) & 0xFFFF_FFFF
-    age_ms = (now_ms - timestamp_ms) & 0xFFFF_FFFF
+    age_ms = elapsed_u32_ms(monotonic_ms(), timestamp_ms)
     return state, age_ms <= 800
 
 
@@ -931,6 +934,9 @@ def _summary_to_dict(summary: OverlayRuntimeSummary | None) -> dict[str, object]
     if summary is None:
         return None
     return {
+        "instance_id": summary.instance_id,
+        "depth_published": summary.depth_published,
+        "depth_failures": summary.depth_failures,
         "frame_count": summary.frame_count,
         "acq_ok": summary.acq_ok,
         "acq_timeout": summary.acq_timeout,
@@ -971,7 +977,15 @@ def parse_overlay_summary_line(line: str) -> OverlayRuntimeSummary | None:
     match = _SUMMARY_RE.search(line)
     if match is None:
         return None
+    telemetry = re.search(
+        r"\binstance=(?P<instance>[A-Za-z0-9_-]{1,96})\s+"
+        r"depth_published=(?P<published>\d+)\s+depth_failures=(?P<failures>\d+)",
+        line,
+    )
     return OverlayRuntimeSummary(
+        instance_id=telemetry.group("instance") if telemetry else None,
+        depth_published=int(telemetry.group("published")) if telemetry else None,
+        depth_failures=int(telemetry.group("failures")) if telemetry else None,
         frame_count=int(match.group("frame")),
         acq_ok=int(match.group("ok")),
         acq_timeout=int(match.group("timeout")),
@@ -1040,13 +1054,25 @@ def _find_overlay_log(overlay_exe: Path | None) -> Path | None:
     return None
 
 
+_OVERLAY_TAIL_BYTES = 64 * 1024
+
+
 def _latest_overlay_summary(path: Path) -> OverlayRuntimeSummary | None:
+    """Read a bounded tail; GUI cost is independent of session/log duration."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+        with path.open("rb") as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            start = max(0, size - _OVERLAY_TAIL_BYTES)
+            stream.seek(start)
+            tail = stream.read(_OVERLAY_TAIL_BYTES)
     except OSError:
         return None
-    for line in reversed(lines):
+    if start:
+        # The first fragment may begin in the middle of a summary or UTF-8
+        # character. It is not a complete record and must not be admitted.
+        _, _, tail = tail.partition(b"\n")
+    for line in reversed(tail.decode("utf-8", errors="replace").splitlines()):
         summary = parse_overlay_summary_line(line)
         if summary is not None:
             return summary
