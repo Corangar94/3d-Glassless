@@ -90,7 +90,7 @@ def test_rejected_completion_resets_temporal_history_before_next_stage():
         "reset_temporal_depth_history_after_rejection()"
     )
     commit = run_once.index("publish_freshness_snapshot()")
-    worker_gate = run_once.index("if (worker_busy) return true;")
+    worker_gate = run_once.index("if (worker_busy) {")
     staging = run_once.index("stage_sources[stage_write]")
 
     assert decision < reset < commit < worker_gate < staging

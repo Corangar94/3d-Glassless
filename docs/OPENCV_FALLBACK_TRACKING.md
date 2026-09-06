@@ -78,3 +78,5 @@ These defaults are constructor parameters on `tracker.face_tracker_cv2.FaceTrack
 - OpenCV XML files under `cv2/data`.
 
 This keeps the face and eye cascades available in the standalone Windows package even when MediaPipe is not the active backend.
+
+By default, cascades remain authoritative and run every five frames while optical flow carries the ROI between detections.

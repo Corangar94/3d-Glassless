@@ -79,4 +79,5 @@ def test_max_profile_resources_are_reused_across_modes():
     assert "kMaxModelHeight = 392" in source
     assert "sd.Width = kMaxModelWidth * tile_count" in source
     assert "sd.Height = kMaxModelHeight" in source
-    assert "render_compact(captured, requested)" in source
+    assert "render_compact(captured, captured_profile)" in source
+    assert "retained_compact_bgra" in source

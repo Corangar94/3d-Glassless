@@ -237,7 +237,7 @@ def test_unavailable_settings_do_not_block_parent_filter(monkeypatch):
     pose = object()
 
     assert loop._update_filter(pose) == "filtered"
-    parent.assert_called_once_with(loop, pose)
+    parent.assert_called_once_with(pose)
     assert smoother.measurement_noise_values == []
 
 

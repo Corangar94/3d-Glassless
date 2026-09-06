@@ -74,7 +74,7 @@ def test_existing_admission_rejection_never_reaches_confirmation():
     composite = _ConfirmedMeasurementAdmission(admission, confirmation)
 
     assert composite.accept(_pose(1000), 1000) is None
-    confirmation.filter.assert_called_once_with(None)
+    confirmation.filter.assert_not_called()
 
 
 def test_composite_reset_resets_both_boundaries_and_forwards_result():
@@ -161,39 +161,31 @@ def test_missing_config_uses_safe_defaults(tmp_path, monkeypatch):
     assert any("using safe defaults" in message for message in logs)
 
 
-def test_stable_runtime_wraps_measurement_admission_after_super_init(monkeypatch):
-    admission = _Admission()
+class _RuntimeTracker:
+    def process_frame(self, _frame, *, capture_timestamp_ms):
+        return HeadPosition(
+            x_cm=0.0, y_cm=0.0, z_cm=60.0,
+            confidence=0.9, capture_timestamp_ms=capture_timestamp_ms,
+        )
 
-    def fake_latest_init(self, *args, **kwargs):
-        self._measurement_admission = admission
 
-    monkeypatch.setattr(
-        pose_stability_runtime.LatestFrameTrackingLoop,
-        "__init__",
-        fake_latest_init,
-    )
+class _RuntimeWriter:
+    def write(self, **_values):
+        pass
 
-    loop = StableLatestFrameTrackingLoop(
+
+def test_stable_runtime_constructs_on_real_frame_pipeline():
+    from tracker.live_filter_tuning_runtime import LiveFilterTuningTrackingLoop
+    from tracker.pose_filter import AdaptivePoseFilter
+
+    loop = LiveFilterTuningTrackingLoop(
+        tracker=_RuntimeTracker(), writer=_RuntimeWriter(),
+        smoother=AdaptivePoseFilter(),
         pose_jump_confirmation_policy=PoseJumpConfirmationPolicy(),
+        live_filter_settings_reader=None,
     )
-
-    assert isinstance(
-        loop._measurement_admission,
-        _ConfirmedMeasurementAdmission,
-    )
-    assert loop._measurement_admission._admission is admission
     assert loop.pose_jump_confirmation_policy == PoseJumpConfirmationPolicy()
-
-
-def test_missing_measurement_admission_boundary_fails_closed(monkeypatch):
-    monkeypatch.setattr(
-        pose_stability_runtime.LatestFrameTrackingLoop,
-        "__init__",
-        lambda self, *args, **kwargs: None,
-    )
-
-    with pytest.raises(RuntimeError, match="admission boundary"):
-        StableLatestFrameTrackingLoop()
+    assert not hasattr(loop, "_measurement_admission")
 
 
 def test_runtime_main_selects_complete_live_tuning_stack(monkeypatch):

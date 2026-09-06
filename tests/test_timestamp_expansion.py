@@ -60,5 +60,7 @@ def test_face_tracker_uses_extended_timeline_only_for_async_submission():
     assert "media_timestamp_ms = expand_u32_timestamp(" in source
     assert "if media_timestamp_ms is None:" in source
     assert "self._landmarker.detect_async(image, media_timestamp_ms)" in source
-    assert "return self._pose_from_result(result, w, h, wire_timestamp_ms)" in source
-    assert "capture_timestamp_ms=int(timestamp_ms) & 0xFFFF_FFFF" in source
+    assert "prepared_width," in source
+    assert "prepared_height," in source
+    assert "wire_timestamp_ms," in source
+    assert "capture_timestamp_ms=normalize_wire_timestamp(timestamp_ms)" in source

@@ -70,3 +70,6 @@ def test_static_capture_keeps_accepted_depth_healthy_without_masking_active_stal
     assert "effectiveDepthAgeMs" in source
     assert "DepthAgeForHealth(" in source
     assert "depth_updates_published() > 0" in source
+    assert "depthMatchesHeldFrame" in source
+    assert "latest_depth_generation()" in source
+    assert "latest_capture_generation()" in source

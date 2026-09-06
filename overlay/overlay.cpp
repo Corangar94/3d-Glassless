@@ -668,6 +668,7 @@ static const void*               g_stateView = nullptr;
 // far-plane texture remains available only for shader diagnostics and recovery.
 static DepthInferencer*          g_depth       = nullptr;
 static bool                      g_depthRecoveryPending = false;
+static bool                      g_depthRecoveryEpisodeActive = false;
 static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=1.0 diagnostic fallback
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
 static ID3D11Query*              g_gpuDisjoint = nullptr;
@@ -2154,6 +2155,7 @@ static void MarkDepthFailure() {
         static_cast<unsigned long long>(failures),
         g_depth ? g_depth->last_error() : "depth unavailable");
     g_depthRecoveryPending = true;
+    g_depthRecoveryEpisodeActive = true;
 }
 
 static void DestroyCaptureResources() {
@@ -2344,7 +2346,9 @@ static void TickCaptureRebind() {
             SetCaptureState(CaptureState::Unavailable, "depth_unavailable");
             return;
         }
-        g_rebindRetry.Reset(GetTickCount64());
+        if (!g_depthRecoveryEpisodeActive) {
+            g_rebindRetry.Reset(GetTickCount64());
+        }
         const char* boundReason = usingWgc ? "bound_target_wgc" : "bound_desktop";
         SetCaptureState(CaptureState::Running, boundReason);
     } else if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
@@ -3203,6 +3207,12 @@ static void Frame() {
             MarkDepthFailure();
         }
     }
+    if (g_depthRecoveryEpisodeActive && g_depth
+        && g_depth->depth_updates_published() > 0) {
+        g_depthRecoveryEpisodeActive = false;
+        g_rebindRetry.Reset(GetTickCount64());
+        Log("Depth recovery confirmed by a published inference result");
+    }
     if (g_depthRecoveryPending) {
         g_depthRecoveryPending = false;
         QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed");
@@ -3220,10 +3230,19 @@ static void Frame() {
     const uint32_t captureAgeMs = captureAge64 > UINT32_MAX
         ? UINT32_MAX
         : static_cast<uint32_t>(captureAge64);
+    const uint64_t depthGeneration = g_depth
+        ? g_depth->latest_depth_generation() : 0;
+    const uint64_t captureGeneration = g_depth
+        ? g_depth->latest_capture_generation() : 0;
+    const bool depthMatchesHeldFrame =
+        g_captureState == CaptureState::Running
+        && g_hasFrame
+        && depthGeneration != 0
+        && depthGeneration == captureGeneration;
     const uint32_t effectiveDepthAgeMs = g3d::parallax::DepthAgeForHealth(
         depthAgeMs,
         captureAgeMs,
-        g_captureState == CaptureState::Running && g_hasFrame);
+        depthMatchesHeldFrame);
     const g3d::parallax::HealthInputs healthInputs = {
         poseFresh,
         depthReady,

@@ -227,6 +227,7 @@ class FaceTracker:
             detected.box,
         )
         if not compatible:
+            self._clear_eye_memory()
             corrected_box = detected.box
         else:
             assert predicted is not None
@@ -261,6 +262,8 @@ class FaceTracker:
             self._last_motion_error = f"{type(error).__name__}: {error}"
             self._motion.reset()
             predicted = None
+        else:
+            self._last_motion_error = ""
 
         detect_due = (
             predicted is None
@@ -308,14 +311,13 @@ class FaceTracker:
         except Cv2FallbackTrackingError as error:
             self._last_motion_error = f"{type(error).__name__}: {error}"
             self._motion.reset()
-        else:
-            self._last_motion_error = ""
         return corrected
 
     def _clear_eye_memory(self) -> None:
         self._eye_ratio = None
         self._eye_center_ratio = None
         self._eye_roll_deg = 0.0
+        self._eye_age_frames = 0
 
     def _remember_fresh_eyes(
         self,

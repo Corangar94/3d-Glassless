@@ -18,7 +18,7 @@ def test_callback_order_is_checked_before_and_after_pose_conversion():
         "callback_order.accept_publication(timestamp)"
     )
     publication = callback.index("self._latest_pose = pose")
-    health = callback.rindex("self._async_watchdog.record_callback(")
+    health = callback.rindex("watchdog.record_callback(")
 
     assert precheck < conversion < final_claim < publication < health
 
@@ -37,7 +37,7 @@ def test_final_claim_and_publication_share_the_same_tracker_lock():
     locked = post_conversion.split("with self._lock:", 1)[1]
     assert "callback_order.accept_publication(timestamp)" in locked
     assert "self._latest_pose = pose" in locked
-    assert "self._async_watchdog.record_callback(" in locked
+    assert "watchdog.record_callback(" in locked
 
 
 def test_obsolete_conversion_errors_are_filtered_before_watchdog_recording():
@@ -54,9 +54,10 @@ def test_obsolete_conversion_errors_are_filtered_before_watchdog_recording():
     relevance = error_path.index(
         "self._callback_order_gate_locked().is_newer("
     )
-    health = error_path.index("self._async_watchdog.record_callback(")
+    health = error_path.index("watchdog.record_callback(")
     assert relevance < health
-    assert "if current and self._async_watchdog is not None:" in error_path
+    assert 'watchdog = getattr(self, "_async_watchdog", None)' in error_path
+    assert "if current and watchdog is not None:" in error_path
 
 
 def test_session_reset_preserves_callback_order_timeline():

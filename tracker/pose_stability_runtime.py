@@ -39,6 +39,8 @@ class _ConfirmedMeasurementAdmission:
     ) -> Any:
         method = getattr(self._admission, method_name)
         accepted = method(*args, **kwargs)
+        if accepted is None:
+            return None
         return self._confirmation.filter(accepted)
 
     def accept(self, *args: object, **kwargs: object) -> Any:
@@ -55,6 +57,8 @@ class _ConfirmedMeasurementAdmission:
         if not callable(admission):
             raise TypeError("measurement admission boundary is not callable")
         accepted = admission(*args, **kwargs)
+        if accepted is None:
+            return None
         return self._confirmation.filter(accepted)
 
     def reset(self, *args: object, **kwargs: object) -> Any:
@@ -106,15 +110,14 @@ class StableLatestFrameTrackingLoop(LatestFrameTrackingLoop):
         )
         self._pose_jump_confirmation = PoseJumpConfirmationGate(policy)
         super().__init__(*args, **kwargs)
-        admission = getattr(self, "_measurement_admission", None)
-        if admission is None:
-            raise RuntimeError(
-                "TrackingLoop measurement-admission boundary is unavailable"
-            )
-        self._measurement_admission = _ConfirmedMeasurementAdmission(
-            admission,
-            self._pose_jump_confirmation,
-        )
+
+    def _process_frame(self, frame: object, capture_timestamp_ms: int):
+        accepted = super()._process_frame(frame, capture_timestamp_ms)
+        return self._pose_jump_confirmation.filter(accepted)
+
+    def _reset_capture_session(self) -> int:
+        self._pose_jump_confirmation.reset()
+        return super()._reset_capture_session()
 
     @property
     def pose_jump_confirmation_policy(self) -> PoseJumpConfirmationPolicy:

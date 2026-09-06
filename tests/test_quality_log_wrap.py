@@ -14,8 +14,9 @@ def test_tracking_loop_uses_shared_wrap_safe_elapsed_helper():
     source = Path("tracker/main.py").read_text(encoding="utf-8")
 
     assert "from tracker.pose import FilteredPose, elapsed_u32_ms, monotonic_ms" in source
-    assert (
-        "if elapsed_u32_ms(capture_timestamp_ms, last_quality_log_ms) >= 2000:"
-        in source
-    )
+    quality = source.split("if self._camera_quality_monitor is not None:", 1)[1]
+    assert "elapsed_u32_ms(" in quality
+    assert "capture_timestamp_ms," in quality
+    assert "last_quality_log_ms," in quality
+    assert ">= 2000" in quality
     assert "capture_timestamp_ms - last_quality_log_ms" not in source

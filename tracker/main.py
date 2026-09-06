@@ -51,7 +51,7 @@ _CAMERA_BACKENDS: tuple[tuple[int | None, str], ...] = (
 # The packaged tracker passes the longer application policy from config.yaml.
 _DIRECT_LOOP_RECONNECT_POLICY = CameraReconnectPolicy(
     immediate_retries=1,
-    max_failures=2,
+    max_failures=len(_CAMERA_BACKENDS),
     base_delay_s=0.0,
     max_delay_s=0.0,
     max_outage_s=5.0,
@@ -609,6 +609,7 @@ class TrackingLoop:
 
     def _reset_capture_session(self) -> int:
         """Clear every stateful input derived from the retired webcam handle."""
+        self._frame_processor.reset_result_timeline()
         reset_tracker = getattr(self._tracker, "reset_session", None)
         if callable(reset_tracker):
             reset_tracker()

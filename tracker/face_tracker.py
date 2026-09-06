@@ -354,12 +354,13 @@ class FaceTracker:
                 self._minimum_result_media_timestamp_ms = (
                     submitted if current is None else max(current, submitted)
                 )
-        if self._async_watchdog is not None:
-            self._async_watchdog.reset_session()
+        watchdog = getattr(self, "_async_watchdog", None)
+        if watchdog is not None:
+            watchdog.reset_session()
 
     def async_health_snapshot(self):
         """Return callback progress used by the automatic backend controller."""
-        watchdog = self._async_watchdog
+        watchdog = getattr(self, "_async_watchdog", None)
         return None if watchdog is None else watchdog.snapshot()
 
     def ready_for_promotion(self) -> bool:
@@ -500,8 +501,9 @@ class FaceTracker:
                 # Keep callback health ordered with the latest-result slot. A
                 # newer publication cannot interleave between this relevance
                 # check and health recording.
-                if current and self._async_watchdog is not None:
-                    self._async_watchdog.record_callback(
+                watchdog = getattr(self, "_async_watchdog", None)
+                if current and watchdog is not None:
+                    watchdog.record_callback(
                         timestamp,
                         error=error,
                     )
@@ -520,8 +522,9 @@ class FaceTracker:
             # Publication and health progress are one ordered event. Recording
             # outside this lock would allow an older callback to update the
             # watchdog after a newer pose had already won publication.
-            if self._async_watchdog is not None:
-                self._async_watchdog.record_callback(timestamp)
+            watchdog = getattr(self, "_async_watchdog", None)
+            if watchdog is not None:
+                watchdog.record_callback(timestamp)
 
     def _poll_latest(
         self,

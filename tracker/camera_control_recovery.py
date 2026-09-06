@@ -403,6 +403,22 @@ def apply_camera_control_recovery(
     return updated
 
 
+
+def _parsed_policy_integer(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise ValueError(f"{name} must be an integer")
+        try:
+            return int(text, 10)
+        except ValueError as error:
+            raise ValueError(f"{name} must be an integer") from error
+    raise ValueError(f"{name} must be an integer")
+
 def parse_camera_control_recovery_policy(
     camera_config: object,
     *,
@@ -416,14 +432,14 @@ def parse_camera_control_recovery_policy(
         if values is None:
             raise ValueError("camera.control_recovery must be a mapping")
         return CameraControlRecoveryPolicy(
-            degradation_hold_ms=int(
-                values.get("degradation_hold_ms", 2_000)
+            degradation_hold_ms=_parsed_policy_integer(
+                values.get("degradation_hold_ms", 2_000), "degradation_hold_ms"
             ),
-            retry_interval_ms=int(
-                values.get("retry_interval_ms", 5_000)
+            retry_interval_ms=_parsed_policy_integer(
+                values.get("retry_interval_ms", 5_000), "retry_interval_ms"
             ),
-            max_attempts_per_episode=int(
-                values.get("max_attempts_per_episode", 3)
+            max_attempts_per_episode=_parsed_policy_integer(
+                values.get("max_attempts_per_episode", 3), "max_attempts_per_episode"
             ),
         )
     except (TypeError, ValueError, OverflowError):

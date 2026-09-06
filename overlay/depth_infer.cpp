@@ -156,6 +156,7 @@ struct DepthInferImpl {
     static constexpr int kReadbackRingSize = 3;
     ID3D11Texture2D*      compact_bgra = nullptr;
     ID3D11RenderTargetView* compact_rtv = nullptr;
+    ID3D11Texture2D*      retained_compact_bgra = nullptr;
     ID3D11Texture2D*      stage_bgra[kReadbackRingSize] = {};
     bool                  stage_pending[kReadbackRingSize] = {};
     int                   stage_write = 0;
@@ -197,6 +198,9 @@ struct DepthInferImpl {
         uint32_t minimum_interval_ms = 70;
         uint32_t mode = 1;
     };
+    bool retained_compact_pending = false;
+    DepthProfile retained_profile{};
+    DepthSourceIdentity retained_source{};
 
     static constexpr int kMaxModelWidth = 686;
     static constexpr int kMaxModelHeight = 392;
@@ -315,6 +319,7 @@ struct DepthInferImpl {
     std::atomic<uint64_t>                last_depth_upload_ms{0};
     std::atomic<uint64_t>                last_depth_source_ms{0};
     std::atomic<uint64_t>                last_depth_source_generation{0};
+    std::atomic<uint64_t>                latest_capture_generation{0};
     std::atomic<uint64_t>                published_depth_updates{0};
     std::atomic<uint64_t>                stale_depth_drops{0};
     std::atomic<uint64_t>                nonmonotonic_depth_drops{0};
@@ -1018,7 +1023,11 @@ float4 main(I i):SV_Target {
         pending_source = {};
         running_source = {};
         ready_source = {};
+        retained_source = {};
+        retained_profile = {};
+        retained_compact_pending = false;
         next_source_generation = 0;
+        latest_capture_generation.store(0, std::memory_order_relaxed);
         result_freshness.reset();
         publish_freshness_snapshot();
 
@@ -1040,6 +1049,9 @@ float4 main(I i):SV_Target {
         if (FAILED(hr)) { last_err = "CreateTexture2D(compact BGRA) failed"; return false; }
         hr = dev->CreateRenderTargetView(compact_bgra, nullptr, &compact_rtv);
         if (FAILED(hr)) { last_err = "CreateRenderTargetView(compact BGRA) failed"; return false; }
+        sd.BindFlags = 0;
+        hr = dev->CreateTexture2D(&sd, nullptr, &retained_compact_bgra);
+        if (FAILED(hr)) { last_err = "CreateTexture2D(retained compact BGRA) failed"; return false; }
         sd.Usage = D3D11_USAGE_STAGING;
         sd.BindFlags = 0;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -1462,6 +1474,20 @@ float4 main(I i):SV_Target {
         }
         const auto now = std::chrono::steady_clock::now();
         const uint64_t now_ms = steady_milliseconds();
+
+        DepthSourceIdentity captured_source{};
+        DepthProfile captured_profile{};
+        if (captured) {
+            captured_source = next_source_identity(now_ms);
+            latest_capture_generation.store(
+                captured_source.generation,
+                std::memory_order_relaxed);
+            const uint32_t requested_mode =
+                performance_mode.load(std::memory_order_relaxed);
+            captured_profile = profile_for_mode(
+                resolve_performance_mode(requested_mode));
+        }
+
         if (!drained_upload.empty()) {
             const auto decision = result_freshness.consider(
                 drained_source,
@@ -1498,38 +1524,90 @@ float4 main(I i):SV_Target {
             // accepted-publication counter observed by diagnostics/visibility.
             publish_freshness_snapshot();
         }
-        if (worker_busy) return true;
+
+        auto interval_ready = [&](const DepthProfile& profile) {
+            if (last_submit.time_since_epoch().count() == 0) return true;
+            const uint32_t elapsed_ms = static_cast<uint32_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - last_submit).count());
+            return elapsed_ms >= adaptive_interval_ms(profile);
+        };
+
+        auto retain_latest = [&](ID3D11Texture2D* source,
+                                 const DepthProfile& profile,
+                                 DepthSourceIdentity identity) {
+            if (!render_compact(source, profile)) return false;
+            ctx->CopyResource(retained_compact_bgra, compact_bgra);
+            retained_profile = profile;
+            retained_source = identity;
+            retained_compact_pending = true;
+            return true;
+        };
+
+        if (worker_busy) {
+            if (captured && !retain_latest(
+                    captured, captured_profile, captured_source)) {
+                return false;
+            }
+            return true;
+        }
+
+        if (stage_count > 0 && captured) {
+            if (!retain_latest(captured, captured_profile, captured_source)) {
+                return false;
+            }
+        }
 
         if (stage_count == 0) {
-            // A null capture means "poll only": drain completed work and retry a
-            // nonblocking staging map, but never manufacture a new source frame.
-            if (!captured) return true;
-            const uint32_t requested_mode = performance_mode.load(std::memory_order_relaxed);
-            const uint32_t resolved_mode = resolve_performance_mode(requested_mode);
-            const DepthProfile requested = profile_for_mode(resolved_mode);
-            if (last_submit.time_since_epoch().count() != 0) {
-                const uint32_t elapsed_ms = static_cast<uint32_t>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - last_submit).count());
-                if (elapsed_ms < adaptive_interval_ms(requested)) return true;
+            const bool captured_ready = captured && interval_ready(captured_profile);
+            if (captured && !captured_ready) {
+                if (!retain_latest(captured, captured_profile, captured_source)) {
+                    return false;
+                }
+                return true;
             }
-            const std::vector<int> selected = select_tiles(requested);
-            if (!render_compact(captured, requested)) return false;
-            ctx->CopyResource(stage_bgra[stage_write], compact_bgra);
-            stage_profiles[stage_write] = requested;
-            stage_sources[stage_write] = next_source_identity(now_ms);
+
+            DepthProfile stage_profile{};
+            DepthSourceIdentity stage_source{};
+            ID3D11Texture2D* stage_source_tex = nullptr;
+            if (captured_ready) {
+                if (!render_compact(captured, captured_profile)) return false;
+                stage_profile = captured_profile;
+                stage_source = captured_source;
+                stage_source_tex = compact_bgra;
+                retained_compact_pending = false;
+                retained_source = {};
+            } else if (retained_compact_pending) {
+                if (!interval_ready(retained_profile)) return true;
+                stage_profile = retained_profile;
+                stage_source = retained_source;
+                stage_source_tex = retained_compact_bgra;
+                retained_compact_pending = false;
+                retained_source = {};
+            } else {
+                return true;
+            }
+
+            const std::vector<int> selected = select_tiles(stage_profile);
+            ctx->CopyResource(stage_bgra[stage_write], stage_source_tex);
+            stage_profiles[stage_write] = stage_profile;
+            stage_sources[stage_write] = stage_source;
             stage_tiles[stage_write] = selected;
             stage_pending[stage_write] = true;
             stage_write = (stage_write + 1) % kReadbackRingSize;
             ++stage_count;
         }
+
         if (stage_count == 0 || !stage_pending[stage_read]) return true;
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         const HRESULT map_hr = ctx->Map(
             stage_bgra[stage_read], 0, D3D11_MAP_READ,
             D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
         if (map_hr == DXGI_ERROR_WAS_STILL_DRAWING) return true;
-        if (FAILED(map_hr)) { last_err = "Map(staging ring) failed"; return false; }
+        if (FAILED(map_hr)) {
+            last_err = "Map(staging ring) failed";
+            return false;
+        }
         const DepthProfile profile = stage_profiles[stage_read];
         const DepthSourceIdentity source = stage_sources[stage_read];
         const std::vector<int> selected = stage_tiles[stage_read];
@@ -1827,6 +1905,7 @@ float4 main(I i):SV_Target {
         if (compact_ps) { compact_ps->Release(); compact_ps = nullptr; }
         if (compact_vs) { compact_vs->Release(); compact_vs = nullptr; }
         if (compact_rtv) { compact_rtv->Release(); compact_rtv = nullptr; }
+        if (retained_compact_bgra) { retained_compact_bgra->Release(); retained_compact_bgra = nullptr; }
         if (compact_bgra) { compact_bgra->Release(); compact_bgra = nullptr; }
         for (auto& stage : stage_bgra) {
             if (stage) { stage->Release(); stage = nullptr; }
@@ -1847,6 +1926,9 @@ float4 main(I i):SV_Target {
         pending_input_f32.clear();
         running_input_f32.clear();
         ready_upload_fp16.clear();
+        retained_compact_pending = false;
+        retained_source = {};
+        latest_capture_generation.store(0, std::memory_order_relaxed);
         pending_tiles.clear();
         running_tiles.clear();
         pending_source = {};
@@ -2044,6 +2126,12 @@ uint64_t DepthInferencer::invalid_depth_results_dropped() const {
 uint64_t DepthInferencer::latest_depth_generation() const {
     return impl_
         ? impl_->last_depth_source_generation.load(std::memory_order_relaxed)
+        : 0;
+}
+
+uint64_t DepthInferencer::latest_capture_generation() const {
+    return impl_
+        ? impl_->latest_capture_generation.load(std::memory_order_relaxed)
         : 0;
 }
 

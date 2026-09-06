@@ -52,3 +52,5 @@ The ratios used for physical depth and screen-plane reconstruction therefore rem
 `FaceTracker` accepts `max_input_width_px` directly. A value of `0` preserves the historical full-resolution path. Bare `__new__` test doubles and downstream subclasses that predate the setting also fall back to full resolution when the attribute is absent.
 
 The central MediaPipe runtime policy forwards the setting to strict MediaPipe, automatic primary MediaPipe, and every shadow recovery candidate. It strips the setting from OpenCV constructors.
+
+The bounded BGR resize happens before BGR-to-RGB conversion and before `mp.Image` allocation.

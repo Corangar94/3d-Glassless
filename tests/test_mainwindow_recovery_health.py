@@ -113,7 +113,7 @@ def test_persistent_native_depth_failure_enters_launcher_recovery(qapp, tmp_path
     summary = diagnostics.OverlayRuntimeSummary(
         frame_count=120, acq_ok=120, acq_timeout=0, acq_lost=0, acq_other=0,
         shm_status="LIVE", shm_changes_per_sec=30, depth_total=10, depth_hz=0,
-        head_z_cm=60.0, has_frame=False, capture_state="unavailable",
+        head_z_cm=60.0, has_frame=False, capture_state="rebinding",
         capture_reason="depth_failed",
     )
 

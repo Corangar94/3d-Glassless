@@ -211,11 +211,13 @@ def _policy_from_config_path(
     config_path: object,
 ) -> CameraControlRecoveryPolicy:
     camera = _camera_config_from_path(config_path)
-    return (
-        CameraControlRecoveryPolicy()
-        if camera is None
-        else parse_camera_control_recovery_policy(camera)
-    )
+    if camera is None:
+        print(
+            "[G3D] Camera control-recovery policy unavailable; "
+            "using safe defaults"
+        )
+        return CameraControlRecoveryPolicy()
+    return parse_camera_control_recovery_policy(camera)
 
 
 class CameraControlRecoveryTrackingLoop(StableLatestFrameTrackingLoop):

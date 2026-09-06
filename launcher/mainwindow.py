@@ -1500,7 +1500,7 @@ class MainWindow(QMainWindow):
             return
 
         if (
-            summary.capture_state == "unavailable"
+            summary.capture_state in {"unavailable", "rebinding"}
             and summary.capture_reason in {"depth_failed", "depth_unavailable"}
         ):
             self._capture_loss_count += 1

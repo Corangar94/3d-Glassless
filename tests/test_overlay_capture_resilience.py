@@ -318,8 +318,22 @@ def test_depth_pipeline_progresses_without_a_new_capture_and_recovers_worker_fai
 
     assert "bool poll();" in header
     assert "return impl_->run_once(nullptr);" in depth
-    assert "if (!captured) return true;" in depth
+    assert "retained_compact_pending" in depth
+    assert "latest_capture_generation.store(" in depth
+    assert "stage_source_tex = retained_compact_bgra" in depth
     assert "worker_failed = true" in depth
     assert "if (worker_failed) return false" in depth
     assert "g_depth && !g_depth->poll()" in overlay
     assert 'QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed")' in overlay
+
+
+def test_depth_recovery_backoff_waits_for_published_inference():
+    source = OVERLAY.read_text(encoding="utf-8")
+
+    assert "g_depthRecoveryEpisodeActive = true" in source
+    assert "if (!g_depthRecoveryEpisodeActive)" in source
+    confirmed = source.index(
+        "g_depthRecoveryEpisodeActive && g_depth"
+    )
+    reset = source.index("g_rebindRetry.Reset(GetTickCount64());", confirmed)
+    assert confirmed < reset

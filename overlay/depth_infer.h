@@ -86,6 +86,7 @@ public:
     uint64_t nonmonotonic_depth_results_dropped() const;
     uint64_t invalid_depth_results_dropped() const;
     uint64_t latest_depth_generation() const;
+    uint64_t latest_capture_generation() const;
 
     // Two depth SRVs for render-rate interpolation.
     // The shader lerps between prev_srv (depth at last inference) and

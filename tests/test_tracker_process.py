@@ -71,6 +71,7 @@ def test_tracker_process_restarts_when_shared_memory_is_stale(qapp):
     tracker._last_ts_time = 1.0
     tracker._start_time = 1.0
     tracker._desired_running = True
+    tracker._session_pose_published = True
     spy = QSignalSpy(tracker.status_changed)
 
     with (
@@ -102,6 +103,7 @@ def test_tracker_process_emits_error_when_stale_restart_budget_is_exhausted(qapp
     tracker._last_ts_time = 1.0
     tracker._start_time = 1.0
     tracker._desired_running = True
+    tracker._session_pose_published = True
     spy = QSignalSpy(tracker.status_changed)
 
     with patch("launcher.tracker_process.time.monotonic", return_value=1.2):
@@ -121,13 +123,14 @@ def test_tracker_process_uses_face_validity_state_not_pose_timestamp(qapp):
     proc = MagicMock()
     proc.poll.return_value = None
     pose_reader = MagicMock()
-    pose_reader.read.return_value = (0.0, 0.0, 60.0, 11)
+    pose_reader.read.return_value = (0.0, 0.0, 60.0, 1090)
     state_reader = MagicMock()
-    state_reader.read.return_value = ("paused", 12)
+    state_reader.read.return_value = ("paused", 1089)
     tracker._proc = proc
     tracker._shm = pose_reader
     tracker._state_shm = state_reader
     tracker._start_time = tracker._last_ts_time = 1.0
+    tracker._poll_admission.reset_session(1000)
     spy = QSignalSpy(tracker.status_changed)
 
     with patch("launcher.tracker_process.time.monotonic", return_value=1.1):
@@ -141,13 +144,14 @@ def test_tracker_process_emits_validity_before_both_pose_signals(qapp):
     proc = MagicMock()
     proc.poll.return_value = None
     pose_reader = MagicMock()
-    pose_reader.read.return_value = (0.0, 0.0, 60.0, 11)
+    pose_reader.read.return_value = (0.0, 0.0, 60.0, 1090)
     state_reader = MagicMock()
-    state_reader.read.return_value = ("paused", 12)
+    state_reader.read.return_value = ("paused", 1089)
     tracker._proc = proc
     tracker._shm = pose_reader
     tracker._state_shm = state_reader
     tracker._start_time = tracker._last_ts_time = 1.0
+    tracker._poll_admission.reset_session(1000)
     events: list[tuple[str, object]] = []
     tracker.status_changed.connect(lambda status: events.append(("status", status)))
     tracker.position_updated.connect(
@@ -165,7 +169,7 @@ def test_tracker_process_emits_validity_before_both_pose_signals(qapp):
     assert events == [
         ("status", "paused"),
         ("legacy_pose", (0.0, 0.0, 60.0)),
-        ("sampled_pose", (0.0, 0.0, 60.0, 11)),
+        ("sampled_pose", (0.0, 0.0, 60.0, 1090)),
     ]
 
 
@@ -176,13 +180,20 @@ def test_timestamped_signal_preserves_full_uint32_range(qapp):
     pose_reader = MagicMock()
     timestamp_ms = 0xFFFF_FFF0
     pose_reader.read.return_value = (1.0, -2.0, 70.0, timestamp_ms)
+    state_reader = MagicMock()
+    state_reader.read.return_value = ("tracking", timestamp_ms)
     tracker._proc = proc
     tracker._shm = pose_reader
+    tracker._state_shm = state_reader
     tracker._start_time = tracker._last_ts_time = 1.0
+    tracker._poll_admission.reset_session(0xFFFF_FE00)
     sampled = QSignalSpy(tracker.position_sampled)
     legacy = QSignalSpy(tracker.position_updated)
 
-    with patch("launcher.tracker_process.time.monotonic", return_value=1.1):
+    with (
+        patch("launcher.tracker_process.time.monotonic", return_value=1.1),
+        patch("launcher.tracker_process.wire_timestamp_ms", return_value=0x10),
+    ):
         tracker._poll()
 
     assert _spy_list(legacy) == [[1.0, -2.0, 70.0]]

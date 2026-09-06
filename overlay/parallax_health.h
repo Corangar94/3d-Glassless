@@ -50,12 +50,12 @@ inline float ConfidenceScale(float confidence) {
 inline uint32_t DepthAgeForHealth(
     uint32_t depth_age_ms,
     uint32_t capture_age_ms,
-    bool holding_captured_frame) {
+    bool depth_matches_held_frame) {
     // Desktop Duplication/WGC may legitimately emit no new image while a scene
-    // is static. In that case the last accepted depth still describes the held
-    // frame, so source age alone must not fade parallax to zero.
+    // is static. Excuse depth age only when the accepted depth was generated
+    // from the exact capture that is still being held on screen.
     constexpr uint32_t kCaptureActivityWindowMs = 200;
-    if (holding_captured_frame && capture_age_ms > kCaptureActivityWindowMs) {
+    if (depth_matches_held_frame && capture_age_ms > kCaptureActivityWindowMs) {
         return 0;
     }
     return depth_age_ms;
