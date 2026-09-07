@@ -29,8 +29,9 @@ def test_each_session_has_its_own_interruptible_run_options():
     assert "fixed.run_options = std::make_unique<Ort::RunOptions>()" in source
     assert "fixed.session->Run(" in source
     assert "*fixed.run_options" in source
-    assert "for (auto& fixed : profile_sessions)" in source
-    assert "fixed.run_options->SetTerminate();" in source
-    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+    assert "std::atomic<Ort::RunOptions*>" in source
+    assert "active_run_options.store(" in source
+    assert "active->SetTerminate();" in source
+    assert source.index("request_worker_termination();") < source.index(
         "worker.join()"
     )

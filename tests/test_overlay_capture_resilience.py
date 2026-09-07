@@ -279,9 +279,10 @@ def test_depth_worker_run_can_be_terminated_before_join():
     assert "std::unique_ptr<Ort::RunOptions> run_options;" in source
     assert "fixed.session->Run(" in source
     assert "*fixed.run_options" in source
-    assert "for (auto& fixed : profile_sessions)" in source
-    assert "fixed.run_options->SetTerminate();" in source
-    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+    assert "std::atomic<Ort::RunOptions*>" in source
+    assert "active_run_options.store(" in source
+    assert "active->SetTerminate();" in source
+    assert source.index("request_worker_termination();") < source.index(
         "worker.join()"
     )
 
@@ -322,9 +323,12 @@ def test_depth_pipeline_progresses_without_a_new_capture_and_recovers_worker_fai
     assert "latest_capture_generation.store(" in depth
     assert "ctx->CopyResource(stage_bgra[stage_write], retained_compact_bgra)" in depth
     assert "worker_failed = true" in depth
-    assert "if (worker_failed) return false" in depth
+    assert "OutstandingWorkTimedOut(" in depth
+    assert "if (worker_failed && !worker_timed_out) return false" in depth
+    assert "request_worker_termination()" in depth
     assert "g_depth && !g_depth->poll()" in overlay
-    assert 'QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed")' in overlay
+    assert '"depth_timeout" : "depth_failed"' in overlay
+    assert "QueueCaptureSignal(CaptureSignal::RebindRetry, reason)" in overlay
 
 
 def test_depth_recovery_waits_for_sustained_publication_in_a_new_session():

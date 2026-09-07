@@ -25,7 +25,7 @@ endfunction()
 g3d_test_extract(fp16 "${depth_source}"
     "static inline uint16_t float_to_half" "struct DepthInferImpl")
 g3d_test_extract(schedule "${depth_source}"
-    "    int oldest_non_center_tile(" "    static std::chrono::steady_clock::time_point clock_now()")
+    "    int oldest_tile(" "    static std::chrono::steady_clock::time_point clock_now()")
 g3d_test_extract(pipeline "${depth_source}"
     "    bool run_once(" "    // WORKER THREAD:")
 

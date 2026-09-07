@@ -309,3 +309,70 @@ def test_restart_async_reaps_old_process_before_spawning_new_target(tmp_path, mo
     assert popen.call_args_list[1].args[0][-4:] == [
         "--target-exe", r"C:\Games\New\new.exe", "--target-pid", "9876"
     ]
+
+
+def test_obsolete_async_launch_failure_reconciles_newer_restart(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    process = OverlayProcess()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    replacement = MagicMock()
+    replacement.poll.return_value = None
+
+    def spawn(target, pid=None):
+        calls.append((target, pid))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(1.0)
+            raise OverlayStartError("obsolete launch failed")
+        return exe, replacement
+
+    monkeypatch.setattr(process, "_spawn", spawn)
+    process.restart_async("first.exe", target_pid=111)
+    assert entered.wait(1.0)
+    process.restart_async("second.exe", target_pid=222)
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while process.is_transitioning() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert calls == [("first.exe", 111), ("second.exe", 222)]
+    assert process.is_running()
+    assert not process.is_transitioning()
+
+
+def test_start_supersedes_inflight_launch_target(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    process = OverlayProcess()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    first_proc = MagicMock()
+    first_proc.poll.return_value = None
+    second_proc = MagicMock()
+    second_proc.poll.return_value = None
+
+    def spawn(target, pid=None):
+        calls.append((target, pid))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(1.0)
+            return exe, first_proc
+        return exe, second_proc
+
+    monkeypatch.setattr(process, "_spawn", spawn)
+    process.restart_async("first.exe", target_pid=111)
+    assert entered.wait(1.0)
+    assert process.start("second.exe", target_pid=222) == exe
+    release.set()
+    deadline = time.monotonic() + 2.0
+    while process.is_transitioning() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert calls == [("first.exe", 111), ("second.exe", 222)]
+    first_proc.terminate.assert_called_once()
+    assert process.is_running()
+    assert not process.is_transitioning()

@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include "depth_result_freshness.h"
+#include "depth_progress_watchdog.h"
 #include "parallax_health.h"
 #include "capture_recovery.h"
 #include "depth_tile_coverage.h"
@@ -43,6 +44,7 @@ struct DepthInferencer {
     uint64_t latest_depth_generation() const;
     uint64_t latest_capture_generation() const;
     uint64_t complete_depth_generation() const;
+    uint64_t outstanding_work_timeouts() const;
     const char* last_error() const;
 };
 struct FakeContext {
@@ -73,6 +75,7 @@ struct DepthInferImpl {
     std::mutex m;
     std::condition_variable cv_work;
     std::atomic<bool> stop{false};
+    std::atomic<uint64_t> outstanding_work_started_ms{0}, outstanding_timeout_count{0};
     bool input_pending = false, worker_running = false, worker_failed = false;
     bool output_ready = false, blend_active = false, has_valid_depth = false;
     std::string last_err;
@@ -117,6 +120,9 @@ struct DepthInferImpl {
     uint32_t resolve_performance_mode(uint32_t mode) { return mode; }
     DepthProfile profile_for_mode(uint32_t mode) { return {518, 294, mode}; }
     uint32_t adaptive_interval_ms(const DepthProfile&) { return 70; }
+    uint64_t outstanding_work_deadline_ms() const { return 5000; }
+    int termination_requests=0;
+    void request_worker_termination() { ++termination_requests; }
 #include "schedule.generated.inl"
     bool render_compact(ID3D11Texture2D* captured, const DepthProfile&) {
         staged_scene_ids.push_back(captured->scene_id); *compact_bgra=*captured; return true;
@@ -175,6 +181,7 @@ struct DepthInferImpl {
 
 #include "ages.generated.inl"
 #include "diagnostics.generated.inl"
+uint64_t DepthInferencer::outstanding_work_timeouts() const { return impl_->outstanding_timeout_count.load(); }
 const char* DepthInferencer::last_error() const { return impl_->last_err.c_str(); }
 using BOOL=int; using HWND=void*; using DWORD=uint32_t;
 constexpr int SW_HIDE=0, SW_SHOWNOACTIVATE=4;
@@ -189,6 +196,8 @@ HWND g_hwnd=reinterpret_cast<HWND>(1), g_targetWindow=nullptr;
 std::wstring g_targetExePath;
 uint32_t g_targetPid=0;
 bool g_hasFrame=false, g_overlayVisible=false, g_depthRecoveryPending=false;
+const char* g_depthFailureReason="depth_failed";
+std::string last_capture_reason;
 uint64_t g_lastCaptureFrameMs=0;
 DepthInferencer* g_depth=nullptr;
 using CaptureState=g3d::capture::CaptureState;
@@ -201,7 +210,8 @@ void GetWindowThreadProcessId(HWND, DWORD*) {}
 uint64_t GetTickCount64() { return test_now_ms; }
 void Log(const char*, ...) {}
 
-void QueueCaptureSignal(CaptureSignal signal, const char*) {
+void QueueCaptureSignal(CaptureSignal signal, const char* reason) {
+    last_capture_reason = reason ? reason : "";
     const auto action=g3d::capture::AdvanceCaptureState(g_captureState, signal);
     g_captureState=action.next_state;
     g_rebindRetry.RecordFailure(test_now_ms);
@@ -218,6 +228,7 @@ void attach(DepthInferencer& facade) {
     g_captureState=CaptureState::Running;
     g_hasFrame=g_overlayVisible=os_window_visible=g_depthRecoveryPending=false;
     show_calls=0; g_lastCaptureFrameMs=0; g_targetExePath.clear();
+    g_depthFailureReason="depth_failed"; last_capture_reason.clear();
     g_depthRecovery={}; g_depthRecovery.SessionStarted();
     g_rebindRetry.Reset(test_now_ms);
 }
@@ -381,6 +392,48 @@ void test_failure_wins_and_backoff_survives_old_success() {
     p.tick(now+2010); TickDepthRecovery();
     CHECK(!g_depthRecovery.active() && g_rebindRetry.failures()==0);
 }
+void test_outstanding_work_timeout_and_idle_control() {
+    DepthInferImpl p; DepthInferencer f{&p}; attach(f);
+    p.tick(1000);
+    p.input_pending = true;
+    p.outstanding_work_started_ms.store(1000);
+    p.tick(6000); CHECK(p.run_once(nullptr));
+    CHECK(!p.worker_failed && p.termination_requests==0);
+    p.tick(6001); CHECK(!p.run_once(nullptr));
+    CHECK(p.worker_failed && p.termination_requests==1);
+    CHECK(p.outstanding_timeout_count.load()==1);
+    MarkDepthFailure(); TickDepthRecovery();
+    CHECK(g_depthRecovery.active());
+    CHECK(last_capture_reason == "depth_timeout");
+
+    DepthInferImpl idle;
+    idle.tick(60000); CHECK(idle.run_once(nullptr));
+    CHECK(!idle.worker_failed && idle.outstanding_timeout_count.load()==0);
+}
+
+void test_fast_scheduler_meets_supported_freshness_budget() {
+    constexpr uint64_t inference_ms = 160;
+    for (int tiles : {2, 3, 4}) {
+        DepthInferImpl p(tiles);
+        const auto profile = p.profile_for_mode(2);
+        std::vector<uint64_t> last(static_cast<size_t>(tiles), 0);
+        uint64_t now=1000;
+        for (int step=0; step<tiles*4; ++step) {
+            const auto selected=p.select_tiles(profile);
+            CHECK(selected.size()==1);
+            const int tile=selected.front();
+            CHECK(tile>=0 && tile<tiles);
+            p.tile_generation[tile]=++p.completion_generation;
+            last[static_cast<size_t>(tile)]=now;
+            now += inference_ms;
+            if (step >= tiles-1) {
+                const uint64_t oldest=*std::min_element(last.begin(),last.end());
+                CHECK(oldest!=0 && now-oldest <= 750);
+            }
+        }
+    }
+}
+
 void test_freshness_upgrade_not_duplicate_or_retiming() {
     using namespace g3d::depth;
     ResultFreshnessGate gate;
@@ -401,8 +454,10 @@ int main() {
         test_late_partial_and_obsolete_results();
         test_latest_pixels_survive_backpressure();
         test_failure_wins_and_backoff_survives_old_success();
+        test_outstanding_work_timeout_and_idle_control();
+        test_fast_scheduler_meets_supported_freshness_budget();
         test_freshness_upgrade_not_duplicate_or_retiming();
-        std::cout << "8 production-path integration groups passed\n";
+        std::cout << "10 production-path integration groups passed\n";
     } catch(const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
     }

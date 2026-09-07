@@ -669,6 +669,7 @@ static const void*               g_stateView = nullptr;
 // far-plane texture remains available only for shader diagnostics and recovery.
 static DepthInferencer*          g_depth       = nullptr;
 static bool                      g_depthRecoveryPending = false;
+static const char*               g_depthFailureReason = "depth_failed";
 static g3d::runtime_health::DepthRecoveryEpisode g_depthRecovery;
 static ID3D11Texture2D*          g_fallbackTex = nullptr;  // 1x1 R16F=1.0 diagnostic fallback
 static ID3D11ShaderResourceView* g_fallbackSrv = nullptr;
@@ -2159,6 +2160,8 @@ static void MarkDepthFailure() {
     Log("DepthInferencer failed (#%llu): %s",
         static_cast<unsigned long long>(failures),
         g_depth ? g_depth->last_error() : "depth unavailable");
+    g_depthFailureReason = g_depth && g_depth->outstanding_work_timeouts() > 0
+        ? "depth_timeout" : "depth_failed";
     g_depthRecoveryPending = true;
     g_depthRecovery.MarkFailure();
 }
@@ -2197,7 +2200,9 @@ static void TickDepthRecovery() {
     // Failure wins over any publication belonging to the failed session.
     if (g_depthRecoveryPending) {
         g_depthRecoveryPending = false;
-        QueueCaptureSignal(CaptureSignal::RebindRetry, "depth_failed");
+        const char* reason = g_depthFailureReason;
+        g_depthFailureReason = "depth_failed";
+        QueueCaptureSignal(CaptureSignal::RebindRetry, reason);
         return;
     }
     const uint64_t publications = g_depth ? g_depth->depth_updates_published() : 0;

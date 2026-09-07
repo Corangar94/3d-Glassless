@@ -79,6 +79,7 @@ public:
 
     bool gpu_io_active() const;
     uint64_t gpu_io_fallbacks() const;
+    uint64_t outstanding_work_timeouts() const;
 
     // Source-aware publication diagnostics.
     uint64_t depth_updates_published() const;

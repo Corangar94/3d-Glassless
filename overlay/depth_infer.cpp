@@ -2,6 +2,7 @@
 
 #include "depth_infer.h"
 #include "depth_result_freshness.h"
+#include "depth_progress_watchdog.h"
 #include "depth_tile_coverage.h"
 #include <d3dcompiler.h>
 #include <d3d12.h>
@@ -311,6 +312,9 @@ struct DepthInferImpl {
     bool                                 worker_failed = false;
     bool                                 output_ready  = false;   // new depth waiting for main to upload
     std::atomic<bool>                    stop{false};
+    std::atomic<uint64_t>                outstanding_work_started_ms{0};
+    std::atomic<uint64_t>                outstanding_timeout_count{0};
+    std::atomic<Ort::RunOptions*>         active_run_options{nullptr};
     std::atomic<uint64_t>                inferences{0};    // completed Run calls (for diagnostics)
     std::atomic<uint32_t>                performance_mode{1}; // 0=quality, 1=balanced, 2=fast
     std::atomic<float>                   last_inference_ms{0.0f};
@@ -400,11 +404,15 @@ struct DepthInferImpl {
         return profile;
     }
 
-    int oldest_non_center_tile(int center) const {
+    int oldest_tile(int preferred, int excluded = -1) const {
+        bool any_completed = false;
+        for (uint64_t generation : tile_generation) any_completed |= generation != 0;
+        if (!any_completed && preferred >= 0 && preferred < tile_count
+            && preferred != excluded) return preferred;
         int selected = -1;
         uint64_t oldest = std::numeric_limits<uint64_t>::max();
         for (int tile = 0; tile < tile_count; ++tile) {
-            if (tile == center) continue;
+            if (tile == excluded) continue;
             const uint64_t generation = tile < static_cast<int>(tile_generation.size())
                 ? tile_generation[tile] : 0;
             if (selected < 0 || generation < oldest) {
@@ -424,15 +432,14 @@ struct DepthInferImpl {
             for (int tile = 0; tile < tile_count; ++tile) selected[tile] = tile;
         } else if (profile.mode == 1) {
             selected.push_back(center);
-            const int oldest = oldest_non_center_tile(center);
+            const int oldest = oldest_tile(center, center);
             if (oldest >= 0) selected.push_back(oldest);
         } else {
-            if ((scheduler_cycle % 3u) != 2u) {
-                selected.push_back(center);
-            } else {
-                const int oldest = oldest_non_center_tile(center);
-                selected.push_back(oldest >= 0 ? oldest : center);
-            }
+            // Fast mode has only one tile of capacity per inference. Refresh the
+            // least-recently completed tile so every region receives a bounded
+            // share of that capacity; the center wins only the all-empty tie.
+            const int oldest = oldest_tile(center);
+            selected.push_back(oldest >= 0 ? oldest : center);
         }
         ++scheduler_cycle;
         return selected;
@@ -549,6 +556,22 @@ struct DepthInferImpl {
         const uint32_t measured_floor = measured > 0.0f
             ? static_cast<uint32_t>(std::min(240.0f, measured * factor)) : 0u;
         return std::max(profile.minimum_interval_ms, measured_floor);
+    }
+
+    uint64_t outstanding_work_deadline_ms() const {
+        return g3d::depth::OutstandingWorkDeadlineMs(
+            last_inference_ms.load(std::memory_order_relaxed));
+    }
+
+    void request_worker_termination() {
+        Ort::RunOptions* active = active_run_options.load(std::memory_order_acquire);
+        if (!active) return;
+        try {
+            active->SetTerminate();
+        } catch (...) {
+            // The watchdog is already failing this inference. Recovery will
+            // destroy the session even if a provider rejects cancellation.
+        }
     }
 
     bool create_compact_pipeline() {
@@ -803,8 +826,10 @@ float4 main(I i):SV_Target {
             hr = dml_interop.fence->SetEventOnCompletion(
                 value, dml_interop.fence_event);
             if (FAILED(hr)) return false;
-            if (WaitForSingleObject(dml_interop.fence_event, INFINITE)
-                != WAIT_OBJECT_0) return false;
+            constexpr DWORD kFenceWaitTimeoutMs = 2000;
+            const DWORD wait = WaitForSingleObject(
+                dml_interop.fence_event, kFenceWaitTimeoutMs);
+            if (wait != WAIT_OBJECT_0) return false;
         }
         return true;
     }
@@ -1475,15 +1500,29 @@ float4 main(I i):SV_Target {
         std::vector<uint16_t> drained_upload;
         DepthSourceIdentity drained_source{};
         g3d::depth::TileCoverageSnapshot drained_coverage{};
+        const auto now = clock_now();
+        const uint64_t now_ms = steady_milliseconds();
         bool worker_busy = false;
+        bool worker_timed_out = false;
         {
             std::lock_guard<std::mutex> lock(m);
             if (stop.load()) {
                 last_err = "DepthInferencer is stopping";
                 return false;
             }
-            if (worker_failed) return false;
             worker_busy = input_pending || worker_running;
+            const uint64_t work_started = outstanding_work_started_ms.load(
+                std::memory_order_relaxed);
+            if (!worker_failed && worker_busy
+                && g3d::depth::OutstandingWorkTimedOut(
+                    work_started, now_ms, outstanding_work_deadline_ms())) {
+                worker_failed = true;
+                worker_timed_out = true;
+                outstanding_timeout_count.fetch_add(1, std::memory_order_relaxed);
+                last_err = "Depth inference made no progress for "
+                    + std::to_string(now_ms - work_started) + " ms";
+            }
+            if (worker_failed && !worker_timed_out) return false;
             if (output_ready) {
                 drained_upload.swap(ready_upload_fp16);
                 drained_source = ready_source;
@@ -1493,8 +1532,10 @@ float4 main(I i):SV_Target {
                 output_ready = false;
             }
         }
-        const auto now = clock_now();
-        const uint64_t now_ms = steady_milliseconds();
+        if (worker_timed_out) {
+            request_worker_termination();
+            return false;
+        }
 
         if (captured) {
             // Save immutable pixels even when the first pass can start now.
@@ -1605,6 +1646,7 @@ float4 main(I i):SV_Target {
             pending_source = source;
             pending_tiles = selected;
             input_pending = true;
+            outstanding_work_started_ms.store(now_ms, std::memory_order_relaxed);
         }
         active_model_width.store(profile.width, std::memory_order_relaxed);
         active_model_height.store(profile.height, std::memory_order_relaxed);
@@ -1652,6 +1694,8 @@ float4 main(I i):SV_Target {
                         break;
                     }
                     FixedProfileSession& fixed = fixed_session(running_profile.mode);
+                    active_run_options.store(
+                        fixed.run_options.get(), std::memory_order_release);
                     const float* tile_input = running_input_f32.data()
                         + batch * tile_input_count;
                     if (run_gpu_bound(
@@ -1698,6 +1742,7 @@ float4 main(I i):SV_Target {
                         outputs[0].GetTensorData<float>(),
                         output_count * sizeof(float));
                 }
+                active_run_options.store(nullptr, std::memory_order_release);
 
                 if (ok) {
                     out_h = output_height;
@@ -1815,9 +1860,11 @@ float4 main(I i):SV_Target {
                     }
                 }
             } catch (const Ort::Exception& exception) {
+                active_run_options.store(nullptr, std::memory_order_release);
                 error = std::string("ORT Run exception: ") + exception.what();
                 ok = false;
             } catch (const std::exception& exception) {
+                active_run_options.store(nullptr, std::memory_order_release);
                 error = std::string("Worker exception: ") + exception.what();
                 ok = false;
             }
@@ -1828,7 +1875,9 @@ float4 main(I i):SV_Target {
             {
                 std::lock_guard<std::mutex> lock(m);
                 worker_running = false;
-                if (ok) {
+                outstanding_work_started_ms.store(0, std::memory_order_relaxed);
+                const bool already_failed = worker_failed || stop.load();
+                if (ok && !already_failed) {
                     worker_failed = false;
                     ready_upload_fp16 = std::move(produced_upload);
                     tile_coverage.record(running_tiles, running_source);
@@ -1837,7 +1886,7 @@ float4 main(I i):SV_Target {
                     output_ready = true;
                 } else {
                     worker_failed = true;
-                    last_err = std::move(error);
+                    if (!already_failed || last_err.empty()) last_err = std::move(error);
                 }
                 running_source = {};
             }
@@ -1852,19 +1901,12 @@ float4 main(I i):SV_Target {
                 std::lock_guard<std::mutex> lk(m);
                 stop.store(true);
                 input_pending = false;
+                outstanding_work_started_ms.store(0, std::memory_order_relaxed);
             }
             // DirectML may be blocked in Run while its D3D device is being
-            // removed. ORT's termination flag is thread-safe and makes that
-            // Run return, allowing the worker join to complete.
-            for (auto& fixed : profile_sessions) {
-                if (!fixed.run_options) continue;
-                try {
-                    fixed.run_options->SetTerminate();
-                } catch (...) {
-                    // cleanup/destruction must not throw; join remains the
-                    // final synchronization point for the session lifetime.
-                }
-            }
+            // removed. Signal only the RunOptions currently published by the
+            // worker; session containers remain worker-owned until join.
+            request_worker_termination();
             cv_work.notify_all();
             worker.join();
         }
@@ -2078,6 +2120,10 @@ bool DepthInferencer::gpu_io_active() const {
 
 uint64_t DepthInferencer::gpu_io_fallbacks() const {
     return impl_ ? impl_->gpu_io_fallbacks.load(std::memory_order_relaxed) : 0;
+}
+
+uint64_t DepthInferencer::outstanding_work_timeouts() const {
+    return impl_ ? impl_->outstanding_timeout_count.load(std::memory_order_relaxed) : 0;
 }
 
 uint64_t DepthInferencer::depth_updates_published() const {

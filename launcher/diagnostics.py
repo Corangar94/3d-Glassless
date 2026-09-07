@@ -48,6 +48,7 @@ _CAPTURE_REASON_GUIDANCE = {
     "device_lost": "the graphics device was reset; wait for the overlay to rebind after the display stabilizes",
     "adapter_changed": "the target moved to another graphics adapter; wait for the overlay to rebuild its renderer",
     "depth_unavailable": "depth inference failed; rebuild the runtime and verify DirectML/model compatibility",
+    "depth_timeout": "depth inference stopped making progress; the runtime will cancel and recreate the depth session",
 }
 
 

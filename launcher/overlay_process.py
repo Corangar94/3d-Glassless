@@ -264,24 +264,63 @@ class OverlayProcess:
         )
         normalized_pid = target_pid if target_pid is not None and target_pid > 0 else None
         with self._lock:
+            target_changed = (
+                normalized_target != self._target_executable
+                or normalized_pid != self._target_pid
+            )
+            self._request_generation += 1
+            generation = self._request_generation
             self._desired_running = True
             self._target_executable = normalized_target
             self._target_pid = normalized_pid
+            self._restart_requested = self._restart_requested or target_changed
             if self._worker_running:
-                # A previous process is still being reaped.  The worker will
-                # reconcile this newest desired target before it exits.
+                # The active synchronous spawn/reconcile worker will observe the
+                # generation and target change before it relinquishes ownership.
                 exe = find_overlay_exe()
                 if exe is None:
                     raise OverlayStartError(f"{OVERLAY_EXE_NAME} not found")
                 return exe
             if self._proc is not None and self._proc.poll() is None:
                 assert self._exe_path is not None
-                return self._exe_path
+                if not target_changed:
+                    return self._exe_path
+                self._worker_running = True
+                existing_exe = self._exe_path
+            else:
+                self._worker_running = True
+                existing_exe = None
 
-        exe, proc = self._spawn(normalized_target, normalized_pid)
+        if existing_exe is not None:
+            self._launch_lifecycle_worker(3.0)
+            return existing_exe
+
+        try:
+            exe, proc = self._spawn(normalized_target, normalized_pid)
+        except OverlayStartError:
+            with self._lock:
+                newer = generation != self._request_generation
+                reconcile = newer and self._desired_running
+                if not reconcile:
+                    self._worker_running = False
+                if not newer:
+                    self._desired_running = False
+                    self._restart_requested = False
+            if reconcile:
+                self._launch_lifecycle_worker(3.0)
+            raise
+
         with self._lock:
             self._proc = proc
             self._exe_path = exe
+            current = generation == self._request_generation
+            if current and self._desired_running:
+                self._restart_requested = False
+                self._worker_running = False
+                return exe
+        # A newer stop/restart/start arrived while spawn was outside the lock.
+        # Keep worker ownership and reconcile the process we just created.
+        self._launch_lifecycle_worker(3.0)
         return exe
 
     def _spawn(
@@ -381,6 +420,14 @@ class OverlayProcess:
         pid = target_pid if target_pid is not None and target_pid > 0 else None
         self._request_transition(True, target, pid, timeout, restart=True)
 
+    def _launch_lifecycle_worker(self, timeout: float) -> None:
+        threading.Thread(
+            target=self._reconcile_lifecycle,
+            args=(timeout,),
+            name="g3d-overlay-lifecycle",
+            daemon=False,
+        ).start()
+
     def _request_transition(
         self,
         desired_running: bool,
@@ -400,15 +447,9 @@ class OverlayProcess:
             if self._worker_running:
                 return
             self._worker_running = True
-        threading.Thread(
-            target=self._reconcile_lifecycle,
-            args=(timeout,),
-            name="g3d-overlay-lifecycle",
-            # A detached native overlay must never outlive the launcher just
-            # because Python began interpreter shutdown while cleanup was in
-            # progress. Non-daemon lifecycle workers finish their bounded reap.
-            daemon=False,
-        ).start()
+        # A detached native overlay must never outlive the launcher just
+        # because Python began interpreter shutdown while cleanup was in progress.
+        self._launch_lifecycle_worker(timeout)
 
     @staticmethod
     def _reap(proc: subprocess.Popen[bytes], timeout: float) -> None:
@@ -470,8 +511,12 @@ class OverlayProcess:
                 with self._lock:
                     if generation == self._request_generation:
                         self._desired_running = False
+                        self._restart_requested = False
                         self._worker_running = False
-                return
+                        return
+                # The failed launch is obsolete. Keep worker ownership and
+                # reconcile the newer request instead of stranding transition state.
+                continue
 
             with self._lock:
                 self._proc = spawned

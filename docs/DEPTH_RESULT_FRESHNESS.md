@@ -27,7 +27,7 @@ A completed result may update the current depth texture only when:
 
 For changing scenes and partial atlases, the exact 750 ms boundary is accepted; an obsolete result at 751 ms is discarded without touching the accepted GPU textures or blend. A complete result for an unchanged held image is accepted even when late. This exemption requires matching capture generation **and timestamp**, plus actual per-tile coverage. It does not restamp pixels or exempt obsolete results.
 
-Fast-mode batches retain per-tile source identities. A batch generation is not proof of full-image coverage. After 200 ms without a new capture, polling schedules one all-tile completion pass using the retained compact pixels and original source metadata. Once accepted, that pass is not repeated. This also closes the dead end after a late partial result is rejected.
+Fast-mode batches retain per-tile source identities. A batch generation is not proof of full-image coverage. During continuous capture, fast mode selects the least-recently completed tile each pass so every region receives a bounded share of available inference capacity. After 200 ms without a new capture, polling schedules one all-tile completion pass using the retained compact pixels and original source metadata. Once accepted, that pass is not repeated. This also closes the dead end after a late partial result is rejected.
 
 ## Temporal-history isolation
 
@@ -50,6 +50,8 @@ A stale or nonmonotonic completion is a controlled drop, not a device failure. T
 Visibility is now an explicit, pure predicate requiring a running capture session, a valid captured image, an accepted depth publication, and target foreground eligibility. It neither clears capture validity nor calls `run()`. The old `ShowWindow` macro interceptor is removed. Completing the first inference during an idle poll can reveal the overlay without another capture.
 
 A pending worker failure is handled before any recovery success check. Retry backoff survives initialization and old publications from the failed session. Only a new session can prove recovery: two seconds of healthy depth plus repeated publication, or a fully covered held image. No-frame intervals alone are not failures.
+
+Outstanding inference work is separately monitored for progress. The deadline is adaptive and bounded between 5 and 15 seconds; it is not armed when the pipeline is idle. If pending/running work exceeds that deadline, the inferencer reports failure, publishes the distinct `depth_timeout` capture reason, and requests ONNX Runtime termination so the existing capture/rebind recovery path can retire the session. DirectML fence waits are finite as well, preventing the worker from intentionally waiting forever at the copy boundary.
 
 ## Diagnostics
 
