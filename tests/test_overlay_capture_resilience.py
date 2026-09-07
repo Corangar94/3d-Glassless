@@ -341,3 +341,14 @@ def test_depth_recovery_waits_for_sustained_publication_in_a_new_session():
     assert recovery.index("if (g_depthRecoveryPending)") < recovery.index("g_depthRecovery.Observe(")
     assert "g_rebindRetry.Reset(now)" in recovery
     assert "if (!g_depthRecovery.active())" in source
+
+
+def test_dml_copy_fence_wait_is_bounded_for_recoverable_teardown():
+    depth = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+
+    wait_block = depth.split("bool execute_copy_commands_and_wait()", 1)[1].split(
+        "bool initialize_gpu_io(", 1
+    )[0]
+    assert "kFenceWaitTimeoutMs" in wait_block
+    assert "WaitForSingleObject" in wait_block
+    assert "INFINITE" not in wait_block

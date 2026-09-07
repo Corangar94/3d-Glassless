@@ -308,6 +308,12 @@ class OverlayProcess:
                     self._restart_requested = False
             if reconcile:
                 self._launch_lifecycle_worker(3.0)
+                # This failure belongs to an obsolete request. Returning the
+                # known executable prevents the stale caller from cancelling a
+                # newer lifecycle request that now owns the desired state.
+                replacement = find_overlay_exe()
+                if replacement is not None:
+                    return replacement
             raise
 
         with self._lock:

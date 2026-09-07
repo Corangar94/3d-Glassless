@@ -376,3 +376,42 @@ def test_start_supersedes_inflight_launch_target(tmp_path, monkeypatch):
     first_proc.terminate.assert_called_once()
     assert process.is_running()
     assert not process.is_transitioning()
+
+
+def test_obsolete_synchronous_start_failure_does_not_cancel_newer_restart(tmp_path, monkeypatch):
+    exe = tmp_path / "Glassless3DOverlay.exe"
+    exe.write_bytes(b"")
+    monkeypatch.setattr(overlay_process, "find_overlay_exe", lambda: exe)
+    process = OverlayProcess()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    replacement = MagicMock()
+    replacement.poll.return_value = None
+    result = []
+
+    def spawn(target, pid=None):
+        calls.append((target, pid))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(1.0)
+            raise OverlayStartError("obsolete synchronous launch failed")
+        return exe, replacement
+
+    monkeypatch.setattr(process, "_spawn", spawn)
+    starter = threading.Thread(
+        target=lambda: result.append(process.start("first.exe", target_pid=111))
+    )
+    starter.start()
+    assert entered.wait(1.0)
+    process.restart_async("second.exe", target_pid=222)
+    release.set()
+    starter.join(1.0)
+    deadline = time.monotonic() + 2.0
+    while process.is_transitioning() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert result == [exe]
+    assert calls == [("first.exe", 111), ("second.exe", 222)]
+    assert process.is_running()
+    assert not process.is_transitioning()
