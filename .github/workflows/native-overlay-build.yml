@@ -2,19 +2,9 @@ name: Native overlay build
 
 on:
   pull_request:
-    paths:
-      - 'overlay/**'
-      - 'scripts/**'
-      - 'Glassless3DOverlay.exe'
-      - '.github/workflows/native-overlay-build.yml'
   push:
     branches:
       - master
-    paths:
-      - 'overlay/**'
-      - 'scripts/**'
-      - 'Glassless3DOverlay.exe'
-      - '.github/workflows/native-overlay-build.yml'
   workflow_dispatch:
 
 permissions:

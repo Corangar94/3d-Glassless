@@ -58,3 +58,5 @@ The cross-process named mutex, abandoned-writer recovery, uint32 version rollove
 ## Diagnostics
 
 Validation errors identify the rejected field. For example, a fractional `panel_width_px`, boolean `tracking_mode`, or text `strength_x` fails at the writer with a field-specific `ValueError`, allowing the calling UI or utility to report the real configuration problem instead of publishing a coercion.
+
+The 88-byte ABI is unchanged; validation hardens publication without altering the shared-memory layout.

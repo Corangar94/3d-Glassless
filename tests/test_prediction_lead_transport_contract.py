@@ -54,7 +54,7 @@ def test_signed_native_prediction_requires_declared_lead_validity():
     prediction = overlay.split(
         "const bool predictionLeadKnown =",
         1,
-    )[1].split("nativePrediction", 1)[0]
+    )[1].split("nativeResidualPredictionMs", 1)[0]
 
     assert "POSE_V2_PREDICTION_LEAD_VALID" in prediction
     assert "poseFresh && predictionLeadKnown" in prediction

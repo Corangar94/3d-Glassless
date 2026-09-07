@@ -14,12 +14,12 @@ def test_async_admission_precedes_mediapipe_image_conversion():
 
     health = process.index("watchdog.raise_if_unhealthy(media_timestamp_ms)")
     admission = process.index("watchdog.should_submit(")
-    conversion = process.index("image = self._mediapipe_image(frame_bgr)")
+    conversion = process.index("self._prepared_mediapipe_image(frame_bgr)")
     submission = process.index("self._landmarker.detect_async(")
 
     assert health < admission < conversion < submission
     assert "watchdog.record_throttled_submission()" in process
-    assert "return self._poll_latest()" in process[admission:conversion]
+    assert "return self._poll_latest(wire_timestamp_ms)" in process[admission:conversion]
 
 
 def test_submission_timeline_is_committed_only_after_detect_async_success():
@@ -50,7 +50,7 @@ def test_sync_mode_still_converts_and_detects_every_input():
     )[0]
 
     sync_tail = process.rsplit(
-        "image = self._mediapipe_image(frame_bgr)",
+        "self._prepared_mediapipe_image(frame_bgr)",
         1,
     )[1]
     assert "result = self._landmarker.detect(image)" in sync_tail

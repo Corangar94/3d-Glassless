@@ -475,6 +475,13 @@ class PoseJumpConfirmationGate:
         self._last_rejection_reason = ""
         return value
 
+    def _reject_duplicate_timestamp(self) -> None:
+        self._duplicate_timestamp_drop_count += 1
+        self._rejected_candidate_count += 1
+        self._last_rejection_reason = (
+            "pose jump confirmation received a duplicate timestamp"
+        )
+
     def filter(self, value: Any) -> Any:
         """Return an accepted pose-like value, or ``None`` while confirming."""
         self._synchronize_backend_transition()
@@ -497,12 +504,16 @@ class PoseJumpConfirmationGate:
         if delta_ms is None or delta_ms >= self._policy.reset_after_ms:
             return self._accept(value, sample)
         if delta_ms == 0:
-            self._duplicate_timestamp_drop_count += 1
-            self._rejected_candidate_count += 1
-            self._last_rejection_reason = (
-                "pose jump confirmation received a duplicate timestamp"
-            )
+            self._reject_duplicate_timestamp()
             return None
+        latest_candidate_ms = self._candidate_latest_timestamp_ms
+        if latest_candidate_ms is not None:
+            candidate_delta_ms = _forward_delta_ms(
+                sample.timestamp_ms, latest_candidate_ms
+            )
+            if candidate_delta_ms == 0:
+                self._reject_duplicate_timestamp()
+                return None
 
         # Once a candidate exists, confirmation remains relative to its first
         # geometry and one fixed total time window. This prevents rolling drift

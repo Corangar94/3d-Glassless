@@ -1,4 +1,5 @@
 #include "depth_result_freshness.h"
+#include "depth_progress_watchdog.h"
 
 #include <cassert>
 #include <cstdint>
@@ -111,6 +112,18 @@ static void test_reset_starts_a_new_depth_session() {
     assert(snapshot.stale_drop_count == 0);
 }
 
+static void test_outstanding_work_watchdog_is_bounded_and_adaptive() {
+    using g3d::depth::OutstandingWorkDeadlineMs;
+    using g3d::depth::OutstandingWorkTimedOut;
+    assert(OutstandingWorkDeadlineMs(0.0f) == 15'000);
+    assert(OutstandingWorkDeadlineMs(100.0f) == 5'000);
+    assert(OutstandingWorkDeadlineMs(1000.0f) == 8'000);
+    assert(OutstandingWorkDeadlineMs(5000.0f) == 15'000);
+    assert(!OutstandingWorkTimedOut(1000, 6000, 5000));
+    assert(OutstandingWorkTimedOut(1000, 6001, 5000));
+    assert(!OutstandingWorkTimedOut(1000, 999, 5000));
+}
+
 int main() {
     test_first_and_newer_sources_publish();
     test_exact_age_boundary_is_accepted();
@@ -122,5 +135,6 @@ int main() {
     test_zero_age_limit_disables_stale_rejection_only();
     test_age_conversion_saturates_to_uint32();
     test_reset_starts_a_new_depth_session();
+    test_outstanding_work_watchdog_is_bounded_and_adaptive();
     return 0;
 }

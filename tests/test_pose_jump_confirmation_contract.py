@@ -5,11 +5,15 @@ def _source(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def test_tracking_loop_uses_the_wrapped_admission_accept_method():
-    source = _source("tracker/main.py")
+def test_stability_runtime_filters_after_frame_processor_and_resets_with_capture():
+    source = _source("tracker/pose_stability_runtime.py")
 
-    assert "self._measurement_admission.accept(" in source
-    assert "self._measurement_admission.reset()" in source
+    frame_call = source.index("accepted = super()._process_frame(")
+    confirmation = source.index("return self._pose_jump_confirmation.filter(accepted)")
+    reset = source.index("self._pose_jump_confirmation.reset()")
+    parent_reset = source.index("return super()._reset_capture_session()")
+    assert frame_call < confirmation
+    assert reset < parent_reset
 
 
 def test_packaged_entrypoints_select_stability_runtime():

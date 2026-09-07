@@ -31,7 +31,7 @@ def test_depth_is_required_and_fallback_matches_depth_convention():
     assert "static bool InitDepth()" in overlay
     assert 'SetCaptureState(CaptureState::Unavailable, "depth_unavailable")' in overlay
     assert "uint16_t farDepth = 0x3C00u" in overlay
-    assert "g_depth != nullptr" in overlay
+    assert "g_depth && g_depth->depth_updates_published() > 0" in overlay
     assert "missing_overlay_runtime_assets" in launcher
     assert "runtime is incomplete" in launcher
 

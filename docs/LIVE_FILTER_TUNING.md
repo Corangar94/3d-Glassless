@@ -22,7 +22,7 @@ launcher manual control or TrackingAutoTuner
 
 `LiveFilterTuningTrackingLoop` subclasses the complete camera-recovery, pose-stability, and latest-frame stack. The normal source and frozen entrypoints select it lazily through `tracker.pose_stability_runtime.main()`.
 
-Direct callers of `TrackingLoop`, `LatestFrameTrackingLoop`, `StableLatestFrameTrackingLoop`, or `CameraControlRecoveryTrackingLoop` keep their existing static constructor behavior.
+Direct callers retain the configured measurement noise until a valid live value arrives. The base loop's `_apply_live_filter_settings()` validates direct-loop updates without applying defaults on missing data. When `LiveFilterTuningController` exists, the runtime overrides that hook so the controller is the sole noise writer. The base full-settings reader remains available for calibration, but cannot bypass smoothing bounds, polling intervals, or unchanged-version suppression.
 
 ## Admission and polling
 

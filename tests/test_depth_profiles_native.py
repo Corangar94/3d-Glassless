@@ -28,7 +28,8 @@ def test_adaptive_scheduler_uses_newest_frame_without_backlog():
     assert "last_inference_ms" in source
     assert "last_submit" in source
     assert "select_tiles" in source
-    assert "oldest_non_center_tile" in source
+    assert "oldest_tile" in source
+    assert "least-recently completed tile" in source
     assert "pending_tiles = selected" in source
     assert "worker_busy = input_pending || worker_running" in source
 
@@ -79,4 +80,5 @@ def test_max_profile_resources_are_reused_across_modes():
     assert "kMaxModelHeight = 392" in source
     assert "sd.Width = kMaxModelWidth * tile_count" in source
     assert "sd.Height = kMaxModelHeight" in source
-    assert "render_compact(captured, requested)" in source
+    assert "render_compact(captured, retained_profile)" in source
+    assert "retained_compact_bgra" in source

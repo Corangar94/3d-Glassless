@@ -139,6 +139,13 @@ class LiveFilterTuningTrackingLoop(CameraControlRecoveryTrackingLoop):
             # publication if a dynamically patched reader violates the contract.
             return False
 
+    def _apply_live_filter_settings(self, settings: Any) -> None:
+        # The controller is the sole noise writer, including during throttled,
+        # unavailable, unchanged-version, or rejected reads. Calibration still
+        # uses the base loop's independent full settings snapshot.
+        if self._live_filter_tuning is None:
+            super()._apply_live_filter_settings(settings)
+
     def _update_filter(self, pose: object) -> Any:
         self._poll_live_filter_tuning()
         return super()._update_filter(pose)

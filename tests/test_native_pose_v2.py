@@ -45,3 +45,18 @@ def test_pose_v2_mappings_are_released_at_shutdown():
     assert "CloseHandle(g_poseV2H)" in source
     assert "UnmapViewOfFile((void*)g_poseV2SeqView)" in source
     assert "CloseHandle(g_poseV2SeqH)" in source
+
+
+def test_pose_v2_attachment_retries_when_tracker_or_sequence_starts_late():
+    source = _source("overlay/overlay.cpp")
+    attach = source.split("static void TryAttachPoseV2()", 1)[1].split(
+        "static bool ReadStablePoseV2", 1
+    )[0]
+    frame_attach = source.split("static void Frame()", 1)[1].split(
+        "PollTargetWindow();", 1
+    )[0]
+
+    assert "if (g_poseV2View) return;" not in attach
+    assert "if (!g_poseV2H)" in attach
+    assert "if (!g_poseV2SeqH)" in attach
+    assert "TryAttachPoseV2();" in frame_attach

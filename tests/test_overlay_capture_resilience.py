@@ -100,14 +100,15 @@ def test_overlay_targets_configured_game_without_taking_focus_or_flashing_black(
     assert "WS_EX_TOOLWINDOW" in source
 
 
-def test_overlay_hides_target_frames_when_the_game_is_not_foreground_or_capture_is_stale():
+def test_overlay_hides_target_when_not_foreground_but_keeps_static_capture_visible():
     source = OVERLAY.read_text(encoding="utf-8")
 
     assert "GetForegroundWindow()" in source
     assert "foregroundPid == selectedPid" in source
-    assert "kCaptureFrameStaleMs" in source
+    assert "kCaptureFrameStaleMs" not in source
     assert "g_lastCaptureFrameMs" in source
-    assert "Overlay visibility:" in source
+    assert "capture_age_ms=%llu" in source
+    assert "g_targetExePath.empty() || targetForeground" in source
 
 
 def test_overlay_accepts_partially_masked_frames_but_recovers_uniform_black_capture():
@@ -278,9 +279,10 @@ def test_depth_worker_run_can_be_terminated_before_join():
     assert "std::unique_ptr<Ort::RunOptions> run_options;" in source
     assert "fixed.session->Run(" in source
     assert "*fixed.run_options" in source
-    assert "for (auto& fixed : profile_sessions)" in source
-    assert "fixed.run_options->SetTerminate();" in source
-    assert source.index("fixed.run_options->SetTerminate();") < source.index(
+    assert "std::atomic<Ort::RunOptions*>" in source
+    assert "active_run_options.store(" in source
+    assert "active->SetTerminate();" in source
+    assert source.index("request_worker_termination();") < source.index(
         "worker.join()"
     )
 
@@ -308,3 +310,45 @@ def test_depth_rate_handles_inference_counter_reset_after_recovery():
     source = OVERLAY.read_text(encoding="utf-8")
 
     assert "infNow >= lastInferences" in source
+
+
+def test_depth_pipeline_progresses_without_a_new_capture_and_recovers_worker_failures():
+    overlay = OVERLAY.read_text(encoding="utf-8")
+    depth = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+    header = Path("overlay/depth_infer.h").read_text(encoding="utf-8")
+
+    assert "bool poll();" in header
+    assert "return impl_->run_once(nullptr);" in depth
+    assert "retained_compact_pending" in depth
+    assert "latest_capture_generation.store(" in depth
+    assert "ctx->CopyResource(stage_bgra[stage_write], retained_compact_bgra)" in depth
+    assert "worker_failed = true" in depth
+    assert "OutstandingWorkTimedOut(" in depth
+    assert "if (worker_failed && !worker_timed_out) return false" in depth
+    assert "request_worker_termination()" in depth
+    assert "g_depth && !g_depth->poll()" in overlay
+    assert '"depth_timeout" : "depth_failed"' in overlay
+    assert "QueueCaptureSignal(CaptureSignal::RebindRetry, reason)" in overlay
+
+
+def test_depth_recovery_waits_for_sustained_publication_in_a_new_session():
+    source = OVERLAY.read_text(encoding="utf-8")
+    recovery = source.split("static void TickDepthRecovery()", 1)[1].split(
+        "static bool IsUnavailableDuplicationFailure", 1
+    )[0]
+    assert "g_depthRecovery.MarkFailure()" in source
+    assert "g_depthRecovery.SessionStarted()" in source
+    assert recovery.index("if (g_depthRecoveryPending)") < recovery.index("g_depthRecovery.Observe(")
+    assert "g_rebindRetry.Reset(now)" in recovery
+    assert "if (!g_depthRecovery.active())" in source
+
+
+def test_dml_copy_fence_wait_is_bounded_for_recoverable_teardown():
+    depth = Path("overlay/depth_infer.cpp").read_text(encoding="utf-8")
+
+    wait_block = depth.split("bool execute_copy_commands_and_wait()", 1)[1].split(
+        "bool initialize_gpu_io(", 1
+    )[0]
+    assert "kFenceWaitTimeoutMs" in wait_block
+    assert "WaitForSingleObject" in wait_block
+    assert "INFINITE" not in wait_block

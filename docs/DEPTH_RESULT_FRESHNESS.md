@@ -4,10 +4,10 @@ The DirectML depth worker is sequential, but upload time is not the same as sour
 
 ## Source identity
 
-Every desktop frame staged for depth inference now receives:
+Every desktop frame submitted to depth inference receives:
 
 - a nonzero, monotonically increasing source generation; and
-- the steady-clock timestamp recorded when the captured texture enters the depth staging ring.
+- the steady-clock timestamp recorded when the immutable compact capture is retained, before any busy/rate-limit wait.
 
 That identity travels with the frame through all five asynchronous states:
 
@@ -22,12 +22,12 @@ The pixel/tensor buffers may continue to move or swap independently, but their s
 A completed result may update the current depth texture only when:
 
 1. its source generation is nonzero;
-2. its generation is newer than the last published generation; and
-3. its source frame is no more than 750 ms old at the upload boundary.
+2. its generation is newer, or it is the single permitted partial-to-complete upgrade of the same generation and original timestamp; and
+3. its source is no more than 750 ms old, or every tile describes the exact capture still held on screen.
 
-The exact 750 ms boundary is accepted. A result at 751 ms is discarded without touching the current/previous depth textures, blend start time, or last valid source timestamp.
+For changing scenes and partial atlases, the exact 750 ms boundary is accepted; an obsolete result at 751 ms is discarded without touching the accepted GPU textures or blend. A complete result for an unchanged held image is accepted even when late. This exemption requires matching capture generation **and timestamp**, plus actual per-tile coverage. It does not restamp pixels or exempt obsolete results.
 
-The 750 ms budget matches the native parallax-health point where depth contribution already reaches zero. A result too old to contribute therefore cannot masquerade as new merely because its GPU upload happens now.
+Fast-mode batches retain per-tile source identities. A batch generation is not proof of full-image coverage. During continuous capture, fast mode selects the least-recently completed tile each pass so every region receives a bounded share of available inference capacity. After 200 ms without a new capture, polling schedules one all-tile completion pass using the retained compact pixels and original source metadata. Once accepted, that pass is not repeated. This also closes the dead end after a late partial result is rejected.
 
 ## Temporal-history isolation
 
@@ -39,7 +39,7 @@ This reset is safe at the handoff boundary: `output_ready` is set only after the
 
 ## Depth age semantics
 
-`DepthInferencer::depth_age_ms()` now reports the age of the captured desktop frame that produced the currently published depth. It returns `UINT32_MAX` until a source-aware result has actually been published.
+`DepthInferencer::depth_age_ms()` reports the oldest inferred tile's source age. It returns `UINT32_MAX` until every tile has a real inferred source. `latest_depth_generation()` describes the newest batch; `complete_depth_generation()` is nonzero only when the entire atlas belongs to one capture. Only complete coverage matching the held capture enables the static-scene health exemption.
 
 `depth_upload_age_ms()` retains the former diagnostic: elapsed time since the accepted depth texture upload. Keeping both values distinguishes an old source uploaded recently from a genuinely current depth map.
 
@@ -47,7 +47,11 @@ This reset is safe at the handoff boundary: `output_ready` is set only after the
 
 A stale or nonmonotonic completion is a controlled drop, not a device failure. The previous valid depth remains available while the next capture can be staged normally.
 
-The first-window visibility guard now requires at least one accepted depth publication rather than merely one completed inference. A stale first inference cannot reveal the initial flat 0.5 depth texture.
+Visibility is now an explicit, pure predicate requiring a running capture session, a valid captured image, an accepted depth publication, and target foreground eligibility. It neither clears capture validity nor calls `run()`. The old `ShowWindow` macro interceptor is removed. Completing the first inference during an idle poll can reveal the overlay without another capture.
+
+A pending worker failure is handled before any recovery success check. Retry backoff survives initialization and old publications from the failed session. Only a new session can prove recovery: two seconds of healthy depth plus repeated publication, or a fully covered held image. No-frame intervals alone are not failures.
+
+Outstanding inference work is separately monitored for progress. The deadline is adaptive and bounded between 5 and 15 seconds; it is not armed when the pipeline is idle. If pending/running work exceeds that deadline, the inferencer reports failure, publishes the distinct `depth_timeout` capture reason, and requests ONNX Runtime termination so the existing capture/rebind recovery path can retire the session. DirectML fence waits are finite as well, preventing the worker from intentionally waiting forever at the copy boundary.
 
 ## Diagnostics
 

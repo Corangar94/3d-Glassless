@@ -22,7 +22,8 @@ def test_measurement_gap_reset_precedes_every_axis_update():
 
 def test_prediction_does_not_apply_measurement_gap_reset():
     source = _source("tracker/pose_filter.py")
-    predict = source.split("    def predict(", 1)[1].split(
+    adaptive = source.split("class AdaptivePoseFilter:", 1)[1]
+    predict = adaptive.split("    def predict(", 1)[1].split(
         "    def update(",
         1,
     )[0]

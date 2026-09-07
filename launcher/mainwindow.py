@@ -9,7 +9,7 @@ import statistics
 import os
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import copy
 import dataclasses
@@ -112,6 +112,8 @@ _ACCENT = "#f0c15a"
 _ADVANCED_BG = "#0d0d22"
 _DEPTH_HZ_WARN = 6
 _CAPTURE_LOSS_RESTART_THRESHOLD = 3
+_OVERLAY_TELEMETRY_STALL_RESTART_THRESHOLD = 3
+_OVERLAY_TELEMETRY_MISSING_RESTART_THRESHOLD = 15
 _DEPTH_MODES = {
     "quality": 0,
     "balanced": 1,
@@ -316,12 +318,16 @@ class MainWindow(QMainWindow):
         self._selected_running_target: RunningGameWindow | None = None
         self._hidden_for_overlay = False
         self._capture_loss_count = 0
+        self._overlay_summary_stall_count = 0
+        self._overlay_summary_missing_count = 0
+        self._last_overlay_summary_frame_count: int | None = None
         self._runtime_requested = False
         self._recovery_generation = 0
         self._tracker_failure_reason: str | None = None
         self._tracker_recovery_pending = False
         self._overlay_recovery_pending = False
         self._recovery_paused = False
+        self._recovery_timers: set[QTimer] = set()
         recovery_config = config.get("recovery", {})
         if not isinstance(recovery_config, dict):
             recovery_config = {}
@@ -1194,6 +1200,7 @@ class MainWindow(QMainWindow):
         if status not in ("tracking", "hold", "paused") or self._overlay_started:
             return
         self._overlay_started = True
+        self._reset_overlay_telemetry_watchdog()
         if self._thread:
             self._thread.status_changed.disconnect(self._on_tracker_status_for_overlay)
         try:
@@ -1232,6 +1239,7 @@ class MainWindow(QMainWindow):
             self._tracker_stop_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
+        self._reset_overlay_telemetry_watchdog()
         if self._hidden_for_overlay:
             self._hidden_for_overlay = False
             self.showNormal()
@@ -1259,7 +1267,7 @@ class MainWindow(QMainWindow):
             self._tracker_failure_reason = None
             if reason == "manual recovery":
                 generation = self._recovery_generation
-                QTimer.singleShot(
+                self._schedule_recovery_timer(
                     0,
                     lambda token=generation: self._execute_tracker_recovery(token),
                 )
@@ -1365,6 +1373,24 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_overlay_tile"):
                 self._overlay_tile.setText("Overlay\nIdle")
 
+    def _schedule_recovery_timer(
+        self, delay_ms: int, callback: Callable[[], None]
+    ) -> None:
+        """Run one recovery callback on a timer owned by this window."""
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        self._recovery_timers.add(timer)
+
+        def fire() -> None:
+            self._recovery_timers.discard(timer)
+            try:
+                callback()
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(fire)
+        timer.start(max(0, int(delay_ms)))
+
     def _refresh_runtime_health(self) -> None:
         summary = self._read_overlay_summary()
         self._apply_runtime_health(summary)
@@ -1388,15 +1414,57 @@ class MainWindow(QMainWindow):
         overlay_log = _find_overlay_log(None)
         return _latest_overlay_summary(overlay_log) if overlay_log else None
 
+    def _reset_overlay_telemetry_watchdog(self) -> None:
+        self._overlay_summary_stall_count = 0
+        self._overlay_summary_missing_count = 0
+        self._last_overlay_summary_frame_count = None
+
+    def _observe_overlay_telemetry(
+        self, summary: OverlayRuntimeSummary | None
+    ) -> bool:
+        if (
+            not self._overlay_started
+            or not self._tracker_is_running()
+            or self._overlay.is_transitioning() is True
+            or not self._overlay.is_running()
+            or self._overlay_recovery_pending
+        ):
+            return False
+        if summary is None:
+            self._overlay_summary_missing_count += 1
+            self._overlay_summary_stall_count = 0
+            self._last_overlay_summary_frame_count = None
+            if self._overlay_summary_missing_count >= _OVERLAY_TELEMETRY_MISSING_RESTART_THRESHOLD:
+                self._restart_overlay_from_health("runtime telemetry unavailable")
+                return True
+            return False
+        self._overlay_summary_missing_count = 0
+        frame_count = int(summary.frame_count)
+        if self._last_overlay_summary_frame_count == frame_count:
+            self._overlay_summary_stall_count += 1
+        else:
+            self._overlay_summary_stall_count = 0
+            self._last_overlay_summary_frame_count = frame_count
+        if self._overlay_summary_stall_count >= _OVERLAY_TELEMETRY_STALL_RESTART_THRESHOLD:
+            self._restart_overlay_from_health("runtime telemetry stalled")
+            return True
+        return False
+
     def _apply_runtime_health(self, summary: OverlayRuntimeSummary | None) -> None:
         # A fresh log line may belong to a just-finished diagnostic or an older
         # launcher instance. Never show it as current while this window is
         # explicitly stopped.
         if not self._overlay_started:
+            self._reset_overlay_telemetry_watchdog()
             self._shm_tile.setText("SHM\nIdle")
             self._depth_tile.setText("Depth\nIdle")
             self._capture_tile.setText("Capture\nIdle")
             self._update_target_feedback()
+            return
+
+        # Process state is authoritative even before the first parseable log line.
+        self._maybe_recover_overlay(summary)
+        if self._observe_overlay_telemetry(summary):
             return
         if summary is None:
             self._shm_tile.setText("SHM\nWaiting")
@@ -1410,7 +1478,6 @@ class MainWindow(QMainWindow):
         if self._tracking_status == "tracking" and self._tracker_is_running():
             self._recovery.mark_healthy("tracker")
 
-        self._maybe_recover_overlay(summary)
         if (
             summary.has_frame
             and summary.capture_state == "running"
@@ -1478,7 +1545,7 @@ class MainWindow(QMainWindow):
     def _tracker_is_running(self) -> bool:
         return bool(self._thread is not None and self._thread.isRunning())
 
-    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary) -> None:
+    def _maybe_recover_overlay(self, summary: OverlayRuntimeSummary | None) -> None:
         if (
             not self._runtime_requested
             and self._overlay_started
@@ -1498,6 +1565,19 @@ class MainWindow(QMainWindow):
         if not self._overlay.is_running():
             self._restart_overlay_from_health("process exited")
             return
+        if summary is None:
+            return
+
+        if (
+            summary.capture_state in {"unavailable", "rebinding"}
+            and summary.capture_reason in {
+                "depth_failed", "depth_timeout", "depth_unavailable"
+            }
+        ):
+            self._capture_loss_count += 1
+            if self._capture_loss_count >= _CAPTURE_LOSS_RESTART_THRESHOLD:
+                self._restart_overlay_from_health("depth failure")
+            return
 
         if summary.capture_state in {"unavailable", "rebinding", "device_recovery"}:
             self._capture_loss_count = 0
@@ -1515,6 +1595,7 @@ class MainWindow(QMainWindow):
         if self._overlay_recovery_pending or not self._runtime_requested:
             return
         self._capture_loss_count = 0
+        self._reset_overlay_telemetry_watchdog()
         decision = self._recovery.record_failure("overlay", reason)
         if not decision.allowed:
             self._pause_recovery("overlay", decision.reason, decision.delay_s)
@@ -1528,7 +1609,7 @@ class MainWindow(QMainWindow):
             self._overlay_tile.setText(
                 f"Overlay\nRetry {decision.delay_s:.0f}s"
             )
-        QTimer.singleShot(
+        self._schedule_recovery_timer(
             max(1, int(round(decision.delay_s * 1000.0))),
             lambda token=generation, why=reason: self._execute_overlay_recovery(
                 token, why
@@ -1572,7 +1653,7 @@ class MainWindow(QMainWindow):
         self._action_btn.setText("■ CANCEL RECOVERY")
         self._action_btn.setEnabled(True)
         if decision.delay_s <= 0.0:
-            QTimer.singleShot(
+            self._schedule_recovery_timer(
                 0,
                 lambda token=generation: self._execute_tracker_recovery(token),
             )
@@ -1580,7 +1661,7 @@ class MainWindow(QMainWindow):
             self._status_label.setToolTip(
                 f"Tracker recovery after {reason}; retry in {decision.delay_s:.1f}s"
             )
-            QTimer.singleShot(
+            self._schedule_recovery_timer(
                 max(1, int(round(decision.delay_s * 1000.0))),
                 lambda token=generation: self._execute_tracker_recovery(token),
             )
@@ -1594,7 +1675,7 @@ class MainWindow(QMainWindow):
         if generation != self._recovery_generation or not self._runtime_requested:
             return
         if self._tracker_stop_pending:
-            QTimer.singleShot(
+            self._schedule_recovery_timer(
                 100,
                 lambda token=generation: self._execute_tracker_recovery(token),
             )
@@ -1617,6 +1698,7 @@ class MainWindow(QMainWindow):
         self._overlay_recovery_pending = False
         self._overlay.stop_async()
         self._overlay_started = False
+        self._reset_overlay_telemetry_watchdog()
         if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
@@ -1641,7 +1723,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_overlay_tile"):
             self._overlay_tile.setText("Overlay\nPaused")
         generation = self._recovery_generation
-        QTimer.singleShot(
+        self._schedule_recovery_timer(
             max(1, int(round(retry_after_s * 1000.0))),
             lambda token=generation, name=component: self._resume_recovery_after_cooldown(
                 token, name
@@ -1662,7 +1744,7 @@ class MainWindow(QMainWindow):
             return
         snapshot = self._recovery.snapshot(component)
         if snapshot.circuit_open:
-            QTimer.singleShot(
+            self._schedule_recovery_timer(
                 max(1, int(round(snapshot.retry_after_s * 1000.0))),
                 lambda token=generation, name=component: self._resume_recovery_after_cooldown(
                     token, name
@@ -1688,6 +1770,7 @@ class MainWindow(QMainWindow):
         self._tracker_failure_reason = "manual recovery"
         self._overlay.stop_async()
         self._overlay_started = False
+        self._reset_overlay_telemetry_watchdog()
         if self._thread is not None and self._thread.isRunning():
             self._tracker_stop_pending = True
             self._thread.stop()
@@ -1697,7 +1780,7 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._tracker_stop_pending = False
         generation = self._recovery_generation
-        QTimer.singleShot(
+        self._schedule_recovery_timer(
             0,
             lambda token=generation: self._execute_tracker_recovery(token),
         )
@@ -2246,6 +2329,19 @@ class MainWindow(QMainWindow):
             self._status_label.setToolTip(f"Could not collect support bundle: {e}")
 
     def closeEvent(self, event: object) -> None:
+        # Invalidate delayed recovery callbacks and stop every child timer before
+        # Qt destroys widgets. The generation check remains a second ownership gate
+        # for callbacks that were already delivered to the event queue.
+        self._runtime_requested = False
+        self._recovery_generation += 1
+        self._tracker_recovery_pending = False
+        self._overlay_recovery_pending = False
+        for timer in tuple(self._recovery_timers):
+            timer.stop()
+            timer.deleteLater()
+        self._recovery_timers.clear()
+        if hasattr(self, "_health_timer"):
+            self._health_timer.stop()
         if self._thread and self._thread.isRunning():
             self._thread.stop()
         # The interpreter can exit as soon as this event is accepted. Reap the

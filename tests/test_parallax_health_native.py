@@ -58,3 +58,18 @@ def test_health_telemetry_is_logged_for_support_bundles():
     assert "ParallaxHealth scale=%.3f target=%.3f" in source
     assert "pose_age_ms=%u" in source
     assert "depth_age_ms=%u" in source
+
+
+def test_static_capture_keeps_accepted_depth_healthy_without_masking_active_staleness():
+    header = _source("overlay/parallax_health.h")
+    source = _source("overlay/overlay.cpp")
+
+    assert "DepthAgeForHealth" in header
+    assert "kCaptureActivityWindowMs = 200" in header
+    assert "capture_age_ms > kCaptureActivityWindowMs" in header
+    assert "effectiveDepthAgeMs" in source
+    assert "DepthAgeForHealth(" in source
+    assert "depth_updates_published() > 0" in source
+    assert "depthMatchesHeldFrame = PublishedDepthMatchesHeldCapture()" in source
+    assert "complete_depth_generation()" in source
+    assert "latest_capture_generation()" in source

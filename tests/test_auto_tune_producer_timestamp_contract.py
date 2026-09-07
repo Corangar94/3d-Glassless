@@ -8,16 +8,13 @@ def _source(path: str) -> str:
 def test_tracker_process_emits_status_before_legacy_and_timestamped_pose():
     source = _source("launcher/tracker_process.py")
     poll = source.split("    def _poll(self) -> None:", 1)[1]
-    fresh = poll.split("        if ts != self._last_ts:", 1)[1].split(
-        "        else:\n            stale_ms",
-        1,
-    )[0]
 
-    status = fresh.index("self.status_changed.emit(")
-    legacy = fresh.index("self.position_updated.emit(")
-    sampled = fresh.index("self.position_sampled.emit(")
+    status = poll.index("self._emit_status(state_decision.status)")
+    commit = poll.index("self._last_ts = accepted_timestamp_ms")
+    legacy = poll.index("self.position_updated.emit(")
+    sampled = poll.index("self.position_sampled.emit(")
 
-    assert status < legacy < sampled
+    assert status < commit < legacy < sampled
     assert "position_updated = Signal(float, float, float)" in source
     assert "position_sampled = Signal(float, float, float, object)" in source
 
@@ -56,7 +53,7 @@ def test_producer_time_enters_tuner_but_local_time_keeps_write_throttle():
     accept = timestamped.index("_auto_tune_sample_timeline.accept(")
     arm = timestamped.index("arm(sample_time_s)")
     base_slot = timestamped.index(
-        "super()._on_position(x_cm, y_cm, z_cm)"
+        "self._dispatch_position_with_publication_gate("
     )
     assert accept < arm < base_slot
 
@@ -76,7 +73,7 @@ def test_invalid_producer_order_is_dropped_not_retimed():
 
     rejection = timestamped.index("if sample_time_s is None:")
     return_index = timestamped.index("return", rejection)
-    base_slot = timestamped.index("super()._on_position(")
+    base_slot = timestamped.index("self._dispatch_position_with_publication_gate(")
 
     assert rejection < return_index < base_slot
     assert "time.monotonic" not in timestamped
