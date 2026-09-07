@@ -191,3 +191,30 @@ def test_stalled_runtime_summary_triggers_process_level_recovery(qapp, tmp_path)
         restart.assert_not_called()
         window._apply_runtime_health(summary)
     restart.assert_called_once_with("runtime telemetry stalled")
+
+
+def test_close_event_invalidates_delayed_recovery_callbacks(qapp, tmp_path):
+    window = _health_window(qapp, tmp_path)
+    window._overlay.is_running.return_value = True
+    window._overlay_recovery_pending = True
+    window._tracker_recovery_pending = True
+    generation = window._recovery_generation
+    event = MagicMock()
+    fired = []
+    window._schedule_recovery_timer(1, lambda: fired.append(True))
+    assert len(window._recovery_timers) == 1
+
+    window.closeEvent(event)
+    qapp.processEvents()
+
+    assert not window._runtime_requested
+    assert window._recovery_generation == generation + 1
+    assert not window._overlay_recovery_pending
+    assert not window._tracker_recovery_pending
+    assert not window._recovery_timers
+    assert fired == []
+    window._overlay.stop.assert_called_once()
+    event.accept.assert_called_once()
+
+    window._execute_overlay_recovery(generation, "obsolete timer")
+    window._overlay.restart_async.assert_not_called()

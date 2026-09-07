@@ -203,7 +203,7 @@ def test_native_recovery_cancels_queued_delayed_overlay_restart(window):
     window._active_profile = MagicMock(executable_path=r"C:\Games\Game.exe")
     window._recovery.record_failure("overlay", "first episode")
 
-    with patch("launcher.mainwindow.QTimer.singleShot") as single_shot:
+    with patch.object(window, "_schedule_recovery_timer") as single_shot:
         window._restart_overlay_from_health("second episode")
 
     assert window._overlay_recovery_pending is True
@@ -227,7 +227,7 @@ def test_open_circuit_pauses_automatic_runtime_and_surfaces_retry(window):
     window._hidden_for_overlay = True
     window.showNormal = MagicMock()
 
-    with patch("launcher.mainwindow.QTimer.singleShot") as single_shot:
+    with patch.object(window, "_schedule_recovery_timer") as single_shot:
         window._pause_recovery("overlay", "repeated crash", 60.0)
 
     assert window._runtime_requested is False
@@ -248,7 +248,7 @@ def test_pause_with_already_finished_tracker_does_not_wait_for_stopped_signal(wi
     window._runtime_requested = True
     window._overlay = MagicMock()
 
-    with patch("launcher.mainwindow.QTimer.singleShot"):
+    with patch.object(window, "_schedule_recovery_timer"):
         window._pause_recovery("tracker", "repeated failure", 60.0)
 
     tracker.stop.assert_not_called()
