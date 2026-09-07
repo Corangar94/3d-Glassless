@@ -26,6 +26,16 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _dispose_mainwindow_after_test(qapp):
+    yield
+    for widget in list(QApplication.topLevelWidgets()):
+        if isinstance(widget, MainWindow):
+            widget.close()
+            widget.deleteLater()
+    qapp.processEvents()
+
+
 def test_periodic_health_tick_advances_tracker_and_overlay_stability(qapp, tmp_path):
     with patch("launcher.mainwindow.TrackerProcess"):
         window = MainWindow(
